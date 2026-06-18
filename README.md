@@ -198,4 +198,3 @@ respective repositories.
 ## Contact
 
 - **Issues**: [GitHub Issues](https://github.com/Vexillon-ai/MIRA/issues)
-- **Email**: tarek_eldiab@outlook.com
