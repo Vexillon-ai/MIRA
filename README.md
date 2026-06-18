@@ -111,9 +111,23 @@ The core is **Rust** (~156k LOC) for a small, memory-safe, edge-deployable footp
 
 ## Install
 
-> **Public beta.** Grab a signed build from the [**Releases**](https://github.com/Vexillon-ai/MIRA/releases) page (every archive ships with a `SHA256SUMS` and a minisign `.minisig` signature).
+> **Public beta.** Every release archive ships with a `SHA256SUMS` and a minisign `.minisig` signature — see [verifying a download](#verify-a-download) below.
 
-**Download a release build** — pick the archive for your platform from [Releases](https://github.com/Vexillon-ai/MIRA/releases), extract the `mira` binary onto your `PATH`, then run the guided setup:
+**Quick install** — Linux / macOS:
+
+```bash
+curl -fsSL https://get.vexillon.ai/install.sh | sh
+```
+
+**Quick install** — Windows (PowerShell):
+
+```powershell
+irm https://get.vexillon.ai/install.ps1 | iex
+```
+
+The installer detects your platform, downloads and verifies the signed build, places `mira` on your `PATH`, and runs the guided `mira setup`. Pin a version with `… | sh -s -- --version 0.272.0` (or `-Version 0.272.0` on Windows).
+
+**Or download manually** — grab the archive for your platform from [Releases](https://github.com/Vexillon-ai/MIRA/releases), extract the `mira` binary onto your `PATH`, then run the guided setup:
 
 ```bash
 mira setup        # admin account, LLM provider, security
@@ -132,7 +146,7 @@ The compose file mounts `./data` into the container at `/data` (config, history 
 
 See the [installation guide](docs/getting-started/installation.md) for the full deployment matrix.
 
-**Verify a download:**
+### Verify a download
 
 ```bash
 sha256sum -c SHA256SUMS
