@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src=".github/assets/mira-logo.png" alt="MIRA" width="180" />
+<img src=".github/assets/mira-hero-banner.png" alt="MIRA" width="100%" />
 
 # MIRA
 
