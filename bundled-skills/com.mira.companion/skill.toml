@@ -1,0 +1,25 @@
+[skill]
+id            = "com.mira.companion"
+version       = "0.1.0"
+display_name  = "Companion mode"
+description   = "A long-running 'friend' role for users who'd benefit from regular, warm conversation — typically configured by a family member for someone living alone. Persistent persona via the user's wiki, opt-in per user, with a configured safety contact for escalation. Once enabled, MIRA biases toward conversational engagement instead of task-driven replies. Use these tools to enable / disable / pause / resume the mode, or to update settings like quiet hours, preferred channels, the safety contact, and check-in cadence."
+authors       = ["MIRA Team <hello@mira.dev>"]
+license       = "MIT"
+# System skill: tools, scheduler, and UI ship in the binary — the manifest
+# only exposes them. Can be enabled/disabled per user but never uninstalled.
+system        = true
+
+[permissions]
+network_egress = []
+filesystem     = []
+subprocess     = false
+secrets        = []
+llm_providers  = ["primary"]
+
+[tools]
+status    = { kind = "builtin", impl = "companion_status" }
+enable    = { kind = "builtin", impl = "companion_enable" }
+disable   = { kind = "builtin", impl = "companion_disable" }
+pause     = { kind = "builtin", impl = "companion_pause" }
+resume    = { kind = "builtin", impl = "companion_resume" }
+configure = { kind = "builtin", impl = "companion_configure" }

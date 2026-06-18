@@ -1,0 +1,258 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.header {
+  padding: 24px 32px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+.header h1 { font-size: 20px; margin-bottom: 4px; }
+.header p  { font-size: 13px; color: var(--text-muted); }
+
+.loading, .empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 32px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.emptyInline {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 8px 0;
+}
+
+.createForm {
+  margin: 16px 32px;
+  padding: 20px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.createForm h3 { font-size: 14px; color: var(--text-primary); }
+
+.formRow {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.input, .select {
+  padding: 8px 12px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+.input:focus, .select:focus { border-color: var(--accent); }
+.input  { flex: 1; min-width: 140px; }
+.select { min-width: 200px; }
+
+.formActions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.error { font-size: 12px; color: var(--error); }
+
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 16px 32px;
+}
+
+.groupCard {
+  margin: 6px 0;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  overflow: hidden;
+  transition: border-color var(--transition);
+}
+.groupCard:hover { border-color: var(--border-subtle); }
+
+.groupHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  cursor: pointer;
+}
+.groupHeader:hover { background: var(--sidebar-hover); }
+
+.avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-full);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-light);
+  flex-shrink: 0;
+}
+
+.info {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.name { font-size: 14px; color: var(--text-primary); font-weight: 500; }
+.meta { font-size: 12px; color: var(--text-muted); }
+
+.iconBtn {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition);
+}
+.iconBtn:hover:not(.danger) {
+  background: var(--sidebar-hover);
+  color: var(--text-primary);
+}
+.danger:hover {
+  background: rgba(242, 92, 92, 0.15);
+  color: var(--error);
+}
+
+.btn, .btnSmall {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-md);
+  color: white;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all var(--transition);
+}
+.btn:hover:not(:disabled), .btnSmall:hover:not(:disabled) { background: var(--accent-light); }
+.btn:disabled, .btnSmall:disabled { opacity: 0.6; cursor: not-allowed; }
+.btnSmall { padding: 6px 10px; font-size: 12px; }
+
+.btnSecondary {
+  padding: 8px 14px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all var(--transition);
+}
+.btnSecondary:hover { background: var(--border); }
+
+/* ── Member panel (expanded) ─────────────────────────────────────────── */
+
+.memberPanel {
+  padding: 12px 16px 16px 64px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-overlay);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.memberHead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.addRow {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.memberList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.memberItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+}
+.memberItem:hover { background: var(--sidebar-hover); }
+
+.memberAvatar {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.memberName {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary);
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.memberHandle { font-size: 11px; color: var(--text-muted); }
+
+.memberRole {
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.memberRole[data-role="admin"] {
+  background: var(--accent-dim);
+  color: var(--accent-light);
+  border: 1px solid var(--accent-border);
+}
+.memberRole[data-role="user"] {
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}

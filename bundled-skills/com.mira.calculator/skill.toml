@@ -1,0 +1,19 @@
+[skill]
+id            = "com.mira.calculator"
+version       = "0.1.0"
+display_name  = "Calculator"
+description   = "Arithmetic and date math. Use whenever the user asks for a computation rather than estimating in your head — math_eval guarantees correct answers."
+authors       = ["MIRA Team <hello@mira.dev>"]
+license       = "MIT"
+
+[permissions]
+network_egress = []
+filesystem     = []
+subprocess     = false
+secrets        = []
+llm_providers  = []
+
+[tools]
+math      = { kind = "builtin", impl = "math_eval" }
+date_math = { kind = "builtin", impl = "date_math" }
+now       = { kind = "builtin", impl = "now" }

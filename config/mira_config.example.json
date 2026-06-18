@@ -1,0 +1,332 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// MIRA Configuration — Example / Template
+// Multi-tasking Intelligent Responsive Assistant
+// "Your life's loyal partner. Always ready to assist."
+//
+// FILE FORMAT
+//   This file uses JSONC (JSON with Comments) for documentation purposes.
+//   Your actual config file must be plain JSON (no comments).
+//
+// WHERE YOUR CONFIG LIVES  (generated automatically on first run)
+//   Linux / macOS : ~/.mira/config/mira_config.json
+//   Windows       : %USERPROFILE%\.mira\config\mira_config.json
+//
+// HOW TO USE THIS FILE
+//   1. Copy this file to the location above.
+//   2. Remove all // comment lines (or strip them with: sed '/^\s*\/\//d').
+//   3. Fill in values for your environment.
+//   4. Run `mira` — it will validate the config before starting.
+//
+// SCHEMA
+//   A machine-readable JSON Schema lives alongside this file:
+//     config/mira_config.schema.json
+//   Use it in VS Code by adding: "$schema": "./mira_config.schema.json"
+//   to the top of your config for inline validation and autocomplete.
+//
+// COMMAND-LINE OVERRIDE
+//   Point MIRA at a different config file:
+//     mira --config /path/to/your/mira_config.json
+//
+// PRINT THIS TEMPLATE AT ANY TIME
+//   mira --print-config-template
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  // Schema version — do not edit. MIRA uses this to detect when a migration
+  // is needed. Currently only version "1" exists.
+  "config_version": "1",
+
+  // ── Data directory ──────────────────────────────────────────────────────────
+  // Root directory for all MIRA data: SQLite databases, conversation history,
+  // exported files. Supports ~ for the home directory.
+  "data_dir": "~/.mira/data",
+
+  // ── Primary provider ────────────────────────────────────────────────────────
+  // Which AI provider MIRA uses by default for chat.
+  // Must be one of: "ollama" | "lmstudio" | "openrouter"
+  // Can be switched at runtime with: /provider-use <name>
+  "primary_provider": "lmstudio",
+
+  // ── Providers ───────────────────────────────────────────────────────────────
+  // Configure only the providers you plan to use. Unused sections are ignored.
+  "providers": {
+
+    // Ollama — local inference, zero cloud dependency (https://ollama.com)
+    // Start with: ollama serve
+    "ollama": {
+      // Base URL of the Ollama API. Overridden by the OLLAMA_HOST env var.
+      "url": "http://localhost:11434",
+      // Model to use. Run 'ollama list' to see installed models.
+      // Pull a model with: ollama pull llama3.2
+      "default_model": "llama3.2",
+      // Request timeout in seconds. Increase for large models on slow hardware.
+      "timeout_secs": 120
+    },
+
+    // LM Studio — local inference with a graphical model manager (https://lmstudio.ai)
+    // Load a model in LM Studio, then start "Local Server" from the app.
+    "lmstudio": {
+      // Base URL of the LM Studio OpenAI-compatible API.
+      "url": "http://localhost:1234",
+      // Model name exactly as shown in the LM Studio UI.
+      "default_model": "local-model",
+      // Increase to 600 for very large models (70B+).
+      "timeout_secs": 300
+    },
+
+    // OpenRouter — cloud gateway to 100+ models (https://openrouter.ai)
+    // Requires an account and API key: https://openrouter.ai/keys
+    "openrouter": {
+      // API key. Prefer setting OPENROUTER_API_KEY env var instead of storing
+      // the key in this file. The env var always takes precedence.
+      "api_key": null,
+      // API base URL — change only if using a self-hosted compatible gateway.
+      "base_url": "https://openrouter.ai/api/v1",
+      // Default model. Browse the full list at https://openrouter.ai/models
+      "default_model": "meta-llama/llama-3.2-3b-instruct"
+    }
+  },
+
+  // ── CLI settings ────────────────────────────────────────────────────────────
+  // Applied when running in simple reedline mode (mira --simple).
+  "cli": {
+    // Enable ANSI colour codes. Disable if your terminal does not support them.
+    "colored_output": true,
+    // Stream tokens as they arrive instead of waiting for the full response.
+    "streaming": true,
+    // Input prompt string.
+    "prompt": "> "
+  },
+
+  // ── TUI settings ────────────────────────────────────────────────────────────
+  // Default appearance for the rich terminal UI (default mode, no --simple).
+  // All of these can be changed at runtime via slash commands or hotkeys.
+  "tui": {
+    // Colour theme. Switch at runtime: /theme <name> or press F5.
+    // Available: "mira-dark" | "mira-light" | "dracula" | "gruvbox" | "nord"
+    "theme": "mira-dark",
+
+    // Layout mode. Switch at runtime: /layout <mode> or press F6.
+    // "simple"      — chat + input only
+    // "standard"    — chat + input + status bar          (recommended)
+    // "right-full"  — sidebar right + chat + status bar
+    // "left-full"   — sidebar left  + chat + status bar
+    // "right-only"  — sidebar right + chat (no status bar)
+    // "left-only"   — sidebar left  + chat (no status bar)
+    "layout": "standard",
+
+    // Show message timestamps in the chat view.
+    "show_timestamps": true,
+    // Show the running token estimate in the status bar.
+    "show_token_count": true
+  },
+
+  // ── Server settings ─────────────────────────────────────────────────────────
+  // HTTP server for webhook integrations (Telegram, Signal, custom).
+  // Start with: mira --server
+  "server": {
+    // Start the server automatically when MIRA launches in server mode.
+    "enabled": false,
+    // Bind address. "127.0.0.1" = localhost only. "0.0.0.0" = all interfaces.
+    "host": "127.0.0.1",
+    // TCP port.
+    "port": 8080,
+    // TLS certificate (PEM). Set to null for plain HTTP.
+    // Both tls_cert_path and tls_key_path must be set to enable HTTPS.
+    "tls_cert_path": null,
+    // TLS private key (PEM).
+    "tls_key_path": null,
+    // Bearer token for API authentication.
+    // Clients must send: Authorization: Bearer <token>
+    // Set to null to disable auth (only safe on trusted local networks).
+    "auth_token": null,
+    // Maximum simultaneous connections.
+    "max_connections": 100,
+    // Per-request processing timeout in seconds.
+    "request_timeout_secs": 30,
+    // CORS allowed origins. ["*"] = allow all. [] = disable CORS headers.
+    "allowed_origins": [],
+    // Webhook signature secret for validating payloads from Telegram/Signal.
+    // Set to null to skip signature verification.
+    "webhook_secret": null
+  },
+
+  // ── Channel integrations ────────────────────────────────────────────────────
+  // Messaging platform connectors. Each channel requires its own configuration
+  // and must be individually enabled.
+  "channels": {
+
+    // Signal — encrypted messaging via signal-cli
+    // Requirements: signal-cli installed, phone number registered with Signal.
+    // Install guide: https://github.com/AsamK/signal-cli/wiki
+    "signal": {
+      "enabled": false,
+      // Your Signal phone number in E.164 format, e.g. "+15551234567".
+      "phone_number": null,
+      // Port for the signal-cli REST API daemon.
+      "rest_port": 8080,
+      // UNIX socket path for signald polling mode.
+      "socket_path": "/run/signald/signald.sock",
+      // Path to the signal-cli binary. Use "signal-cli" if it is on your PATH.
+      "cli_binary": "signal-cli",
+      // Directory where signal-cli stores its account data and keys.
+      "data_dir": "~/.local/share/signal-cli"
+    },
+
+    // Telegram — bot integration via the Telegram Bot API
+    // Create a bot with @BotFather on Telegram to get a token.
+    // Docs: https://core.telegram.org/bots
+    "telegram": {
+      "enabled": false,
+      // Bot API token from @BotFather, e.g. "123456:ABCdef..."
+      "bot_token": null,
+      // Public HTTPS URL Telegram will POST updates to (webhook mode).
+      // Set to null and use "polling": true for local development.
+      "webhook_url": null,
+      // Use long-polling instead of a webhook. Easier for local dev —
+      // no public HTTPS URL needed.
+      "polling": false
+    }
+  },
+
+  // ── Logging ─────────────────────────────────────────────────────────────────
+  // MIRA writes logs to a file so the terminal UI stays clean.
+  "logging": {
+    // Minimum log level. Recommended: "info" for normal use.
+    // Levels (ascending severity): trace | debug | info | warn | error
+    "level": "info",
+
+    // Log line format.
+    // "compact" — human-readable single line (recommended)
+    // "pretty"  — multi-line with colours (good for a dedicated log terminal)
+    // "json"    — structured JSON (for Loki, Datadog, Splunk, etc.)
+    "format": "compact",
+
+    // Log file path. Supports ~ expansion.
+    // The parent directory is created automatically if it does not exist.
+    "file": "~/.mira/logs/mira.log",
+
+    // Rotate the log file when it reaches this size (megabytes).
+    "max_file_size_mb": 10,
+
+    // Number of rotated log files to keep (including the active file).
+    "max_files": 5
+  },
+
+  // ── Memory system ───────────────────────────────────────────────────────────
+  // Persistent memory lets MIRA remember facts, preferences, and context
+  // across conversations, channels, and sessions.
+  "memory": {
+
+    // Vector storage backend for semantic (meaning-based) search.
+    // "sqlite"  — bundled SQLite, zero extra services (default, recommended)
+    // "qdrant"  — external Qdrant server for production/high-volume use
+    //             Start: docker run -p 6333:6333 qdrant/qdrant
+    "vector_backend": "sqlite",
+
+    // Embedding model — converts text into vectors for semantic search.
+    "embedding": {
+      // Provider. Options:
+      // "internal"   — built-in fastembed engine. Downloads model automatically
+      //                on first use. No server needed. Recommended default.
+      //                NOTE: fastembed integration is planned for a future release.
+      //                      Until then, use "lmstudio" or "ollama".
+      // "ollama"     — use an Ollama embedding model (e.g. nomic-embed-text)
+      // "lmstudio"   — use an LM Studio embedding model
+      // "openai"     — OpenAI embeddings API
+      // "openrouter" — OpenRouter embeddings endpoint
+      "provider": "lmstudio",
+
+      // Model name for the chosen provider.
+      // internal  : "BGE-small-en-v1.5" (default, ~24 MB) | "all-MiniLM-L6-v2"
+      // ollama    : "nomic-embed-text"
+      // lmstudio  : exact model name as shown in the LM Studio UI
+      // openai    : "text-embedding-3-small" | "text-embedding-3-large"
+      "model": "text-embedding-sentence-transformers_all-minilm-l12-v2",
+
+      // Base URL of the embedding server. Required for ollama/lmstudio/openai.
+      // Leave null to use the provider's default URL.
+      "provider_url": "http://localhost:1234",
+
+      // Cache directory for the 'internal' provider's downloaded model files.
+      "model_cache_dir": "~/.mira/models",
+
+      // API key for embedding. Required for openai/openrouter. Null otherwise.
+      "api_key": null
+    },
+
+    // Vector dimensionality — must match the embedding model exactly.
+    // BGE-small-en-v1.5 / all-MiniLM-*  → 384
+    // BGE-base-en-v1.5                   → 768
+    // text-embedding-3-small             → 1536
+    "embedding_dim": 384,
+
+    // In-memory LRU cache for embedding vectors (number of entries).
+    // Higher = fewer re-embedding requests, more RAM.
+    "embedding_cache_size": 1000,
+
+    // Minimum cosine similarity (0.0–1.0) for semantic search results.
+    // Higher = fewer but more precise matches. Good starting point: 0.6
+    "similarity_threshold": 0.6,
+
+    // Isolate each user's memories into their own namespace.
+    // Strongly recommended for multi-user deployments.
+    "per_user_isolation": true,
+
+    // When per_user_isolation is true, allow the same user's memories to be
+    // shared across different channels (Signal, Telegram, CLI).
+    "share_across_channels": true,
+
+    // Qdrant server URL — only used when vector_backend is "qdrant".
+    "qdrant_url": "http://localhost:6333"
+  },
+
+  // ── Session management ──────────────────────────────────────────────────────
+  "session": {
+    // How often (seconds) MIRA scans for and removes expired sessions.
+    "cleanup_interval_secs": 600,
+
+    // Seconds of inactivity before a session is considered expired.
+    "timeout_secs": 3600,
+
+    // Maximum conversation turns to keep per session.
+    // One turn = one user message + one assistant reply.
+    // Older turns are dropped when this limit is reached to manage token usage.
+    "max_turns": 50
+  },
+
+  // ── Automations (Phase 10) ──────────────────────────────────────────────────
+  // Scheduled prompts, webhooks, and event subscriptions. Optional — sensible
+  // defaults apply when this block is omitted.
+  "automations": {
+    // Hard caps on how many automation rows a single user may own.
+    "quota_per_user": {
+      "schedules":           50,
+      "webhooks":            20,
+      "event_subscriptions": 50
+    },
+
+    // When true, agent-authored automations land in 'pending_approval' until
+    // the user explicitly approves them. Default true — agent autonomy is
+    // opt-out, not opt-in.
+    "agent_creates_pending":    true,
+
+    // When true, agent-authored automations must include a non-empty rationale
+    // string explaining why the agent created them. Default true.
+    "agent_rationale_required": true,
+
+    // Hard cap on how many activations may chain together before the
+    // dispatcher refuses. Guards against runaway event loops.
+    "max_chain_depth": 5,
+
+    // Per-channel cap on channel_message actions per minute, scoped to the
+    // owning user. The special key '*' is the fallback for channels with no
+    // explicit entry. A value of 0 disables the limit for that channel.
+    "channel_rate_limits": {
+      "web":      60,
+      "signal":   3,
+      "telegram": 3,
+      "email":    1,
+      "*":        10
+    }
+  }
+}

@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// src/server/handlers/mod.rs
+
+pub mod admin;
+pub mod admin_audit;
+pub mod update_check;
+pub mod backup;
+pub mod briefing;
+pub mod waitlist;
+pub mod admin_history;
+pub mod artifacts;
+pub mod auth;
+pub mod automations;
+pub mod calendar;
+pub mod channel_accounts;
+pub mod channel_links;
+pub mod channels;
+pub mod chat;
+pub mod companion;
+pub mod config_api;
+pub mod conversations;
+pub mod deps;
+pub mod groups;
+pub mod health;
+pub mod guardian;
+pub mod health_dashboard;
+pub mod email;
+pub mod logs;
+pub mod mcp;
+pub mod memory;
+pub mod notifications;
+pub mod onboarding;
+pub mod packages;
+pub mod policy;
+pub mod providers;
+pub mod agents;
+pub mod agent_defs;
+pub mod sessions;
+pub mod signal;
+pub mod skills;
+pub mod status;
+pub mod stt;
+pub mod system;
+pub mod signup;
+pub mod telegram;
+pub mod tools;
+pub mod triggers;
+pub mod tts;
+pub mod users;
+pub mod watchdog;
+pub mod webhooks;
+pub mod wiki;
+pub mod workflows;
+pub mod wsl;
+
+pub use health::health_handler;
+pub use signal::{signal_handler, SignalState};
+pub use telegram::{telegram_handler, TelegramState};

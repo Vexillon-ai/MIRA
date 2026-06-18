@@ -1,0 +1,283 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.header {
+  padding: 24px 32px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.header h1 { font-size: 20px; margin-bottom: 4px; }
+.header p  { font-size: 13px; color: var(--text-muted); margin-bottom: 0; }
+.header code {
+  background: var(--bg-elevated);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono, monospace);
+}
+
+.toolbar {
+  padding: 12px 32px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 32px;
+}
+.empty {
+  text-align: center;
+  padding: 64px 24px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.empty strong {
+  display: block;
+  font-size: 14px;
+  margin-bottom: 6px;
+  color: var(--text-primary);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  padding: 14px 18px;
+}
+.card[data-enabled="false"] { opacity: 0.65; }
+.card.editing {
+  border-color: var(--color-accent, #2563eb);
+  background: var(--bg-base);
+}
+
+.cardHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.title {
+  font-weight: 600;
+  font-size: 14px;
+}
+.id {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-base);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.kindBadge {
+  font-family: var(--font-mono, monospace);
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+}
+.disabledBadge {
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: rgba(198, 40, 40, 0.10);
+  color: var(--color-danger, #c62828);
+  border: 1px solid rgba(198, 40, 40, 0.3);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.iconBtn:hover:not(:disabled) { background: var(--bg-hover, var(--bg-elevated)); }
+.iconBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+.iconBtn[data-variant="danger"] {
+  color: var(--color-danger, #c62828);
+  border-color: rgba(198, 40, 40, 0.25);
+}
+
+.primaryBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--color-accent, #2563eb);
+  border-radius: 4px;
+  background: var(--color-accent, #2563eb);
+  color: white;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.primaryBtn:hover:not(:disabled) { filter: brightness(1.1); }
+.primaryBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.reason {
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.preds {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.predChip {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+}
+.predChip code {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-primary);
+}
+.predChip strong {
+  font-weight: 600;
+  color: var(--color-accent, #2563eb);
+  font-family: var(--font-mono, monospace);
+}
+.predChip[data-warn="true"] {
+  color: var(--color-warning, #b88a00);
+  border-color: rgba(184, 138, 0, 0.3);
+  font-style: italic;
+}
+
+/* ── Editor form ─────────────────────────────────────────── */
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin-bottom: 14px;
+}
+.formField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.formField > span {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.formField.full { grid-column: 1 / -1; }
+.hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.hint code {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  background: var(--bg-elevated);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.input {
+  font-size: 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: inherit;
+}
+.input:disabled {
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+.toggleLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-primary);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: normal;
+}
+.toggleLabel input[type="checkbox"] {
+  margin: 0;
+}
+
+/* ── Predicate editor ────────────────────────────────────── */
+
+.predEditor {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 12px;
+}
+.predEditorHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.predEmpty {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 8px 0;
+}
+.predRow {
+  display: grid;
+  grid-template-columns: 220px 1fr auto;
+  gap: 8px;
+  margin-bottom: 6px;
+}

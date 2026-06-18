@@ -1,0 +1,340 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── Header ───────────────────────────────────────────────────────────── */
+.header {
+  padding: 24px 32px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.header h1 { font-size: 20px; margin-bottom: 4px; }
+.header p  { font-size: 13px; color: var(--text-muted); margin-bottom: 0; }
+
+/* ── Tabs ─────────────────────────────────────────────────────────────── */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 32px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  flex-shrink: 0;
+}
+.tab {
+  background: transparent;
+  border: none;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  font-family: inherit;
+}
+.tab:hover { color: var(--text-primary); }
+.tabActive {
+  color: var(--text-primary);
+  border-bottom-color: var(--color-accent, #2563eb);
+  font-weight: 600;
+}
+
+/* ── Toolbar (Status tab) ─────────────────────────────────────────────── */
+.toolbar {
+  padding: 12px 32px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  flex-shrink: 0;
+  font-size: 13px;
+}
+.summary {
+  flex: 1;
+  color: var(--text-muted);
+}
+.summary strong { color: var(--text-primary); }
+.runBtn {
+  padding: 6px 14px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.runBtn:hover:not(:disabled) { background: var(--bg-elevated); }
+.runBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+.refreshLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* ── Body ─────────────────────────────────────────────────────────────── */
+.body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 32px;
+}
+
+/* ── Status board ─────────────────────────────────────────────────────── */
+.detectorList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.detectorRow {
+  display: grid;
+  grid-template-columns: 22px 320px 1fr auto;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  font-size: 13px;
+}
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.dotGreen  { background: #22c55e; }
+.dotYellow { background: #f59e0b; }
+.dotRed    { background: #ef4444; }
+.detectorName {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.detectorMessage {
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.payloadBtn {
+  font-size: 11px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: var(--bg-base);
+  cursor: pointer;
+  color: var(--text-muted);
+  font-family: inherit;
+}
+.payloadBtn:hover { color: var(--text-primary); }
+.payload {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--bg-base);
+  border-radius: 4px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+/* ── Generic list / empty / error states ──────────────────────────────── */
+.empty, .loading {
+  text-align: center;
+  padding: 64px 24px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.empty strong {
+  display: block;
+  font-size: 14px;
+  margin-bottom: 6px;
+  color: var(--text-primary);
+}
+
+/* ── Tables (Incidents / Config / IP Bans) ────────────────────────────── */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.table th, .table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.table th {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.table td.mono {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+.table td.muted { color: var(--text-muted); }
+
+.severityBadge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.sevWarn  { background: rgba(245, 158, 11, 0.12); color: #d97706; }
+.sevError { background: rgba(239, 68, 68,  0.12); color: #dc2626; }
+.sevInfo  { background: rgba(59,  130, 246,0.12); color: #2563eb; }
+
+.linkBtn {
+  background: none;
+  border: none;
+  color: var(--color-accent, #2563eb);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  font-family: inherit;
+}
+.linkBtn:hover { text-decoration: underline; }
+
+/* ── Per-signal config tab ────────────────────────────────────────────── */
+.policySegment {
+  display: inline-flex;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.policyOption {
+  background: var(--bg-base);
+  border: none;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-right: 1px solid var(--border-subtle);
+  font-family: inherit;
+}
+.policyOption:last-child { border-right: none; }
+.policyOption:hover { color: var(--text-primary); }
+.policyActive {
+  background: var(--color-accent, #2563eb);
+  color: #fff;
+}
+.policyActive:hover { color: #fff; }
+.overriddenDot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent, #2563eb);
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+/* A4 — task artifact file browser + preview. */
+/* Backdrop for the artifact file browser — fixed overlay so "Open" is always
+   visible regardless of how long the artifacts list is (was an inline panel
+   that opened below the fold). */
+.fileBrowserOverlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.fileBrowser {
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--bg-base); overflow: hidden;
+  width: min(960px, 100%); max-height: 82vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 16px 56px rgba(0, 0, 0, 0.5);
+}
+.fileBrowserHead {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 14px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-elevated);
+}
+.fileBrowserBody { display: flex; min-height: 220px; max-height: 460px; }
+.fileList {
+  list-style: none; margin: 0; padding: 6px; width: 320px; flex-shrink: 0;
+  border-right: 1px solid var(--border-subtle); overflow-y: auto;
+}
+.fileList li {
+  display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 4px; font-size: 12px;
+}
+.fileList li.fileSel { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.fileName {
+  flex: 1; text-align: left; background: none; border: none; cursor: pointer;
+  color: var(--text-primary); font-family: var(--font-mono); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fileName:hover { color: var(--accent); }
+.filePreview { flex: 1; padding: 12px; overflow: auto; }
+.previewImg { max-width: 100%; max-height: 420px; border-radius: var(--radius-sm); }
+.previewText {
+  margin: 0; font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap;
+  word-break: break-word; color: var(--text-primary);
+}
+
+/* Live subsystem-degradation banner */
+.degradeBanner {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  background: rgba(217, 160, 60, 0.10);
+  border: 1px solid rgba(217, 160, 60, 0.45);
+  border-radius: 8px;
+  color: var(--text, #e6e8ec);
+  font-size: 13px;
+}
+.degradeBanner strong { color: #d9a03c; }
+.degradeBanner ul { margin: 8px 0 0; padding-left: 18px; }
+.degradeBanner li { margin: 3px 0; line-height: 1.5; }
+.degradeBanner code {
+  background: rgba(127,127,127,0.15);
+  padding: 1px 5px; border-radius: 4px; font-size: 12px;
+}
+.degradeTransient { color: var(--text-muted, #8a909c); font-style: italic; }
+
+/* MIRA-Guardian pending-action panel (P4a-2-web). */
+.guardianPanel {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  background: rgba(192, 80, 106, 0.10);
+  border: 1px solid rgba(192, 80, 106, 0.45);
+  border-radius: 8px;
+  color: var(--text, #e6e8ec);
+  font-size: 13px;
+}
+.guardianPanel strong { color: #c0506a; }
+.guardianPanel ul { margin: 8px 0 0; padding-left: 0; list-style: none; }
+.guardianPanel li {
+  margin: 6px 0; line-height: 1.5;
+  display: flex; gap: 12px; align-items: center; justify-content: space-between;
+  flex-wrap: wrap;
+}
+.guardianPanel code {
+  background: rgba(127,127,127,0.15);
+  padding: 1px 5px; border-radius: 4px; font-size: 12px;
+}
+.guardianBtns { display: inline-flex; gap: 8px; flex-shrink: 0; }
+.guardianApprove, .guardianDecline {
+  padding: 4px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
+  border: 1px solid transparent;
+}
+.guardianApprove { background: #2e7d4f; color: #fff; }
+.guardianDecline { background: transparent; color: var(--text-muted, #8a909c);
+  border-color: rgba(127,127,127,0.4); }
+.guardianApprove:disabled, .guardianDecline:disabled { opacity: 0.5; cursor: default; }

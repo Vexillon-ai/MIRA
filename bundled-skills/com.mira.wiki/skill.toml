@@ -1,0 +1,21 @@
+[skill]
+id            = "com.mira.wiki"
+version       = "0.1.0"
+display_name  = "Wiki"
+description   = "Read and write the user's personal wiki — a markdown knowledge base companion to long-term memory. Use it for narrative content the user will want to come back to: project notes, decisions, recipes, ongoing topics. The wiki is the user's, not yours: by default write tools propose changes that the user approves in the review queue. For one-off facts that fit better as an atomic memory, prefer the memory skill instead."
+authors       = ["MIRA Team <hello@mira.dev>"]
+license       = "MIT"
+
+[permissions]
+network_egress = []
+filesystem     = []
+subprocess     = false
+secrets        = []
+llm_providers  = ["primary"]
+
+[tools]
+search         = { kind = "builtin", impl = "wiki_search" }
+read           = { kind = "builtin", impl = "wiki_read" }
+append_section = { kind = "builtin", impl = "wiki_append_section" }
+write_page     = { kind = "builtin", impl = "wiki_write_page" }
+log_entry      = { kind = "builtin", impl = "wiki_log_entry" }

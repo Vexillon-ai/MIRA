@@ -1,0 +1,21 @@
+[skill]
+id            = "com.mira.research"
+version       = "0.1.0"
+display_name  = "Research"
+description   = "Multi-source web research: search, fetch articles, and synthesise. Wraps MIRA's web_search / web_fetch / url_preview tools — those tools enforce their own URL policy, so the network_egress field below is informational only."
+authors       = ["MIRA Team <hello@mira.dev>"]
+license       = "MIT"
+
+[permissions]
+network_egress                   = []
+filesystem                       = []
+subprocess                       = false
+secrets                          = []
+llm_providers                    = ["primary"]
+max_llm_spend_per_invocation_usd = 1.00
+
+[tools]
+web_search  = { kind = "builtin", impl = "web_search" }
+web_fetch   = { kind = "builtin", impl = "web_fetch" }
+url_preview = { kind = "builtin", impl = "url_preview" }
+synthesize  = { kind = "prompt",  template = "prompts/synthesize.md" }

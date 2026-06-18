@@ -1,0 +1,18 @@
+[skill]
+id            = "com.mira.summarise"
+version       = "0.1.0"
+display_name  = "Summarise"
+description   = "Summarise one of the user's past conversations into a short prose digest covering topics, decisions, and any open questions."
+authors       = ["MIRA Team <hello@mira.dev>"]
+license       = "MIT"
+
+[permissions]
+network_egress                   = []
+filesystem                       = []
+subprocess                       = false
+secrets                          = []
+llm_providers                    = ["primary"]
+max_llm_spend_per_invocation_usd = 0.20
+
+[tools]
+conversation = { kind = "builtin", impl = "summarize_conversation" }

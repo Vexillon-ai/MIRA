@@ -1,0 +1,127 @@
+# MIRA onboarding question schema.
+#
+# The LLM reads this during `mode=onboarding` conversations and works through
+# the groups in order. Each question's `writes_to` names a storage target;
+# tool handlers route the value there on `record_profile`.
+#
+# Valid `writes_to` prefixes (validated at load time):
+#   user.<col>            → `users` table column (only `avatar` today)
+#   user_profile.<col>    → `user_profile` table column
+#   profile_md.<section>  → a section of the per-user profile.md.
+#                            Keys: communication_style, autonomy,
+#                            how_to_address_me, what_to_call_mira,
+#                            goals, off_limits
+#   memory.seed           → a seed entry in the memory DB, tagged
+#                            with source="onboarding"
+#
+# Virtual targets (fan out at the tool layer):
+#   user_profile.contact_hours_start_end → writes both
+#     contact_hours_start and contact_hours_end
+#
+# Questions are loosely scripted — the LLM controls phrasing. `prompt_hint`
+# is guidance to the model, not a literal user-facing string.
+
+version: 1
+
+groups:
+  - id: name
+    label: "Name & pronouns"
+    questions:
+      - key: full_name
+        writes_to: user_profile.full_name
+        prompt_hint: "Full legal/given name. Users may or may not want to share this."
+        required: false
+      - key: preferred_name
+        writes_to: user_profile.preferred_name
+        prompt_hint: "What they'd like you to call them day-to-day."
+      - key: pronouns
+        writes_to: user_profile.pronouns
+        prompt_hint: "Only if they want to share. Accept any free-form value."
+
+  - id: location_time
+    label: "Where and when"
+    questions:
+      - key: timezone
+        writes_to: user_profile.timezone
+        prompt_hint: "Prefer a city name — use resolve_timezone to normalize to an IANA zone."
+        helper_tool: resolve_timezone
+      - key: contact_hours
+        writes_to: user_profile.contact_hours_start_end
+        prompt_hint: "Hours when it's OK to reach out proactively. Format as local start/end times."
+
+  - id: personal
+    label: "A bit about you"
+    optional: true
+    questions:
+      - key: birth_date
+        writes_to: user_profile.birth_date
+        prompt_hint: "Birthday — optional. YYYY-MM-DD when you record it."
+      - key: height_cm
+        writes_to: user_profile.height_cm
+        prompt_hint: "Height in centimetres. Convert if they give you feet/inches."
+      - key: weight_kg
+        writes_to: user_profile.weight_kg
+        prompt_hint: "Weight in kilograms. Convert from pounds if needed."
+      - key: eye_color
+        writes_to: user_profile.eye_color
+      - key: hair_color
+        writes_to: user_profile.hair_color
+
+  - id: work_hobbies
+    label: "Work & interests"
+    questions:
+      - key: work_summary
+        writes_to: memory.seed
+        prompt_hint: "What they do with their days — job, studies, life situation. Narrative."
+      - key: hobbies
+        writes_to: memory.seed
+        prompt_hint: "Hobbies, interests, things they care about."
+
+  - id: goals
+    label: "What you want from me"
+    questions:
+      - key: top_goals
+        writes_to: profile_md.goals
+        prompt_hint: "1-3 concrete things they want to accomplish with MIRA. Store as a bullet list."
+
+  - id: agent_style
+    label: "How I should behave"
+    questions:
+      - key: agent_name
+        writes_to: user_profile.agent_name
+        prompt_hint: "MIRA is the default. They may prefer something else."
+      - key: verbosity
+        writes_to: profile_md.communication_style
+        options: [brief, balanced, chatty]
+      - key: tone
+        writes_to: profile_md.communication_style
+        options: [warm, neutral, playful, formal]
+      - key: check_in_cadence
+        writes_to: profile_md.communication_style
+        options: [rarely, when_needed, daily]
+
+  - id: autonomy
+    label: "Making decisions"
+    questions:
+      - key: autonomy_preference
+        writes_to: profile_md.autonomy
+        options: [ask_first, act_then_report]
+      - key: name_pronunciation
+        writes_to: profile_md.how_to_address_me
+        prompt_hint: "If their name is easily mispronounced and they want to share."
+
+  - id: privacy
+    label: "Off-limits"
+    questions:
+      - key: off_limits_topics
+        writes_to: profile_md.off_limits
+        prompt_hint: "Topics MIRA should never remember or summarize. Bullet list."
+
+  - id: avatar
+    label: "Profile picture"
+    optional: true
+    questions:
+      - key: avatar
+        writes_to: user.avatar
+        helper_tool: choose_avatar_ui
+        prompt_hint: "Offer the preset grid + upload. This is handled by the web UI, not the LLM directly. Optional — user can change it later in Settings."

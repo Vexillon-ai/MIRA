@@ -1,0 +1,33 @@
+# MIRA managed-dependency manifest.
+#
+# Lists native deps that MIRA can fetch from upstream + verify, so a
+# fresh tarball install doesn't require the user to `apt install` or
+# `brew install` anything before starting the binary.
+#
+# Format: each [deps.<name>] block declares one dep. Per-platform
+# subsections (e.g. [deps.<name>.linux-x86_64]) carry the pinned URL,
+# sha256, and the relative path inside the extracted archive to the
+# library file MIRA needs at runtime.
+#
+# The mira binary embeds this file at compile time via include_str!,
+# so it always knows what versions it expects. To bump a version:
+#   1. Update version + url + sha256 in this file
+#   2. cargo build (the new version is now baked into the binary)
+#   3. mira deps install --force  (re-fetches with the new pin)
+
+# ── ONNX Runtime ──────────────────────────────────────────────────────
+# Required by fastembed for in-process text embeddings. Without it,
+# memory rollups + recall_history degenerate to keyword-only fallback.
+# Version pin tracks what the `ort` crate (fastembed's dep) expects;
+# bumping ort means bumping this manifest too.
+[deps.onnxruntime]
+version      = "1.20.1"
+description  = "ONNX Runtime — in-process tensor inference for fastembed."
+required_for = "memory rollups, recall_history, semantic search"
+
+[deps.onnxruntime.linux-x86_64]
+url       = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz"
+sha256    = "67db4dc1561f1e3fd42e619575c82c601ef89849afc7ea85a003abbac1a1a105"
+# Path inside the extracted tarball to the actual library file.
+# MIRA at runtime sets ORT_DYLIB_PATH to <install_dir>/<lib_path>.
+lib_path  = "onnxruntime-linux-x64-1.20.1/lib/libonnxruntime.so.1.20.1"

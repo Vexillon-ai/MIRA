@@ -1,0 +1,573 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.header {
+  padding: 24px 32px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.header h1 { font-size: 20px; margin-bottom: 4px; }
+.header p { font-size: 13px; color: var(--text-muted); }
+
+.refreshBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all var(--transition);
+}
+.refreshBtn:hover { border-color: var(--accent-border); color: var(--accent-light); }
+
+.statusStrip {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  padding: 10px 32px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+.statusItem {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+}
+.active { color: var(--success); }
+
+.section {
+  padding: 24px 32px;
+}
+
+.sectionTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-bottom: 16px;
+}
+
+.loading {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.empty {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.healthGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin-left: 20px;
+}
+
+.healthCard {
+  padding: 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  transition: border-color var(--transition);
+}
+.healthOk  { border-left: 3px solid var(--success); }
+.healthBad { border-left: 3px solid var(--error); }
+
+.healthCardTop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.iconOk  { color: var(--success); flex-shrink: 0; }
+.iconBad { color: var(--error); flex-shrink: 0; }
+
+.healthName {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: capitalize;
+  flex: 1;
+}
+
+.latency {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--success);
+  background: rgba(34,211,160,0.1);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+}
+
+.healthMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.modelLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.url {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.modelGroups {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.providerGroup {}
+
+.providerLabel {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.modelList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-left: 20px;
+}
+
+.modelRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  transition: all var(--transition);
+  font-family: inherit;
+}
+.modelRow:hover { border-color: var(--border); background: var(--bg-overlay); }
+
+/* The model that will be used for the next chat message. */
+.modelRowLive {
+  border-left: 3px solid var(--success);
+  background: linear-gradient(
+    90deg,
+    rgba(34, 211, 160, 0.28) 0%,
+    rgba(34, 211, 160, 0.08) 60%,
+    var(--bg-elevated) 100%
+  );
+}
+.modelRowLive:hover {
+  background: linear-gradient(
+    90deg,
+    rgba(34, 211, 160, 0.36) 0%,
+    rgba(34, 211, 160, 0.12) 60%,
+    var(--bg-overlay) 100%
+  );
+}
+
+.modelId {
+  font-size: 13px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  flex: 1;
+}
+
+/* ACTIVE — model that will be used for the next chat message. */
+.activeBadge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--success);
+  background: rgba(34, 211, 160, 0.12);
+  border: 1px solid rgba(34, 211, 160, 0.35);
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  cursor: help;
+}
+
+/* DEFAULT — provider's configured default from mira_config.json. */
+.defaultBadge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--accent-light);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-border);
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  cursor: help;
+}
+
+.selectionNote {
+  margin: 0 32px 24px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.selectionNote svg { color: var(--accent-light); flex-shrink: 0; margin-top: 1px; }
+.selectionNote strong { color: var(--accent-light); }
+
+/* OpenRouter catalog section */
+.openrouterHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding-right: 32px;
+}
+
+.spinning { animation: spin 1s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.catalogMeta {
+  margin: 0 32px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.catalogTable {
+  margin: 0 32px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.catalogRow {
+  display: grid;
+  grid-template-columns: 2fr 80px 90px 90px 80px;
+  gap: 12px;
+  padding: 6px 12px;
+  align-items: center;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+.catalogRow:last-child { border-bottom: none; }
+.catalogRow:hover { background: var(--bg-overlay); }
+
+.catalogHead {
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.catalogHead:hover { background: var(--bg-elevated); }
+
+.catalogId {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+/* Catalog browser controls */
+.catalogControls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 32px 8px;
+  flex-wrap: wrap;
+}
+
+.catalogSearchBox {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  max-width: 360px;
+}
+.catalogSearchIcon {
+  position: absolute;
+  left: 8px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.catalogSearch {
+  width: 100%;
+  padding: 5px 28px 5px 26px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  outline: none;
+}
+.catalogSearch:focus { border-color: var(--accent-border); }
+.catalogSearchClear {
+  position: absolute;
+  right: 6px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+}
+.catalogSearchClear:hover { color: var(--text-primary); }
+
+/* Scrollable catalog body — replaces the slice-50 hard cap */
+.catalogScroll {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+/* Add column to the existing 5-column grid for the pin button */
+.catalogTable .catalogRow {
+  grid-template-columns: 2fr 80px 90px 90px 80px 92px;
+}
+
+.catalogRowPinned {
+  background: var(--accent-dim);
+}
+.catalogRowPinned:hover { background: var(--accent-dim); }
+
+.catalogDivider {
+  padding: 6px 12px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.catalogEmpty {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.pinBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition);
+  justify-self: end;
+}
+.pinBtn:hover { border-color: var(--accent-border); color: var(--text-secondary); }
+
+.pinBtnActive {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg-primary);
+}
+.pinBtnActive:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg-primary);
+}
+
+/* ─── Per-provider rollup (used by Available + Catalog sections) ─── */
+
+.providerRollup {
+  margin-bottom: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+.providerRollup[open] { background: var(--bg-base); }
+
+.providerRollupHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  list-style: revert;
+  font-size: 13px;
+}
+.providerRollupName {
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: lowercase;
+}
+.providerRollupCount {
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.providerRollupBody {
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+.providerRollupEmpty {
+  margin: 4px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.lockedBadge {
+  margin-left: 8px;
+  padding: 1px 6px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.sectionLead {
+  margin: -8px 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 680px;
+}
+
+/* ─── Available Models row ─── */
+
+.availRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--border-subtle);
+}
+.availRow:last-child { border-bottom: none; }
+
+.availPick {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+}
+.availPick:hover {
+  background: var(--bg-overlay);
+  border-color: var(--border-subtle);
+}
+.availPickActive {
+  background: var(--accent-dim);
+  border-color: var(--accent-border);
+}
+.availPickActive:hover { background: var(--accent-dim); }
+
+.availRadio {
+  color: var(--accent);
+  font-size: 14px;
+  width: 12px;
+  display: inline-block;
+}
+.availId {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  flex: 1;
+}
+
+.availSession {
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+}
+.availSession:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-border);
+}
+
+.availRemove {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+}
+.availRemove:hover {
+  color: #f87171;
+  border-color: #f87171;
+}
+.availRemove:disabled { opacity: 0.5; cursor: wait; }
+
+/* ─── Catalog row extras for the per-provider table ─── */
+
+.catalogDisplay {
+  color: var(--text-muted);
+  font-weight: normal;
+  margin-left: 6px;
+}
+.catalogNotes {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+}

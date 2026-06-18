@@ -1,0 +1,86 @@
+[skill]
+id            = "com.mira.opencode"
+# Version bumps trigger auto-refresh on existing installs (bundled.rs
+# `extract_or_refresh`). Bump whenever the manifest contents change so
+# users on older MIRA builds pick up the new shape on next boot.
+# 0.1.0 — initial cut. Mirrors com.mira.claudecode but with OpenCode's
+#         multi-provider auth schema (OpenRouter primary, Anthropic /
+#         OpenAI as alternates) and points at the `opencode` CLI from
+#         sst/opencode rather than the `claude` CLI.
+# 0.2.0 — added OPENCODE_MODEL synthetic key. OpenCode doesn't read a
+#         model env var, so the adapter pops this out of the injected
+#         env and forwards it as `--model VAL` instead.
+# 0.3.0 — added `example` hints + `sensitive = false` on the model
+#         and config-path keys so the UI shows them in plain text
+#         with a worked example. The fully-qualified PROVIDER/MODEL
+#         shape (e.g. `openrouter/anthropic/...`) wasn't obvious
+#         from the description alone.
+# 0.4.0 — clarified that `plan` and `review` are PROMPT templates
+#         only. Mirrors the same fix applied to com.mira.claudecode
+#         in 0.5.0; models were calling the plan tool and trying to
+#         write code themselves instead of using spawn_background_task.
+version       = "0.4.0"
+display_name  = "OpenCode"
+description   = "Reverse-DNS skill id used by `spawn_background_task` to launch the `opencode` CLI (sst/opencode) as a subagent that actually builds/edits code. ALSO exposes two helper prompts (`plan`, `review`) that return text templates — these do NOT execute code. To build something, call `spawn_background_task(skill=\"com.mira.opencode\", brief=…)`. OpenCode brings its own provider routing — set whichever API keys your configured provider needs (OPENROUTER_API_KEY is the default upstream)."
+authors       = ["MIRA Team <hello@mira.dev>"]
+license       = "MIT"
+
+[permissions]
+network_egress                   = []
+filesystem                       = []
+subprocess                       = false
+llm_providers                    = ["primary"]
+max_llm_spend_per_invocation_usd = 2.00
+
+# Env vars MIRA passes to the `opencode` subprocess when this skill
+# spawns as a worker. OpenCode supports many providers (OpenRouter,
+# Anthropic, OpenAI, Gemini, Mistral, …) via per-provider env vars.
+# Declared optional so the user only sets the ones their configured
+# provider needs; unset vars are simply not injected.
+#
+# All declared at `system` scope by default since the API key is a
+# host-wide credential — flip to `user` per-row in the secrets UI
+# when one user wants to override the system-wide value.
+[[permissions.secrets]]
+key         = "OPENROUTER_API_KEY"
+description = "OpenRouter API key. The simplest single-key auth — gives OpenCode access to every model OpenRouter proxies (Anthropic, OpenAI, Google, etc.). Recommended default."
+required    = false
+scope       = "system"
+
+[[permissions.secrets]]
+key         = "ANTHROPIC_API_KEY"
+description = "Anthropic API key. Use when you'd rather hit Anthropic directly rather than via OpenRouter. Mutually exclusive with OPENROUTER_API_KEY when both name the same model."
+required    = false
+scope       = "system"
+
+[[permissions.secrets]]
+key         = "OPENAI_API_KEY"
+description = "OpenAI API key. Required to use GPT-* models directly (not via OpenRouter)."
+required    = false
+scope       = "system"
+
+[[permissions.secrets]]
+key         = "GEMINI_API_KEY"
+description = "Google Gemini API key for Gemini Pro / Flash models."
+required    = false
+scope       = "system"
+
+[[permissions.secrets]]
+key         = "OPENCODE_CONFIG"
+description = "Override the path OpenCode reads its `~/.config/opencode/config.json` from. Useful when the systemd user who runs MIRA differs from the user whose OpenCode config is configured."
+required    = false
+scope       = "system"
+sensitive   = false
+example     = "/home/mira/.config/opencode/config.json"
+
+[[permissions.secrets]]
+key         = "OPENCODE_MODEL"
+description = "Model id forwarded to opencode as `--model VAL` on every spawn. Synthetic key — opencode itself doesn't read this from env; the adapter pops it from the injected env and converts it to a CLI flag. The PROVIDER/ prefix is REQUIRED — `openrouter/...`, `anthropic/...`, `openai/...`, etc. Leave unset to fall back to whatever's in `~/.config/opencode/config.json`."
+required    = false
+scope       = "either"
+sensitive   = false
+example     = "openrouter/anthropic/claude-haiku-4-5-20251001"
+
+[tools]
+plan   = { kind = "prompt", template = "prompts/plan.md" }
+review = { kind = "prompt", template = "prompts/review.md" }

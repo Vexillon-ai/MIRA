@@ -1,0 +1,48 @@
+# MIRA — single-service Compose file.
+#
+#   docker compose up -d           # start in the background
+#   docker compose logs -f mira    # tail logs
+#   docker compose restart mira    # bounce (the supervisor honours exit(0)
+#                                  # too, so the in-app Restart button works)
+#   docker compose down            # stop and remove the container
+#
+# First-run setup (pick one):
+#   Interactive : docker compose run --rm mira setup   # guided wizard, then `up`
+#   Unattended  : uncomment the `environment:` block below, then `up` (the
+#                 entrypoint runs `mira setup --unattended` on first boot)
+#   Neither     : just `up` — MIRA auto-generates an admin password (in the logs)
+#
+# Persistent state (config, history DB, signal-cli keystores, logs) lives
+# under ./data on the host. Back this directory up to back up MIRA.
+#
+# `restart: unless-stopped` is what makes MIRA's web-UI Restart button work
+# inside Docker: the API exits the process cleanly with code 0 and the
+# Docker daemon relaunches it.
+
+services:
+  mira:
+    build: .
+    image: mira:local
+    container_name: mira
+    restart: unless-stopped
+    ports:
+      # Override with `MIRA_PORT=9090 docker compose up`.
+      - "${MIRA_PORT:-8080}:8080"
+    volumes:
+      - ./data:/data
+    # Unattended first-run setup — uncomment + fill in, then `docker compose up`.
+    # (Skipped automatically once a config exists on the volume.)
+    # environment:
+    #   MIRA_SETUP_PROVIDER: anthropic         # ollama|lmstudio|anthropic|openai|openrouter|gemini|deepseek|groq|xai
+    #   MIRA_SETUP_API_KEY: "sk-…"             # for cloud providers
+    #   MIRA_SETUP_MODEL: claude-sonnet-4-6    # set to skip the live provider test
+    #   MIRA_SETUP_ADMIN_USER: admin
+    #   MIRA_SETUP_ADMIN_PASS: "change-me-please"
+    #   # MIRA_SETUP_BASE_URL: "http://host.docker.internal:11434"  # local providers
+    #   # MIRA_SETUP_SKIP_PROVIDER_TEST: "1"   # don't probe the provider at setup
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

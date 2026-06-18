@@ -1,0 +1,2575 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MIRA Configuration Schema",
+  "description": "Configuration schema for MIRA \u2014 Multi-tasking Intelligent Responsive Assistant",
+  "type": "object",
+  "required": [
+    "config_version",
+    "primary_provider"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "config_version": {
+      "description": "Configuration file format version. Managed by MIRA \u2014 do not edit manually. Used to detect when a migration is needed.",
+      "type": "string",
+      "enum": [
+        "1"
+      ]
+    },
+    "data_dir": {
+      "description": "Root directory for all MIRA data files (databases, history, memory, auth, exports). Supports ~ for the home directory. Default: ~/.mira/data. Pick this during `mira setup`, or override at runtime with the --data-dir flag / MIRA_DATA_DIR env (which win over this field). `mira install` bakes the resolved absolute path into the service so a supervised service reads the same location regardless of which account runs it.",
+      "type": "string"
+    },
+    "primary_provider": {
+      "description": "The AI provider MIRA uses for chat by default. Must match the slug of a configured provider under `providers`. Can be switched at runtime with /provider-use.",
+      "type": "string",
+      "enum": [
+        "ollama",
+        "lmstudio",
+        "openrouter",
+        "openai",
+        "deepseek",
+        "moonshot",
+        "groq",
+        "xai",
+        "openai_compat",
+        "anthropic",
+        "gemini"
+      ]
+    },
+    "providers": {
+      "description": "AI provider connection and model settings. Only configure the providers you intend to use.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ollama": {
+          "description": "Ollama local inference server (https://ollama.com). Install Ollama and run 'ollama serve' before starting MIRA.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "When false, the provider is omitted from the failover chain at startup AND from the chat-page model dropdown. Default true for backwards compatibility.",
+              "type": "boolean"
+            },
+            "url": {
+              "description": "Ollama API base URL. Overridable with the OLLAMA_HOST environment variable.",
+              "type": "string"
+            },
+            "default_model": {
+              "description": "Model to use on startup. Run 'ollama list' to see installed models, 'ollama pull <model>' to download one.",
+              "type": "string"
+            },
+            "available_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Models the admin has added for this provider \u2014 shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers."
+            },
+            "timeout_secs": {
+              "description": "HTTP request timeout in seconds. Increase for large models or slow hardware.",
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "lmstudio": {
+          "description": "LM Studio local inference server (https://lmstudio.ai). Start the local server from the LM Studio application before running MIRA.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When false, skip registration. Default true."
+            },
+            "url": {
+              "description": "LM Studio server base URL (OpenAI-compatible API endpoint).",
+              "type": "string"
+            },
+            "default_model": {
+              "description": "Model identifier exactly as shown in the LM Studio UI.",
+              "type": "string"
+            },
+            "available_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Models the admin has added for this provider \u2014 shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers."
+            },
+            "timeout_secs": {
+              "description": "HTTP request timeout in seconds. Set higher (300\u2013600) for large models.",
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "openrouter": {
+          "description": "OpenRouter cloud gateway (https://openrouter.ai). Provides access to 100+ hosted models including GPT-4, Claude, Llama, and more.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When false, skip registration. Default true."
+            },
+            "api_key": {
+              "description": "OpenRouter API key. Can alternatively be set via the OPENROUTER_API_KEY environment variable (env var takes precedence). Obtain a key at https://openrouter.ai/keys.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_url": {
+              "description": "OpenRouter API base URL. Change only if using a self-hosted OpenRouter-compatible gateway.",
+              "type": "string"
+            },
+            "default_model": {
+              "description": "Default model to use via OpenRouter. Browse available models at https://openrouter.ai/models.",
+              "type": "string"
+            },
+            "available_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Models the admin has added for this provider \u2014 shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers."
+            },
+            "catalog_refresh_hours": {
+              "description": "How long the cached OpenRouter model catalog is reused before re-fetching. Cache lives at <data_dir>/cache/openrouter-models.json. 0 disables caching.",
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "openai": {
+          "description": "OpenAI hosted API (https://platform.openai.com). Set api_key to enable; leave null to skip registration.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When false, skip registration. Default true."
+            },
+            "api_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_url": {
+              "type": "string",
+              "description": "Override only for Azure-style proxies. Default https://api.openai.com/v1."
+            },
+            "default_model": {
+              "type": "string",
+              "description": "Examples: gpt-4o, gpt-4o-mini, o1, o3-mini."
+            },
+            "available_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Models the admin has added for this provider \u2014 shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers."
+            },
+            "timeout_secs": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "deepseek": {
+          "description": "DeepSeek (https://platform.deepseek.com). OpenAI-compatible. Default model deepseek-chat; deepseek-reasoner for R1-style chain-of-thought.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When false, skip registration. Default true."
+            },
+            "api_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_url": {
+              "type": "string"
+            },
+            "default_model": {
+              "type": "string"
+            },
+            "available_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Models the admin has added for this provider \u2014 shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers."
+            },
+            "timeout_secs": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "moonshot": {
+          "description": "Moonshot AI / Kimi (https://platform.moonshot.ai). OpenAI-compatible. Models: kimi-k2-0905-preview, kimi-thinking-preview, etc.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When false, skip registration. Default true."
+            },
+            "api_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_url": {
+              "type": "string"
+            },
+            "default_model": {
+              "type": "string"
+            },
+            "available_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Models the admin has added for this provider \u2014 shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers."
+            },
+            "timeout_secs": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "groq": {
+          "description": "Groq (https://console.groq.com) \u2014 fast hosted inference for Llama, Mixtral, DeepSeek, and others. OpenAI-compatible.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When false, skip registration. Default true."
+            },
+            "api_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_url": {
+              "type": "string"
+            },
+            "default_model": {
+              "type": "string"
+            },
+            "available_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Models the admin has added for this provider \u2014 shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers."
+            },
+            "timeout_secs": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "xai": {
+          "description": "xAI Grok (https://x.ai/api). OpenAI-compatible. Models: grok-4, grok-3-fast, etc.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When false, skip registration. Default true."
+            },
+            "api_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_url": {
+              "type": "string"
+            },
+            "default_model": {
+              "type": "string"
+            },
+            "available_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Models the admin has added for this provider \u2014 shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers."
+            },
+            "timeout_secs": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "openai_compat": {
+          "description": "Generic OpenAI-compatible gateway. Use this for any provider not already in the list above \u2014 Together, Fireworks, Perplexity, Mistral La Plateforme, DeepInfra, Azure OpenAI, vLLM-self-hosted, LocalAI, etc. Pick a `name` slug used in logs and ProviderId.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When false, skip registration. Default true."
+            },
+            "name": {
+              "type": "string",
+              "description": "Slug used in logs + ProviderId. Empty = disabled."
+            },
+            "api_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_url": {
+              "type": "string"
+            },
+            "default_model": {
+              "type": "string"
+            },
+            "available_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Models the admin has added for this provider \u2014 shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers."
+            },
+            "timeout_secs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "auth_style": {
+              "description": "Which auth header to send: 'bearer' (default, OpenAI-style Authorization), 'azure' (api-key header used by Azure OpenAI), or 'none' (no auth header \u2014 for unsecured local endpoints).",
+              "type": "string",
+              "enum": [
+                "bearer",
+                "azure",
+                "none"
+              ]
+            }
+          }
+        },
+        "anthropic": {
+          "description": "Anthropic Claude (https://console.anthropic.com). Native /v1/messages API \u2014 not OpenAI-compatible. Required header: anthropic-version (pinned by MIRA). Set api_key to enable.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When false, skip registration. Default true."
+            },
+            "api_key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Anthropic API key. Obtain at https://console.anthropic.com/settings/keys."
+            },
+            "base_url": {
+              "type": "string",
+              "description": "Override only for Anthropic-compatible proxies (e.g. Vercel AI Gateway, LiteLLM). Default https://api.anthropic.com."
+            },
+            "default_model": {
+              "type": "string",
+              "description": "Examples: claude-sonnet-4-5, claude-haiku-4-5, claude-opus-4-1."
+            },
+            "available_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Models the admin has added for this provider \u2014 shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers."
+            },
+            "timeout_secs": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "gemini": {
+          "description": "Google Gemini (https://aistudio.google.com). Native :generateContent API \u2014 not OpenAI-compatible. Uses x-goog-api-key header. Set api_key to enable.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When false, skip registration. Default true."
+            },
+            "api_key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Google API key. Obtain at https://aistudio.google.com/apikey."
+            },
+            "base_url": {
+              "type": "string",
+              "description": "Override only for Gemini-compatible proxies. Default https://generativelanguage.googleapis.com (the AI Studio API, not Vertex)."
+            },
+            "default_model": {
+              "type": "string",
+              "description": "Examples: gemini-2.5-pro (top), gemini-2.5-flash (fast/cheap), gemini-2.5-flash-lite."
+            },
+            "available_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Models the admin has added for this provider \u2014 shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers."
+            },
+            "timeout_secs": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "cli": {
+      "description": "Settings for the simple reedline CLI mode (invoked with --simple flag).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "colored_output": {
+          "description": "Enable ANSI colour codes in CLI output. Disable if your terminal does not support ANSI colours.",
+          "type": "boolean"
+        },
+        "streaming": {
+          "description": "Stream AI response tokens as they arrive. When false, the full response is buffered before being displayed.",
+          "type": "boolean"
+        },
+        "prompt": {
+          "description": "Input prompt string displayed before each user message.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "tui": {
+      "description": "Rich terminal UI (TUI) appearance and layout defaults. All settings can be changed at runtime.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "theme": {
+          "description": "Colour theme. Switch at runtime with /theme <name> or F5. Available themes: mira-dark, mira-light, dracula, gruvbox, nord.",
+          "type": "string",
+          "enum": [
+            "mira-dark",
+            "mira-light",
+            "dracula",
+            "gruvbox",
+            "nord"
+          ]
+        },
+        "layout": {
+          "description": "Initial layout mode. Switch at runtime with /layout <mode> or F6. Modes: simple (chat+input only), standard (+status bar), right-full/left-full (sidebar+status bar), right-only/left-only (sidebar, no status bar).",
+          "type": "string",
+          "enum": [
+            "simple",
+            "standard",
+            "right-full",
+            "left-full",
+            "right-only",
+            "left-only"
+          ]
+        },
+        "show_timestamps": {
+          "description": "Display timestamps next to messages in the chat view.",
+          "type": "boolean"
+        },
+        "show_token_count": {
+          "description": "Display the running token estimate in the status bar.",
+          "type": "boolean"
+        },
+        "mode": {
+          "description": "TUI backend selection. 'auto' picks server mode when server.enabled and reachable, else local. 'local' always talks to AgentCore directly. 'server' requires a running MIRA server; errors if unreachable.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "local",
+            "server"
+          ]
+        },
+        "server_url": {
+          "description": "Base URL of the MIRA HTTP server for server-mode TUI. Used when mode=server or mode=auto with server.enabled=true.",
+          "type": "string"
+        },
+        "auto_token_path": {
+          "description": "Path to the local bearer token the server mints at startup for same-host TUI use. Supports '~'. Ignored when MIRA_TOKEN env is set.",
+          "type": "string"
+        },
+        "resume_last": {
+          "description": "When true, on startup the TUI loads the tail of the most recent tui conversation and continues it instead of starting empty.",
+          "type": "boolean"
+        }
+      }
+    },
+    "server": {
+      "description": "MIRA HTTP server settings (invoked with --server flag). Exposes an API for Telegram, Signal, and other webhook-based integrations.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Whether the server starts automatically when MIRA launches in server mode.",
+          "type": "boolean"
+        },
+        "host": {
+          "description": "IP address to bind. Use '0.0.0.0' to accept external connections, '127.0.0.1' for localhost only.",
+          "type": "string"
+        },
+        "port": {
+          "description": "TCP port to listen on.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "tls_cert_path": {
+          "description": "Path to a TLS certificate file in PEM format. Set to null to use plain HTTP (not recommended for public servers).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tls_key_path": {
+          "description": "Path to the TLS private key file in PEM format. Required when tls_cert_path is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auth_token": {
+          "description": "Bearer token for API authentication. Callers must include 'Authorization: Bearer <token>' in every request. Set to null to disable authentication (not recommended for public-facing servers).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_connections": {
+          "description": "Maximum number of simultaneous client connections.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_timeout_secs": {
+          "description": "Maximum seconds to process a single request before returning a 408 timeout.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "allowed_origins": {
+          "description": "CORS allowed origins list. Use [\"*\"] to allow all origins. Empty array disables CORS headers.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "webhook_secret": {
+          "description": "Shared secret used to verify incoming webhook signatures (e.g. from Telegram or Signal). Set to null to skip signature verification.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "update_check": {
+          "description": "Periodic check against an upstream Releases API for a newer MIRA build. Off by default; intended for self-hosted operators who want a 'new version available' notice.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Whether to poll the source URL for new releases.",
+              "type": "boolean"
+            },
+            "source_url": {
+              "description": "Releases API URL to poll. Defaults to the public MIRA GitLab project; forks should override with their own GitHub / GitLab releases endpoint. Empty string disables (same as enabled=false).",
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "channels": {
+      "description": "Messaging channel integrations. Each channel must also be enabled individually.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "signal": {
+          "description": "Signal messenger integration via signal-cli (https://github.com/AsamK/signal-cli). Requires signal-cli to be installed and the phone number to be registered.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable the Signal channel. Requires a configured phone_number and signal-cli on PATH.",
+              "type": "boolean"
+            },
+            "phone_number": {
+              "description": "E.164-format phone number registered with Signal (e.g. '+15551234567').",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "rest_port": {
+              "description": "Port used by the signal-cli REST API daemon.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "socket_path": {
+              "description": "Path to the signald UNIX socket for polling mode.",
+              "type": "string"
+            },
+            "cli_binary": {
+              "description": "Name or full path to the signal-cli binary. Use 'signal-cli' if it is on your PATH.",
+              "type": "string"
+            },
+            "data_dir": {
+              "description": "Directory where signal-cli stores its account data and keys. Supports ~ expansion.",
+              "type": "string"
+            },
+            "hmac_key": {
+              "description": "HMAC-SHA256 secret key used to verify the X-Signal-Signature header on incoming webhook requests. Configure the same key in signal-cli. Set to null to disable signature verification (not recommended for public servers).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "telegram": {
+          "description": "Telegram bot integration via the Bot API (https://core.telegram.org/bots). Create a bot with @BotFather to get a token.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable the Telegram channel. Requires a bot_token.",
+              "type": "boolean"
+            },
+            "bot_token": {
+              "description": "Telegram Bot API token from @BotFather.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "webhook_url": {
+              "description": "Public HTTPS URL Telegram will POST updates to. Set to null to use long-polling (easier for local dev, no public URL needed).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "polling": {
+              "description": "Use long-polling to receive updates instead of a webhook. Recommended for local development.",
+              "type": "boolean"
+            },
+            "secret_token": {
+              "description": "DEPRECATED (0.152.x) — secret-token verification is now per-bot on each ChannelAccount row, configured from the Channels page in the web UI. This field is accepted on existing configs so they keep loading; serde drops it on the next save. Value here is never read.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "discord": {
+          "description": "Discord channel global config. Per-bot credentials live on each channel_accounts row (each MIRA user registers their own Discord application). This block only holds the MIRA-wide kill switch that the gateway connection + outbound dispatchers honour at request time.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable the Discord channel. When false, no gateway connections are opened and outbound dispatchers short-circuit. Per-row enabled flags still apply on top.",
+              "type": "boolean"
+            }
+          }
+        },
+        "matrix": {
+          "description": "Matrix channel global config. Per-account credentials (homeserver URL + access token) live on each channel_accounts row. This block only holds the MIRA-wide kill switch that the /sync long-poll loop + outbound dispatchers honour at request time.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable the Matrix channel. When false, no /sync loops are started and outbound dispatchers short-circuit. Per-row enabled flags still apply on top.",
+              "type": "boolean"
+            }
+          }
+        },
+        "whatsapp": {
+          "description": "WhatsApp channel global config (Meta WhatsApp Business Cloud API). Per-account credentials (phone_number_id + tokens) live on each channel_accounts row. This block only holds the MIRA-wide kill switch that the webhook handler + outbound dispatchers honour at request time.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable the WhatsApp channel. When false, inbound webhooks are dropped (200, no processing) and outbound dispatchers short-circuit. Per-row enabled flags still apply on top.",
+              "type": "boolean"
+            }
+          }
+        },
+        "slack": {
+          "description": "Slack channel global config (Events API). Per-account credentials (bot token + signing secret) live on each channel_accounts row. This block only holds the MIRA-wide kill switch that the webhook handler + outbound dispatchers honour at request time.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable the Slack channel. When false, inbound webhooks are dropped (200, no processing) and outbound dispatchers short-circuit. Per-row enabled flags still apply on top.",
+              "type": "boolean"
+            }
+          }
+        },
+        "external": {
+          "description": "External plugin channels via the Channel Provider Protocol (CPP). Per-account config (provider kind, send_url, HMAC secrets) lives on each channel_accounts row. This block only holds the MIRA-wide kill switch that the /webhook/external/{id} handler + outbound dispatchers honour.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable CPP external channels. When false, inbound webhooks are dropped (200, no processing) and outbound dispatchers short-circuit. Per-row enabled flags still apply on top.",
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "logging": {
+      "description": "Log output configuration. Logs are written to a file \u2014 the terminal remains clean for UI output.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "description": "Minimum log level to record. Recommended: 'info' for normal use, 'debug' or 'trace' for troubleshooting. Levels: trace < debug < info < warn < error.",
+          "type": "string",
+          "enum": [
+            "trace",
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "format": {
+          "description": "Log line format. 'compact' is human-readable single-line. 'pretty' is multi-line with colour. 'json' is machine-parseable for log aggregation (Loki, Datadog, etc.).",
+          "type": "string",
+          "enum": [
+            "compact",
+            "pretty",
+            "json"
+          ]
+        },
+        "file": {
+          "description": "Path to the log file. Supports ~ expansion. Parent directory is created automatically if absent.",
+          "type": "string"
+        },
+        "max_file_size_mb": {
+          "description": "Maximum log file size in megabytes before the file is rotated.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_files": {
+          "description": "Number of rotated log files to retain (including the active log file).",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "memory": {
+      "description": "Persistent memory system and vector search settings.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "vector_backend": {
+          "description": "Storage backend for vector embeddings. 'sqlite' uses the bundled SQLite database (no extra services needed). 'qdrant' connects to an external Qdrant server for production or high-volume use.",
+          "type": "string",
+          "enum": [
+            "sqlite",
+            "qdrant"
+          ]
+        },
+        "embedding": {
+          "description": "Embedding model configuration. Embeddings convert text to vectors for semantic (meaning-based) memory search.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "provider": {
+              "description": "Embedding provider. 'internal' uses the built-in fastembed engine \u2014 it downloads the model automatically on first use, no server required. Other providers require a running local or remote server.",
+              "type": "string",
+              "enum": [
+                "internal",
+                "ollama",
+                "lmstudio",
+                "openai",
+                "openrouter"
+              ]
+            },
+            "model": {
+              "description": "Embedding model name. internal: 'BGE-small-en-v1.5' (default, ~24 MB) or 'all-MiniLM-L6-v2'. ollama: 'nomic-embed-text'. lmstudio: model name as shown in the UI. openai: 'text-embedding-3-small'.",
+              "type": "string"
+            },
+            "provider_url": {
+              "description": "Base URL of the embedding server. Required for 'ollama' and 'lmstudio'. Ignored for 'internal'. For 'openai' use null to default to https://api.openai.com/v1.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model_cache_dir": {
+              "description": "Directory where the 'internal' provider caches downloaded model files. Supports ~ expansion.",
+              "type": "string"
+            },
+            "api_key": {
+              "description": "API key for the embedding provider. Required for 'openai' and 'openrouter'. Not used for 'internal', 'ollama', or 'lmstudio'.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "embedding_dim": {
+          "description": "Dimensionality of embedding vectors. Must match the chosen model exactly. BGE-small-en-v1.5 and all-MiniLM-L6-v2 \u2192 384. BGE-base-en-v1.5 \u2192 768. text-embedding-3-small \u2192 1536.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "embedding_cache_size": {
+          "description": "Maximum number of embedding vectors to keep in the in-memory LRU cache. Higher values reduce repeated embedding requests at the cost of RAM.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "similarity_threshold": {
+          "description": "Minimum cosine similarity score (0.0\u20131.0) required for a memory to appear in semantic search results. Higher values return fewer but more precise matches. Start at 0.6 and tune as needed.",
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "context_top_k": {
+          "description": "How many memories the per-turn context hook retrieves and injects into the prompt. Higher helps aggregation / 'how many' / multi-session questions at the cost of a larger prompt. Default 15.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "per_user_isolation": {
+          "description": "Give each user their own isolated memory namespace. Strongly recommended for multi-user deployments (Signal, Telegram).",
+          "type": "boolean"
+        },
+        "share_across_channels": {
+          "description": "When per_user_isolation is true, allow the same user's memories to be visible across different channels. A memory stored via Signal will also be accessible in the CLI for the same user ID.",
+          "type": "boolean"
+        },
+        "qdrant_url": {
+          "description": "Qdrant server URL. Only used when vector_backend is 'qdrant'. Run Qdrant via Docker: docker run -p 6333:6333 qdrant/qdrant.",
+          "type": "string"
+        },
+        "indexer": {
+          "description": "Background transcript indexer. Embeds historical chat messages into message_vectors so semantic recall can reach past conversations. Disabling stops new inserts but leaves existing vectors intact.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable the background indexer. Defaults to true. Set to false to disable transcript semantic indexing entirely.",
+              "type": "boolean"
+            },
+            "interval_secs": {
+              "description": "Seconds between idle polls for new messages. Only applies when the previous batch found zero rows; busy passes run back-to-back.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "batch_size": {
+              "description": "Maximum messages embedded per pass. Higher values backfill faster on first run at the cost of longer embedding-provider stalls.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "skip_roles": {
+              "description": "Message roles the indexer skips. Defaults to ['tool', 'system'] since those messages aren't conversationally meaningful.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "auto_extract": {
+          "description": "Post-turn memory auto-extraction. 'off' disables proactive writes, 'heuristic' uses the bundled regex extractor (default), and 'llm' runs a structured extraction pass through the model with confidence gating and category allow-listing. 'llm_channels' enables the LLM extractor per-channel independently of 'mode'.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "description": "Default extraction mode for all channels. 'off' \u2014 no auto-extraction anywhere. 'heuristic' \u2014 bundled regex extractor runs after every turn (default). 'llm' \u2014 LLM extractor runs on every channel post-turn. Per-channel overrides live in 'llm_channels'.",
+              "type": "string",
+              "enum": [
+                "off",
+                "heuristic",
+                "llm"
+              ]
+            },
+            "min_confidence": {
+              "description": "Minimum confidence tier required to persist an LLM-extracted candidate. Only applied when the LLM extractor runs.",
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ]
+            },
+            "allowed_categories": {
+              "description": "Memory categories eligible for LLM extraction. 'relationship' is off by default because it can involve third parties who haven't consented.",
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "fact",
+                  "preference",
+                  "skill",
+                  "relationship",
+                  "project"
+                ]
+              }
+            },
+            "llm_channels": {
+              "description": "Channels that use the richer LLM extractor regardless of 'mode' (unless mode='off'). Channel ids: 'web', 'telegram', 'signal', 'discord', 'slack', 'matrix', 'whatsapp', 'email'. Empty (default) means 'mode' alone decides. Example: ['telegram'] runs the LLM extractor for Telegram while everything else stays heuristic.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "rollup": {
+          "description": "Daily memory rollup. Background job that consolidates each user's previous UTC day of conversation into one summary memory, tagged 'rollup' and 'rollup:YYYY-MM-DD' for provenance. Off by default \u2014 costs one extra LLM call per active user per day, so users should opt in.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable the rollup job. Defaults to false. When true, a background poller consolidates each active user's previous UTC day into a summary memory.",
+              "type": "boolean"
+            },
+            "interval_secs": {
+              "description": "Seconds between polls. The loop wakes this often and runs rollups for any user whose target-day summary is still missing. One hour is a sensible default \u2014 the work is idempotent so repeats cost one DB check.",
+              "type": "integer",
+              "minimum": 60
+            },
+            "day_lag_days": {
+              "description": "How many UTC days back to summarise. 1 = yesterday (default, safe \u2014 today is still happening). Set to 0 only if you want mid-day partial summaries.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_messages": {
+              "description": "Hard cap on messages fed to one summarizer call. Oldest-first truncation keeps the prompt bounded on heavy days.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_chars_per_message": {
+              "description": "Per-message character cap before concatenation. Long pastes rarely help a day summary; truncating keeps the prompt short.",
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "graph": {
+          "description": "Temporal knowledge-graph memory. Additive and off by default. When enabled, the post-turn extractor also writes typed, timestamped triples to kg_entities/kg_edges so aggregation/counting questions resolve against exact set membership instead of fuzzy top-k retrieval.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Master switch. Off (default) = flat memory only, no graph extraction or retrieval.",
+              "type": "boolean"
+            }
+          }
+        },
+        "recency": {
+          "description": "Recency tuning for semantic recall. Retrieval blends similarity with an age-based freshness boost so recently-formed memories can surface ahead of older but frequently-reinforced ones: score' = (1-weight)*similarity + weight*2^(-age_days/half_life_days).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "weight": {
+              "description": "Weight of the recency term in [0.0, 1.0]. 0.0 = pure similarity (pre-0.244 behaviour); higher favours fresher memories. Default 0.25.",
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "half_life_days": {
+              "description": "Half-life in days: a memory this old contributes half the recency boost of a brand-new one. Larger = recency decays more slowly. Default 30.",
+              "type": "number",
+              "exclusiveMinimum": 0.0
+            }
+          }
+        },
+        "consolidation": {
+          "description": "Sleep-like consolidation passes over the knowledge graph. Phased nightly clean-up that resolves contradictions, dedups entities, and scores importance — all deterministic and MIRA-side. Each phase independently togglable so the ones that don't fit your use case can be turned off without disabling the others. All off by default.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "contradictions_enabled": {
+              "description": "Phase C — resolve single-valued-predicate contradictions (works_at, lives_in, married_to, etc.): when multiple live edges exist for the same (subject, predicate), keep the newest and close the older edges' valid_to. Pure SQL + a curated predicate list. Off by default. The LongMemEval benchmark can't validate this work — its haystacks are activity-heavy and state-poor — ship and observe in production usage.",
+              "type": "boolean"
+            },
+            "entity_dedup_enabled": {
+              "description": "Phase A — merge near-duplicate entities within the same entity_type via strict-token-subset + size-ratio rule (e.g. 'navy blazer' / 'navy blue blazer'). Re-points edges to the winner (more-edges, tiebreak: older), rolls loser name into winner aliases, marks loser superseded. Pure SQL, no LLM. Off by default. Runs per active user in the nightly memory.rollup tick AFTER contradictions_enabled (so dedup's edge-count tiebreak sees post-resolution counts). Production-driven: LongMemEval haystacks aren't long enough to grow the entity sprawl this consolidates.",
+              "type": "boolean"
+            },
+            "entity_dedup_ratio": {
+              "description": "Size-ratio threshold for the Phase A merge rule (smaller / larger token counts). 0.6 (default) catches {navy, blazer} subset of {navy, blue, blazer} (2/3 = 0.67) while rejecting {plant} subset of {peace, lily, plant} (1/3 = 0.33). Raise toward 1.0 for stricter merges (only near-identical names), lower toward 0.4 for more aggressive merging (higher risk of false positives).",
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "importance_enabled": {
+              "description": "Phase D — score every live edge nightly as ln(1 + access_count) × exp(-age_days / half_life). Retrieval already orders by importance DESC (no-op until non-zero scores exist), so enabling this biases context toward frequently-reinforced + recent facts. Access tracking on retrieval is always-on and free — only the scoring pass is gated. Off by default. Runs LAST in the nightly tick so it scores the post-dedup, post-contradiction edge set.",
+              "type": "boolean"
+            },
+            "importance_half_life_days": {
+              "description": "Half-life for the Phase D decay term, in days. After this many days of no reinforcement, an edge's score decays to ~50% of its un-decayed strength. 30 default (month-scale, matches typical personal context drift). Range 1–365.",
+              "type": "number",
+              "minimum": 1.0,
+              "maximum": 365.0
+            }
+          }
+        }
+      }
+    },
+    "session": {
+      "description": "Conversation session lifecycle settings.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cleanup_interval_secs": {
+          "description": "Interval in seconds between background sweeps that remove expired sessions.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeout_secs": {
+          "description": "Seconds of inactivity after which a session is marked as expired and eligible for cleanup.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_turns": {
+          "description": "Maximum number of conversation turns (one user message + one assistant reply = one turn) to retain per session. Older turns are dropped when this limit is reached.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "companion": {
+      "description": "Companion-mode (proactive check-in) tuning. Companion is otherwise configured per-user; this holds global scheduler knobs.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_unanswered_checkins": {
+          "description": "Pause proactive check-ins after this many go unanswered in a row; the counter resets on any user message, so check-ins resume when the user replies. 0 disables the cap (check-ins then bounded only by min-gap, daily cap, and quiet hours). Default 3.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_per_day": {
+          "description": "Maximum proactive check-ins per user-local day (hard ceiling, separate from the unanswered cap). Default 6.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "min_gap_minutes": {
+          "description": "Minimum minutes between consecutive proactive check-ins (frequency floor). Default 90.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "automations": {
+      "description": "Automations subsystem \u2014 per-user quotas, agent-creation gating, and channel rate limits for scheduled prompts, webhooks, and event subscriptions.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "quota_per_user": {
+          "description": "Hard caps on how many automation rows a single user may own. Enforced at create-time.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schedules": {
+              "description": "Maximum scheduled-prompt rows per user. Default: 50.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "webhooks": {
+              "description": "Maximum registered webhook rows per user. Default: 20.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "event_subscriptions": {
+              "description": "Maximum event-subscription rows per user. Default: 50.",
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "agent_creates_pending": {
+          "description": "When true, agent-authored automations land in 'pending_approval' instead of 'active'. The user approves or rejects from the UI. Default: true.",
+          "type": "boolean"
+        },
+        "agent_rationale_required": {
+          "description": "When true, agent-authored automations must include a non-empty rationale string. Default: true.",
+          "type": "boolean"
+        },
+        "max_chain_depth": {
+          "description": "Hard cap on how many activations may chain together before the dispatcher refuses. Guards against runaway event loops. Default: 5.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "channel_rate_limits": {
+          "description": "Per-channel cap on channel_message actions per minute, scoped to the row's owning user. Keys are channel ids ('web', 'signal', 'telegram', 'email'); the special key '*' is the fallback. A value of 0 disables the limit for that channel.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "watchdog": {
+          "description": "Log/audit watchdog. Tails the configured log file every interval_secs, fires a 'watchdog.alert' event for matched lines. Off by default; opt in by flipping enabled and setting notify_user_id.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Master switch. Default false."
+            },
+            "interval_secs": {
+              "type": "integer",
+              "minimum": 5,
+              "description": "How often the heartbeat ticks. Default 60."
+            },
+            "severity_threshold": {
+              "type": "string",
+              "enum": [
+                "WARN",
+                "ERROR"
+              ],
+              "description": "Lowest level treated as alert. Default WARN."
+            },
+            "dedup_ttl_secs": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Per-fingerprint suppression window. Default 600."
+            },
+            "rate_limit_per_min": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Hard global cap on alerts/min. 0 disables. Default 10."
+            },
+            "storm_threshold": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "W4 storm pause \u2014 emit count from one source within storm_window_secs that triggers a per-source pause. 0 disables. Default 30."
+            },
+            "storm_window_secs": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "W4 storm pause \u2014 sliding window for the threshold. Default 300 (5 min)."
+            },
+            "storm_cooldown_secs": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "W4 storm pause \u2014 how long a source stays paused after a storm trip. Default 900 (15 min)."
+            },
+            "ignore_patterns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Regexes that, when matched, skip the line before fingerprinting."
+            },
+            "notify_user_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Recipient user UUID for the auto-seeded ChannelMessage subscription. Null = events fire but no channel routing is auto-created."
+            },
+            "channel": {
+              "type": "string",
+              "enum": [
+                "web",
+                "signal",
+                "telegram",
+                "email"
+              ],
+              "description": "Channel for the auto-seeded subscription. Default web."
+            },
+            "log_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Override the tailed log path. Null falls back to logging.file."
+            }
+          }
+        }
+      }
+    },
+    "agent": {
+      "description": "Agent reasoning and tool-calling behaviour.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_tool_rounds": {
+          "description": "Maximum tool-call/observe cycles per user message before the agent gives up and returns its last response. Prevents runaway loops.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "tool_mode": {
+          "description": "Tool-calling protocol. 'auto' tries OpenAI structured tool_calls first and falls back to ReAct text parsing. 'openai' enforces structured format only. 'react' enforces text parsing only. 'disabled' disables all tool use.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "openai",
+            "react",
+            "disabled"
+          ]
+        },
+        "system_prompt_file": {
+          "description": "Path to an agent.md persona file. If empty or the file is absent the built-in default MIRA prompt is used. Supports ~ expansion.",
+          "type": "string"
+        },
+        "max_context_turns": {
+          "description": "Maximum conversation turns injected into the model context per request. Older turns are silently omitted (they remain in the session store). Tune to fit your model's context window.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "avatar": {
+          "description": "Assistant avatar. Encoded as 'preset:<key>' for bundled icons, or 'upload:<ext>' when a file exists at {data_dir}/avatars/agent.{ext}. Null = built-in MIRA logo.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "avatar_updated_at": {
+          "description": "Unix-ms timestamp of the last avatar change. Used as a cache-buster on the web client.",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "llm_aliases": {
+          "description": "Map of logical alias name -> (provider, model) tuple. Skill manifests pick a model by alias ('coding', 'fast', 'primary', ...) so site admins can swap providers globally without editing every Skill.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "provider"
+            ],
+            "properties": {
+              "provider": {
+                "description": "Name of a provider declared in [providers] (e.g. 'openrouter', 'lmstudio'). Resolution failure here is a runtime error, not a config-load error.",
+                "type": "string"
+              },
+              "model": {
+                "description": "Specific model id within the chosen provider. Omit to use the provider's default_model.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "max_tool_round_tokens": {
+          "description": "Per-call token cap applied to non-streaming tool-loop rounds (where the model emits a structured tool call rather than prose). Tight on purpose: reasoning-distilled fine-tunes will happily loop on duplicated tool-call XML when given enough rope. Default 2048.",
+          "type": "integer",
+          "minimum": 256
+        },
+        "max_response_tokens": {
+          "description": "Per-call token cap applied to the streaming final-answer path. Set large enough that long markdown plans (or models that prepend reasoning before answering) don't truncate mid-sentence. Default 16384.",
+          "type": "integer",
+          "minimum": 256
+        },
+        "tools": {
+          "description": "Per-tool enable/disable switches. All tools are disabled by default for security.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "shell": {
+              "description": "Shell command execution tool. Disabled by default. Enable only on trusted deployments.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "filesystem": {
+              "description": "File read/write tool. Disabled by default.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "web_fetch": {
+              "description": "Tier 2 web_fetch tool \u2014 retrieves a URL and returns readability-extracted text. Subject to the security.http SSRF and rate-limit policy.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "max_body_bytes": {
+                  "type": "integer",
+                  "minimum": 1024
+                },
+                "max_text_chars": {
+                  "type": "integer",
+                  "minimum": 1024
+                },
+                "timeout_secs": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_redirects": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "url_preview": {
+              "description": "Tier 2 url_preview tool \u2014 pulls <title>, description and OpenGraph tags. Subject to security.http.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "max_body_bytes": {
+                  "type": "integer",
+                  "minimum": 1024
+                }
+              }
+            },
+            "web_search": {
+              "description": "Tier 2 web_search tool \u2014 supports DDG HTML scraping (no key), Brave Search API (key required), and a self-hosted SearXNG instance (URL required). Backends are tried in the order 'default' then 'failover' until one succeeds.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "default": {
+                  "type": "string",
+                  "enum": [
+                    "ddg",
+                    "brave",
+                    "searxng"
+                  ]
+                },
+                "failover": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "ddg",
+                      "brave",
+                      "searxng"
+                    ]
+                  }
+                },
+                "top_k": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 20
+                },
+                "brave": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "api_key": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                },
+                "searxng": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "url": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "detail": {
+          "description": "Agent detail-view page defaults. Controls the /agents/{id} live view: poll vs SSE, poll interval, and whether to prettify adapter stdout.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "view_mode": {
+              "description": "How the detail page receives updates. 'poll' = periodic GETs (simpler, default). 'sse' = streaming connection (sub-second updates on long-running agents).",
+              "type": "string",
+              "enum": [
+                "poll",
+                "sse"
+              ]
+            },
+            "poll_interval_ms": {
+              "description": "Frontend poll interval in milliseconds. Only consulted when view_mode is 'poll'. Reasonable range 500\u20135000.",
+              "type": "integer",
+              "minimum": 100
+            },
+            "prettify_output": {
+              "description": "When true, the detail page JSON-prettifies stdout lines it recognises (claudecode stream-json, opencode events). False = render raw output.",
+              "type": "boolean"
+            }
+          }
+        },
+        "show_thinking": {
+          "description": "Render a 'Thinking' rollup on each assistant message in the chat UI containing the agent's tool calls, results, model reasoning blocks, and wiki context fetched for the turn. Server still collects + persists the events when false, so flipping back to true doesn't lose past activity.",
+          "type": "boolean"
+        },
+        "session_budget_usd": {
+          "description": "Shared USD budget across a root agent's whole multi-agent tree. When the combined LLM spend of all agents under a session exceeds this, work is cut off with a 'session_budget_exceeded' fault. Raise it for long research runs (this cap is the usual cause of a lengthy run failing). Default 5.0.",
+          "type": "number"
+        },
+        "default_task_budget_usd": {
+          "description": "Per-task USD budget assigned to a worker spawned via spawn_background_task when the caller omits one. Default 2.0.",
+          "type": "number"
+        },
+        "max_task_budget_usd": {
+          "description": "Hard ceiling a single spawned task's USD budget is clamped to. Default 10.0.",
+          "type": "number"
+        },
+        "reasoning": {
+          "description": "Reasoning-model auto-routing (roadmap #13). When enabled, hard turns are routed to a stronger reasoning provider instead of the default.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Master switch for reasoning auto-routing. Off by default.",
+              "type": "boolean"
+            },
+            "provider": {
+              "description": "Provider id (as in providers.*) to route hard turns to; its model should be your strong reasoning model. Empty disables routing.",
+              "type": "string"
+            },
+            "min_chars": {
+              "description": "Input length (chars) at/above which a turn counts as a routing signal.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "effort": {
+              "description": "Reasoning effort for the routed-to provider on hard turns. Sent as OpenAI reasoning_effort; mapped to an Anthropic thinking budget.",
+              "type": "string",
+              "enum": ["low", "medium", "high"]
+            },
+            "classifier_provider": {
+              "description": "Provider id for the cheap classifier consulted on ambiguous turns (hybrid fallback). Should be a small/fast model. Empty uses the default provider.",
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "guardian": {
+      "description": "MIRA-Guardian — the built-in, code-defined system watchdog agent. Its identity (system prompt + tool allowlist) is immutable and lives in the binary; this only controls whether it runs and at what authority.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "description": "'off' — disabled (default; opt-in). 'monitor' — observe and alert only, no actions. 'active' — monitor plus gated/isolation remediation actions. Identity is fixed regardless; only authority changes.",
+          "type": "string",
+          "enum": ["off", "monitor", "active"]
+        },
+        "watch_interval_secs": {
+          "description": "How often (seconds) the proactive watch loop checks the latest health snapshot and, on a new non-green state, fires a Guardian alert. Only active when mode != 'off'. Default 900 (15 min); minimum 60.",
+          "type": "integer",
+          "minimum": 60
+        },
+        "isolation_dry_run": {
+          "description": "Isolation autonomy (§4.5) dry-run. When true (default), on detecting it cannot reach you (a configured channel's delivery failed) the Guardian only logs + audits what it would do — it does not execute. Set false to permit real autonomous remediation under isolation. Only relevant in 'active' mode.",
+          "type": "boolean"
+        },
+        "isolation_grace_secs": {
+          "description": "Grace period (seconds) after a failed approval delivery before the Guardian may act autonomously — a window for any web-side decision. Default 180 (3 min). Only relevant when isolation_dry_run = false.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "provision_model": {
+          "description": "Ollama-registry model the provisioning flow (P2b) pulls + binds the Guardian to when no local provider is configured, so a fresh install can run the Guardian without manual LLM setup. Default 'qwen2.5:3b-instruct'.",
+          "type": "string"
+        }
+      }
+    },
+    "security": {
+      "description": "HTTP security policy applied by the middleware layer (rate limiting, CORS, IP blocking). Authentication tokens are configured under 'server.auth_token'.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rate_limit_rpm": {
+          "description": "Maximum requests per minute per IP address. Set to 0 to disable rate limiting.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "cors_allowed_origins": {
+          "description": "CORS allowed origins. Example: ['https://my-app.example.com']. Empty array = deny all cross-origin requests.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_ips": {
+          "description": "IP addresses permanently blocked from all endpoints. Checked before rate limiting.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "jwt_secret": {
+          "description": "HS256 secret for signing/verifying JWT access tokens. Auto-generated on first run if omitted.",
+          "type": "string"
+        },
+        "session_days": {
+          "description": "Refresh token lifetime in days. Default: 7.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "http": {
+          "description": "Outbound HTTP policy applied by Tier 2 web tools (SSRF guard, rate limits, denylist/allowlist). Independent from the inbound-traffic policy above.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "denylist": {
+              "description": "Domains the policy layer refuses to reach. Exact match OR suffix at a dot boundary (e.g. 'example.com' also blocks 'api.example.com').",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowlist": {
+              "description": "When allowlist_only=true, only these domains may be reached.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowlist_only": {
+              "description": "Paranoid mode: block everything not in the allowlist. Default false.",
+              "type": "boolean"
+            },
+            "searxng_exception": {
+              "description": "Single 'host:port' bypass for a user-operated SearXNG on a private network. Only the private-IP block is relaxed; scheme, size, timeout and rate limits still apply.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "rate": {
+              "description": "Per-user token-bucket limits for Tier 2 HTTP traffic.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "user_per_min": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "user_per_hour": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "user_per_domain_per_min": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "search_per_min": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "proxy": {
+      "description": "nginx reverse proxy configuration. When enabled, MIRA generates an nginx.conf, binds its HTTP server to 127.0.0.1 only, and manages nginx as a subprocess.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Enable nginx reverse proxy management. Requires nginx to be installed on the system.",
+          "type": "boolean"
+        },
+        "nginx_binary": {
+          "description": "Full path to the nginx binary. Use '/usr/sbin/nginx' on most Linux distributions.",
+          "type": "string"
+        },
+        "config_path": {
+          "description": "Where MIRA writes the generated nginx.conf. Supports ~ expansion. Parent directory is created automatically.",
+          "type": "string"
+        },
+        "pid_path": {
+          "description": "nginx PID file path. Used to detect running nginx and send reload signals. Supports ~ expansion.",
+          "type": "string"
+        },
+        "worker_processes": {
+          "description": "nginx worker_processes directive. 'auto' lets nginx choose based on CPU cores.",
+          "type": "string"
+        },
+        "websocket_support": {
+          "description": "Add nginx config for WebSocket proxying at /api/v1/stream. Required for the browser streaming client.",
+          "type": "boolean"
+        },
+        "tls": {
+          "description": "TLS (HTTPS) configuration. nginx handles TLS termination; MIRA's internal HTTP server always uses plain HTTP.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable TLS. Requires cert_path and key_path to be valid PEM files.",
+              "type": "boolean"
+            },
+            "cert_path": {
+              "description": "Path to the TLS certificate file in PEM format. Supports ~ expansion.",
+              "type": "string"
+            },
+            "key_path": {
+              "description": "Path to the TLS private key file in PEM format. Supports ~ expansion.",
+              "type": "string"
+            },
+            "listen_port": {
+              "description": "HTTPS port nginx listens on.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        }
+      }
+    },
+    "wiki": {
+      "description": "Per-user wiki \u2014 markdown knowledge base companion to the structured memory DB. Stores narrative pages on disk under {data_dir}/wikis/users/<id>/.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Enable wiki context injection and auto-extraction. When false, the wiki directory is not created and no context is injected.",
+          "type": "boolean"
+        },
+        "auto_extract": {
+          "description": "How the post-turn extractor that derives wiki pages from conversations behaves.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "description": "'review' (default, ChatGPT-lessons mitigation: ops land as pending until the user approves), 'auto' (apply immediately), or 'off' (extractor disabled).",
+              "type": "string",
+              "enum": [
+                "review",
+                "auto",
+                "off"
+              ]
+            },
+            "min_confidence": {
+              "description": "Minimum extractor confidence in [0.0, 1.0]. Candidates below this threshold are dropped.",
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "max_ops_per_turn": {
+              "description": "Maximum number of wiki ops emitted per conversation turn. Keeps the wiki from getting noisy on busy days.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "auto_apply_above": {
+              "description": "In mode='review', ops with extractor confidence at or above this threshold [0.0, 1.0] are applied immediately instead of waiting in the review queue; lower-confidence ops still land as pending. Omit (default) to require review for every extracted op. Ignored when mode is 'auto' or 'off'.",
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          }
+        },
+        "agent_tools": {
+          "description": "Controls the model-callable `wiki` skill (search/read are always on; writes are gated by write_mode).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "When false, no wiki tools are registered \u2014 the model has no direct way to read or write the wiki (it still reads from context-injection).",
+              "type": "boolean"
+            },
+            "write_mode": {
+              "description": "'review' (default \u2014 agent writes land as pending until approved), 'auto' (writes apply immediately), or 'off' (write tools not registered; reads only).",
+              "type": "string",
+              "enum": [
+                "review",
+                "auto",
+                "off"
+              ]
+            }
+          }
+        },
+        "git": {
+          "description": "Git-backed durability for the wiki. When enabled, each wiki is initialised as a git repo and every applied op can auto-commit.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Init <wiki_root>/.git on first startup and track changes.",
+              "type": "boolean"
+            },
+            "auto_commit": {
+              "description": "Commit after every successful applied op. Push/pull stay manual.",
+              "type": "boolean"
+            }
+          }
+        },
+        "mcp": {
+          "description": "Model Context Protocol server. When enabled, `mira wiki mcp-serve` exposes the user's wiki pages as MCP resources over stdio.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable the wiki MCP server.",
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "description": "Where subagent-spawned task deliverables land. Each task gets a per-skill subdir under root_dir, named with a slug + task_id.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "root_dir": {
+          "description": "Filesystem path where task artifact directories are created. Supports ~ expansion. Default '~/mira-artifacts'.",
+          "type": "string"
+        }
+      }
+    },
+    "calendar": {
+      "description": "Calendar integration. MIRA-native storage is always available; external sync is opt-in.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Enable MIRA-native calendar storage and agent tools.",
+          "type": "boolean"
+        },
+        "sync_provider": {
+          "description": "External source to mirror into the native calendar. 'none' keeps MIRA self-contained.",
+          "type": "string",
+          "enum": [
+            "none",
+            "caldav",
+            "google",
+            "outlook"
+          ]
+        },
+        "sync_interval_mins": {
+          "description": "How often the sync engine polls the external source, in minutes. Floor is 5.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "caldav": {
+          "description": "CalDAV server credentials. Only used when sync_provider = 'caldav'.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "description": "Full URL to the CalDAV calendar collection.",
+              "type": "string"
+            },
+            "username": {
+              "description": "Basic-auth username (often the user's email).",
+              "type": "string"
+            },
+            "password": {
+              "description": "Basic-auth password or app-specific token.",
+              "type": "string"
+            }
+          }
+        },
+        "google": {
+          "description": "Google Calendar OAuth client settings. Only used when sync_provider = 'google'.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "client_id": {
+              "description": "Google OAuth client id.",
+              "type": "string"
+            },
+            "client_secret": {
+              "description": "Google OAuth client secret.",
+              "type": "string"
+            },
+            "redirect_uri": {
+              "description": "OAuth redirect URI, must match the Google console.",
+              "type": "string"
+            },
+            "scopes": {
+              "description": "Space- or comma-separated OAuth scopes.",
+              "type": "string"
+            }
+          }
+        },
+        "outlook": {
+          "description": "Microsoft Graph OAuth client settings. Only used when sync_provider = 'outlook'.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "client_id": {
+              "description": "Microsoft / Azure app client id.",
+              "type": "string"
+            },
+            "client_secret": {
+              "description": "Microsoft / Azure app client secret.",
+              "type": "string"
+            },
+            "redirect_uri": {
+              "description": "OAuth redirect URI, must match the Azure app registration.",
+              "type": "string"
+            },
+            "scopes": {
+              "description": "Space- or comma-separated OAuth scopes.",
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "sandbox": {
+      "description": "Tier 4 sandboxed code execution. Disabled by default. Requires a prebaked rootfs (see `mira sandbox install python`).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Master switch. When false, no Tier 4 tool is registered regardless of per-tool toggles.",
+          "type": "boolean"
+        },
+        "seccomp_mode": {
+          "description": "Which seccomp filter the backend installs. `denylist` (default) blocks escape primitives; `allowlist` permits only the syscalls a Python interpreter needs.",
+          "type": "string",
+          "enum": [
+            "denylist",
+            "allowlist"
+          ]
+        },
+        "code_run": {
+          "description": "Settings for the `code_run` agent tool.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable the `code_run` tool. Both this and `sandbox.enabled` must be true.",
+              "type": "boolean"
+            },
+            "allowed_languages": {
+              "description": "Languages the tool will accept. Iteration B ships `python` only.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "max_wall_clock_seconds": {
+              "description": "Hard ceiling on per-call wall-clock seconds.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_memory_mb": {
+              "description": "Per-call memory cap (RLIMIT_AS) in megabytes.",
+              "type": "integer",
+              "minimum": 16
+            }
+          }
+        },
+        "python": {
+          "description": "Python rootfs settings.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rootfs_path": {
+              "description": "Override path for the python pivot root. Empty = use the default under <data_dir>/sandbox/rootfs/.",
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "tts": {
+      "description": "Text-to-Speech subsystem.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Master switch for the TTS subsystem.",
+          "type": "boolean"
+        },
+        "default_backend": {
+          "description": "Backend used when no per-channel route or per-request override applies.",
+          "type": "string",
+          "enum": [
+            "internal",
+            "kokoro",
+            "chatterbox",
+            "openai",
+            "openai_compat",
+            "elevenlabs",
+            "cartesia"
+          ]
+        },
+        "default_voice": {
+          "description": "Voice id used when the request does not specify one. Empty = backend default.",
+          "type": "string"
+        },
+        "default_speed": {
+          "description": "Speech rate. 1.0 = natural; supported band 0.5..=2.0.",
+          "type": "number",
+          "minimum": 0.25,
+          "maximum": 4.0
+        },
+        "default_format": {
+          "description": "Encoder hint.",
+          "type": "string",
+          "enum": [
+            "wav",
+            "mp3",
+            "ogg-opus"
+          ]
+        },
+        "streaming": {
+          "description": "Sentence-chunked streaming for chat (Stage 2+).",
+          "type": "boolean"
+        },
+        "max_chars_per_request": {
+          "description": "Safety cap on a single TTS call.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_timeout_secs": {
+          "description": "Per-request timeout in seconds.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "cache": {
+          "description": "Two-layer (LRU memory + disk) audio cache.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable caching of synthesised audio.",
+              "type": "boolean"
+            },
+            "max_disk_mb": {
+              "description": "Disk-cache cap in megabytes.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "ttl_days": {
+              "description": "Cache entries older than this are swept on startup.",
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "internal": {
+          "description": "Out-of-the-box local engine (Piper subprocess + voice auto-download).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "engine": {
+              "description": "Internal engine.",
+              "type": "string",
+              "enum": [
+                "piper",
+                "espeak",
+                "kokoro"
+              ]
+            },
+            "voices_dir": {
+              "description": "Override for <data_dir>/tts/voices. Empty = derive.",
+              "type": "string"
+            },
+            "default_voice": {
+              "description": "Default Piper voice id.",
+              "type": "string"
+            },
+            "auto_download_voices": {
+              "description": "Whether the backend may fetch voice files on first use.",
+              "type": "boolean"
+            },
+            "binary_path": {
+              "description": "Override for the Piper executable. Empty = derive.",
+              "type": "string"
+            },
+            "volume": {
+              "description": "Web playback gain. 1.0 = unaltered, 2.0 = doubled.",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2
+            }
+          }
+        },
+        "kokoro": {
+          "description": "K1 (Q2 #10) — native in-process Kokoro-82M backend (any-tts / Candle). Active only in a build with the 'kokoro' feature. American/British English.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Register the Kokoro backend. Defaults off; the model loads lazily on first use.",
+              "type": "boolean"
+            },
+            "model_path": {
+              "description": "Override for <data_dir>/tts/kokoro/Kokoro-82M. Empty = derive.",
+              "type": "string"
+            },
+            "default_voice": {
+              "description": "Kokoro preset voice id (e.g. af_heart, am_michael, bf_emma).",
+              "type": "string"
+            },
+            "auto_download": {
+              "description": "Pull missing weights from HuggingFace on first use.",
+              "type": "boolean"
+            },
+            "device": {
+              "description": "Compute device. CUDA/Metal require the matching any-tts GPU build feature; otherwise they degrade to CPU.",
+              "type": "string",
+              "enum": [
+                "auto",
+                "cpu",
+                "cuda",
+                "metal"
+              ]
+            }
+          }
+        },
+        "chatterbox": {
+          "description": "K3 (Q2 #10) — Chatterbox AMD Vulkan TTS server integration. OpenAI-compatible server, fast on AMD Radeon via Vulkan.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Register the `chatterbox` TTS backend (client → http://127.0.0.1:{port}/v1).",
+              "type": "boolean"
+            },
+            "port": {
+              "description": "Local port the Chatterbox server listens on.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "default_voice": {
+              "description": "Default Chatterbox preset voice (e.g. Adrian).",
+              "type": "string"
+            },
+            "supervise": {
+              "description": "Have MIRA spawn + health-check + restart the server process. Same-host only.",
+              "type": "boolean"
+            },
+            "binary_path": {
+              "description": "Path to the Chatterbox server executable. Required when supervise = true.",
+              "type": "string"
+            },
+            "extra_args": {
+              "description": "Extra args passed to the server on spawn (model paths, --config, …).",
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "openai": {
+          "description": "OpenAI cloud TTS (api.openai.com).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "api_key": {
+              "description": "API key. null = fall back to providers.openai.api_key, then OPENAI_API_KEY env.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_url": {
+              "description": "OpenAI-compatible base URL.",
+              "type": "string"
+            },
+            "model": {
+              "description": "Model id.",
+              "type": "string"
+            },
+            "default_voice": {
+              "description": "Default voice id (alloy, echo, fable, onyx, nova, shimmer, \u2026).",
+              "type": "string"
+            },
+            "volume": {
+              "description": "Web playback gain. 1.0 = unaltered, 2.0 = doubled.",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2
+            }
+          }
+        },
+        "openai_compat": {
+          "description": "Self-hosted OpenAI-compatible TTS (Piper daemon, OpenedAI-Speech, LiteLLM, \u2026).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "description": "Server base URL.",
+              "type": "string"
+            },
+            "api_key": {
+              "description": "Optional bearer token.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "description": "Model id forwarded to the server.",
+              "type": "string"
+            },
+            "default_voice": {
+              "description": "Default voice id.",
+              "type": "string"
+            },
+            "volume": {
+              "description": "Web playback gain. 1.0 = unaltered, 2.0 = doubled.",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2
+            }
+          }
+        },
+        "elevenlabs": {
+          "description": "ElevenLabs cloud TTS (WebSocket).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "api_key": {
+              "description": "ElevenLabs API key.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "description": "Model id (eleven_turbo_v2_5, eleven_flash_v2_5, \u2026).",
+              "type": "string"
+            },
+            "default_voice_id": {
+              "description": "Default voice id.",
+              "type": "string"
+            },
+            "volume": {
+              "description": "Web playback gain. 1.0 = unaltered, 2.0 = doubled.",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2
+            }
+          }
+        },
+        "cartesia": {
+          "description": "Cartesia Sonic cloud TTS (WebSocket, sub-100 ms first-byte).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "api_key": {
+              "description": "Cartesia API key.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "description": "Model id (sonic-english, \u2026).",
+              "type": "string"
+            },
+            "default_voice_id": {
+              "description": "Default voice id.",
+              "type": "string"
+            },
+            "volume": {
+              "description": "Web playback gain. 1.0 = unaltered, 2.0 = doubled.",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2
+            }
+          }
+        },
+        "routing": {
+          "description": "Per-channel backend pinning. Each value is a backend id or 'internal'.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "web": {
+              "description": "Backend used for the web chat \ud83d\udd0a button.",
+              "type": "string"
+            },
+            "tui": {
+              "description": "Backend used for /speak in the terminal UI.",
+              "type": "string"
+            },
+            "telegram": {
+              "description": "Backend used for Telegram voice notes.",
+              "type": "string"
+            },
+            "signal": {
+              "description": "Backend used for Signal voice messages.",
+              "type": "string"
+            }
+          }
+        },
+        "voice_prefs": {
+          "description": "Server-default per-channel voice prefs (response policy + voice id). Each user can override per-channel from their profile. Keys are channel ids (web, tui, telegram, signal, or any plugin-registered channel). Missing channels fall back to 'never' / no voice id.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "response_policy": {
+                "description": "When MIRA replies with voice on this channel. 'always' = every reply, 'on_voice_input' = only when the inbound message was voice, 'never' = text only. Omit or null to inherit.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "always",
+                  "on_voice_input",
+                  "never",
+                  null
+                ]
+              },
+              "voice_id": {
+                "description": "Backend voice id override for this channel. Omit, null, or empty to inherit.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "stt": {
+      "description": "Speech-to-Text subsystem. Mirrors the TTS layout: pluggable backends behind a routing service, with a default internal whisper.cpp engine and optional OpenAI / OpenAI-compatible cloud or self-hosted backends.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Master switch for the STT subsystem.",
+          "type": "boolean"
+        },
+        "default_backend": {
+          "description": "Backend used when no per-channel route or per-request override applies.",
+          "type": "string",
+          "enum": [
+            "internal",
+            "openai",
+            "openai_compat"
+          ]
+        },
+        "default_language": {
+          "description": "BCP-47 language hint (e.g. 'en', 'de'). Empty = let the backend auto-detect.",
+          "type": "string"
+        },
+        "max_audio_seconds": {
+          "description": "Hard cap on a single transcription's audio length.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_timeout_secs": {
+          "description": "Per-request timeout against the backend.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "internal": {
+          "description": "Out-of-the-box local engine (whisper.cpp via the whisper-rs FFI).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "description": "Whisper.cpp ggml model id ('tiny.en', 'base.en', 'small.en', 'tiny', 'base', 'small', 'medium', 'medium.en', 'large-v3').",
+              "type": "string"
+            },
+            "models_dir": {
+              "description": "Override for <data_dir>/stt/models. Empty = derive.",
+              "type": "string"
+            },
+            "auto_download_model": {
+              "description": "Auto-fetch the model file from huggingface.co on first use.",
+              "type": "boolean"
+            },
+            "threads": {
+              "description": "Inference threads. 0 = use num_cpus.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "use_gpu": {
+              "description": "Run the encoder on GPU when whisper-rs was built with a GPU feature.",
+              "type": "boolean"
+            }
+          }
+        },
+        "openai": {
+          "description": "OpenAI cloud STT (/v1/audio/transcriptions).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "api_key": {
+              "description": "API key. null = fall back to providers.openai.api_key, then OPENAI_API_KEY env.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_url": {
+              "description": "OpenAI-compatible base URL.",
+              "type": "string"
+            },
+            "model": {
+              "description": "Model id (typically 'whisper-1').",
+              "type": "string"
+            }
+          }
+        },
+        "openai_compat": {
+          "description": "Self-hosted OpenAI-compatible STT (whisper.cpp HTTP server, faster-whisper-server, OpenedAI-Speech, \u2026).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "description": "Server base URL (must include /v1).",
+              "type": "string"
+            },
+            "api_key": {
+              "description": "Optional bearer token.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "description": "Model id forwarded to the server.",
+              "type": "string"
+            }
+          }
+        },
+        "routing": {
+          "description": "Per-channel backend pinning for inbound voice ingest.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "web": {
+              "description": "Backend used for the web chat record button.",
+              "type": "string"
+            },
+            "tui": {
+              "description": "Backend used for the TUI (future).",
+              "type": "string"
+            },
+            "telegram": {
+              "description": "Backend used for Telegram voice notes.",
+              "type": "string"
+            },
+            "signal": {
+              "description": "Backend used for Signal voice messages.",
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "mcp": {
+      "description": "MCP host registry. External Model Context Protocol servers MIRA connects to at startup; each server's tools are exposed under mcp__<server_name>__<tool_name>.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "servers": {
+          "description": "Per-server entries. Empty list disables MCP entirely.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "description": "Short unique label. Doubles as the tool-namespace prefix (mcp__<name>__<tool>).",
+                "type": "string"
+              },
+              "transport": {
+                "description": "Transport selection. 'stdio' spawns a child process described by command/args/env (local servers). 'http' connects to a remote Streamable-HTTP MCP endpoint at url (cloud-hosted servers). Defaults to 'stdio'.",
+                "type": "string",
+                "enum": ["stdio", "http"]
+              },
+              "command": {
+                "description": "Stdio-only. Executable to spawn (e.g. 'npx', 'uvx', '/usr/local/bin/mcp-server-foo'). Ignored when transport=http.",
+                "type": "string"
+              },
+              "args": {
+                "description": "Stdio-only. Arguments passed to command. Example for the filesystem server: ['-y', '@modelcontextprotocol/server-filesystem', '/home/me/notes'].",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "env": {
+                "description": "Stdio-only. Per-server environment variables merged over the MIRA process env. Useful for API keys (e.g. BRAVE_API_KEY).",
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              },
+              "url": {
+                "description": "HTTP-only. Full URL of the Streamable-HTTP MCP endpoint, e.g. https://mcp.example.com/v1. Ignored when transport=stdio.",
+                "type": "string"
+              },
+              "enabled": {
+                "description": "Per-server kill switch. Disabled = skip the connect at startup; tools disappear from the registry until re-enabled and MIRA restarts.",
+                "type": "boolean"
+              },
+              "sampling_enabled": {
+                "description": "Opt-in to MCP sampling. When true, MIRA advertises the sampling capability at initialize time and fulfils server-initiated sampling/createMessage requests using the configured primary provider. Off by default; enable per server only for servers you trust to spend your provider quota.",
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "email_oauth": {
+      "description": "OAuth client config for Gmail + Outlook email accounts (Q2 #8 E4). Operator brings their own Google Cloud and Azure OAuth apps; MIRA only needs the public client_ids and a publicly-reachable callback URL. PKCE flow — no client_secret stored.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "public_base_url": {
+          "description": "Origin (scheme + host + port) MIRA serves on, as reachable from the user's browser. Used to build the OAuth redirect URI; must match the value registered at the provider exactly. Defaults to http://127.0.0.1:<server.port> at runtime when empty.",
+          "type": "string"
+        },
+        "google_client_id": {
+          "description": "Google Cloud OAuth client_id (Desktop app type) for the Gmail integration. Empty disables 'Connect Gmail' in the UI.",
+          "type": "string"
+        },
+        "microsoft_client_id": {
+          "description": "Microsoft Entra ID OAuth client_id (Public client) for the Outlook / Microsoft 365 integration. Empty disables 'Connect Outlook' in the UI.",
+          "type": "string"
+        }
+      }
+    },
+    "auth": {
+      "description": "Authentication config. Today only SSO via OpenID Connect (Q2 #11). Local username/password always works regardless.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "oidc": {
+          "description": "SSO via OpenID Connect. Generic + discovery-driven (one shape covers Google / Microsoft Entra / Keycloak / Authentik / Okta). Off by default; when enabled with a configured provider, the web login page shows a 'Sign in with …' button. Changing providers requires a restart.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Master switch. Even with providers listed, OIDC is inert unless true.",
+              "type": "boolean"
+            },
+            "public_base_url": {
+              "description": "Origin (scheme + host + port) MIRA is reachable on from the user's browser. Used to build the redirect URI (<base>/api/auth/oidc/callback), which must match the value registered at the IdP exactly. Empty defaults to http://127.0.0.1:<server.port>.",
+              "type": "string"
+            },
+            "providers": {
+              "description": "Configured identity providers. Each renders a login button.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id"],
+                "properties": {
+                  "id": { "description": "Stable slug used in URLs + identity binding (e.g. 'google').", "type": "string" },
+                  "display_name": { "description": "Button label, e.g. 'Google' or 'Company SSO'.", "type": "string" },
+                  "issuer": { "description": "Issuer / discovery base URL. MIRA fetches <issuer>/.well-known/openid-configuration to resolve the authorization / token / userinfo endpoints.", "type": "string" },
+                  "client_id": { "description": "OAuth client id registered at the IdP.", "type": "string" },
+                  "client_secret": { "description": "OAuth client secret (confidential-client code exchange).", "type": "string" },
+                  "scopes": { "description": "Requested scopes. Defaults to ['openid','email','profile'] when empty.", "type": "array", "items": { "type": "string" } },
+                  "auto_provision": { "description": "Create a MIRA account on first login for a user with no existing match. Off by default (link-to-existing-email only); scope it with allowed_domains before enabling.", "type": "boolean" },
+                  "allowed_domains": { "description": "When auto-provisioning, only allow these email domains (lowercase, no '@'). Empty = any domain.", "type": "array", "items": { "type": "string" } },
+                  "default_role": { "description": "Role granted to auto-provisioned users: 'user' (default) or 'admin'.", "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "signup": {
+          "description": "Self-service onboarding. Admin invite links always work; this governs open (un-invited) signup. Invite-only by default.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "description": "Allow anyone to create an account from the signup page without an invite. Off by default.", "type": "boolean" },
+            "require_approval": { "description": "Open-signup accounts land pending until an admin approves them. On by default.", "type": "boolean" },
+            "default_role": { "description": "Role granted to open-signup accounts: 'user' (default) or 'admin'.", "type": "string" },
+            "allowed_domains": { "description": "When set, open signup only accepts these email domains (lowercase, no '@'). Empty = any domain.", "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "ldap": {
+          "description": "LDAP / Active Directory auth. Tried as a fallback when local password auth fails, so local accounts (incl. the bootstrap admin) keep working and a directory outage never locks everyone out. Search-then-bind. Off by default; provider change needs a restart.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "description": "Master switch.", "type": "boolean" },
+            "url": { "description": "Directory URL, e.g. ldap://dc.example.com:389 or ldaps://dc.example.com:636.", "type": "string" },
+            "starttls": { "description": "Upgrade a plaintext ldap:// connection to TLS via STARTTLS before binding. Ignored for ldaps://.", "type": "boolean" },
+            "bind_dn": { "description": "Service-account DN used to search for the user before binding as them. Empty = anonymous search.", "type": "string" },
+            "bind_password": { "description": "Password for bind_dn.", "type": "string" },
+            "user_base_dn": { "description": "Base DN to search under, e.g. ou=people,dc=example,dc=com.", "type": "string" },
+            "user_filter": { "description": "User search filter; {username} is substituted (LDAP-escaped). Default (uid={username}); AD usually (sAMAccountName={username}).", "type": "string" },
+            "attr_email": { "description": "Attribute carrying the user's email. Default 'mail'.", "type": "string" },
+            "attr_display_name": { "description": "Attribute carrying the display name. Default 'cn'.", "type": "string" },
+            "required_group": { "description": "If set, the user must be a member of this group DN (checked via memberOf). Empty = no requirement.", "type": "string" },
+            "auto_provision": { "description": "Create a MIRA account on first successful LDAP login for a user with no existing match. Off by default.", "type": "boolean" },
+            "allowed_domains": { "description": "When auto-provisioning, only allow these email domains. Empty = any.", "type": "array", "items": { "type": "string" } },
+            "default_role": { "description": "Role for auto-provisioned users: 'user' (default) or 'admin'.", "type": "string" }
+          }
+        }
+      }
+    },
+    "system_email": {
+      "description": "System email account (Q2 #8 E5). Application-initiated outbound — distinct from per-user email_accounts. Disabled by default; configure when a feature needs MIRA to send mail as itself (password reset, admin alerts, waitlist confirmations).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":      { "type": "boolean" },
+        "from_address": { "type": "string", "description": "From: address (e.g. mira@example.com)." },
+        "from_name":    { "type": "string", "description": "Display name in the From header. Defaults to 'MIRA' when empty." },
+        "smtp_host":    { "type": "string" },
+        "smtp_port":    { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "smtp_use_tls": { "type": "boolean", "description": "When true, port 465 uses implicit TLS, anything else uses STARTTLS. Plaintext is rejected." },
+        "smtp_username": { "type": "string" },
+        "smtp_password": { "type": "string" }
+      }
+    },
+    "backup": {
+      "description": "Backup behaviour. The on-demand download/upload (Q1.5 since 0.148.1) is always available regardless; this section only gates the scheduled nightly snapshot loop and its retention/rotation.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scheduled_enabled": {
+          "description": "Run a scheduled snapshot loop in the background. Off by default. When on, writes <data_dir>/backups/mira-backup-…tar.gz every scheduled_interval_secs and keeps scheduled_retention_count most-recent files.",
+          "type": "boolean"
+        },
+        "scheduled_interval_secs": {
+          "description": "Interval between scheduled snapshots, in seconds. Default 86400 = once a day. Minimum 60 (anything lower is treated as 60).",
+          "type": "integer",
+          "minimum": 60
+        },
+        "scheduled_retention_count": {
+          "description": "How many scheduled snapshots to retain on disk. Older snapshots are pruned after each write. 0 = keep all (use with care). Default 7.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

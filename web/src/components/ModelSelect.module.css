@@ -1,0 +1,68 @@
+/* Wrapper — single row, the input/select grows, the toggle button
+   stays sized to its label. */
+.row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  width: 100%;
+}
+
+/* Match the form's `.input` style in SettingsPage.module.css so the
+   dropdown reads visually as part of the same row as the URL /
+   timeout fields above it. The values are duplicated rather than
+   imported because CSS modules don't share variables across files;
+   keep them in sync with SettingsPage's .input/.select if the form
+   styling ever changes. */
+.input,
+.select {
+  flex: 1;
+  width: 100%;
+  padding: 7px 10px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--transition);
+}
+.input:focus,
+.select:focus {
+  border-color: var(--accent-border);
+}
+.input::placeholder {
+  color: var(--text-muted);
+}
+
+/* Native <select> needs custom chevron + extra right padding so the
+   chevron doesn't overlap the option text. Matches SettingsPage's
+   .select. */
+.select {
+  appearance: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+}
+
+/* The "Type custom id" / "Pick from catalog" toggle button. The
+   button needs to be wide enough not to wrap to two lines —
+   `white-space: nowrap` plus a minimum width covers both labels. */
+.toggle {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  padding: 4px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+}
+.toggle:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-border);
+}

@@ -1,0 +1,56 @@
+.btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-overlay);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all var(--transition);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.recording {
+  background: rgba(242, 92, 92, 0.15);
+  color: var(--error);
+  border-color: rgba(242, 92, 92, 0.4);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.recording:hover:not(:disabled) {
+  background: rgba(242, 92, 92, 0.28);
+  color: var(--error);
+  border-color: rgba(242, 92, 92, 0.55);
+}
+
+.uploading {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0    rgba(242, 92, 92, 0.45); }
+  50%      { box-shadow: 0 0 0 6px  rgba(242, 92, 92, 0);    }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

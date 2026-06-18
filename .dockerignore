@@ -1,0 +1,44 @@
+# Keep the build context small — Docker copies it over the wire to the
+# daemon for every build, and a fat context slows iteration noticeably.
+
+# Build output
+target/
+**/target/
+/tmp/mira-target/
+web/dist/
+web/node_modules/
+**/node_modules/
+
+# Local state and editor files
+.git/
+.gitignore
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Documentation and analysis-only trees that don't affect the build.
+docs/
+design/
+prompts/conversations/
+OtherAgents/
+PHASE*.md
+mira-export.md
+test_output.txt
+home/
+
+# Pre-built signal-cli tarballs already in the repo — the runtime stage
+# downloads its own pinned version, so shipping these would just bloat the
+# context.
+signal-cli-*.tar.gz
+signal-cli-client/
+
+# Don't bake host-side data into the image.
+data/
+.mira/
+
+# Never bake the release SIGNING PRIVATE KEY into an image layer. The Dockerfile
+# copies only verification/release-pubkey.minisign explicitly.
+verification/release-privkey.minisign
+verification/*.minisign-private

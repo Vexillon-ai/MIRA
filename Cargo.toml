@@ -1,0 +1,292 @@
+[package]
+name = "mira"
+# 0.272.0 is the first public release — shipped as "public beta 1" (the tag is
+# v0.272.0; the GitHub release is marked as a pre-release). Bump normally from here.
+version = "0.272.0"
+edition = "2024"
+description = "Multi-tasking Intelligent Responsive Assistant - A personal AI agent framework"
+authors = ["Tarek El Diab <tarek_eldiab@outlook.com>"]
+license = "AGPL-3.0-or-later"
+homepage = "https://vexillon.ai"
+rust-version = "1.85"
+
+[lib]
+name = "mira"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mira"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.42", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "blocking", "multipart"], default-features = false }
+
+# WebSocket client — used by the Discord gateway implementation
+# (src/channels/discord/gateway.rs). rustls-tls-webpki-roots keeps the TLS
+# backend consistent with reqwest above so we don't pull in native-tls.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+toml = "0.8"
+toml_edit = "0.22"           # used by `mira skill sign` to update [verification] in place without losing comments
+include_dir = "0.7"          # embeds bundled-skills/ in the binary so first-boot extraction needs no extra files
+semver = { version = "1", features = ["serde"] }
+
+# Error handling
+thiserror = "2.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# CLI
+dialoguer = "0.11"
+rpassword = "7.3"
+crossterm = { version = "0.28", features = ["event-stream"] }
+reedline = "0.38"  # Modern readline with autocomplete
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
+jsonschema = { version = "0.17", default-features = false }
+
+# Built-in embedding engine — ONNX inference, no external server needed
+fastembed = { version = "4", default-features = false, features = ["ort-load-dynamic", "hf-hub-rustls-tls"] }
+unicode-width = "0.2"
+fuzzy-matcher = "0.3"
+
+# Directory paths
+dirs = "5.0"
+
+# UUID for memory IDs
+uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
+
+# Dates/times
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+
+# Cron expression parsing for the automations scheduler (Phase 10).
+cron = "0.12"
+
+# Web Push (Q1.2) — VAPID-authenticated browser push notifications.
+# Pure-Rust; uses our existing reqwest stack for transport.
+web-push-native = "0.4"
+# RustCrypto p256 for VAPID keypair generation (host-side; signing done
+# by web-push-native via jwt-simple internally).
+p256 = { version = "0.13", features = ["pem", "pkcs8", "ecdh"] }
+# `http` types used by web-push-native; pulled in transitively via axum
+# but kept explicit so the re-exports we read against compile cleanly.
+http = "1"
+
+# Database (SQLite) - FTS5 enabled by default in SQLite
+rusqlite = { version = "0.32", features = ["bundled", "functions", "backup"] }
+
+# MCP host — call external Model Context Protocol servers and surface
+# their tools to the agent. Slice 1 added stdio (child process);
+# Slice 2 adds the Streamable HTTP transport via reqwest so we can
+# also connect to remote / cloud-hosted MCP servers. Pinning the
+# official Anthropic SDK keeps spec drift out of our maintenance.
+rmcp = { version = "1.7", features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+] }
+
+# Email channel (Q2 #8, slice E1+E3) — per-user IMAP/SMTP mailbox as
+# a first-class MIRA channel. async-imap polls for inbound, mail-parser
+# walks the MIME tree, ammonia sanitizes any HTML before we feed it to
+# the agent. SMTP (lettre) lands in E2; OAuth (oauth2 crate) in E4.
+# See design-docs/email-channel.md for the full design + threat model.
+# K1 (Q2 #10) — native Kokoro TTS, optional (gated by the `kokoro`
+# feature). any-tts runs Kokoro on a pure-Rust Candle backend with an
+# in-tree pure-Rust phonemizer: no `ort`/ONNX native lib, no libclang
+# build dep, and no system espeak-ng at runtime. American English.
+# default-features=false so we don't compile the other model families
+# (Qwen3, VibeVoice, Voxtral, …) — just Kokoro + the HF auto-downloader.
+any-tts      = { version = "0.1", default-features = false, features = ["kokoro","download"], optional = true }
+async-imap   = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+mail-parser  = "0.11"
+ammonia      = "4"
+# Outbound SMTP (slice E2). lettre's typed AsyncSmtpTransport +
+# Message builder; header-injection-safe by construction. tokio1 +
+# tokio1-rustls reuse the same TLS stack as the IMAP side.
+lettre       = { version = "0.11", default-features = false, features = ["smtp-transport","tokio1","tokio1-rustls","ring","webpki-roots","builder","tracing"] }
+# E4 — OAuth client for Gmail + Microsoft Outlook/365 mail
+# accounts. PKCE-only public-client flow; no client_secret needed
+# even though the crate supports it.
+oauth2       = { version = "5", default-features = false, features = ["reqwest","rustls-tls"] }
+# TLS for IMAP. tokio-rustls + webpki-roots are already in the
+# resolved lock via reqwest; bringing them in as direct deps lets
+# the IMAP poller wrap its TCP stream without pulling new crates.
+tokio-rustls = "0.26"
+webpki-roots = "1"
+
+# Async traits
+async-trait = "0.1.83"
+
+# LRU cache for embeddings
+lru = "0.12"
+
+# Math for embeddings
+approx = "0.5"
+
+# URL parsing
+url = "2.5"
+
+# For streaming
+futures = "0.3"
+futures-util = "0.3"
+
+# Base64 (used by SSE TTS streaming to ship binary chunks over JSON events)
+base64 = "0.22"
+
+# Skill signing (slice A7). ed25519 chosen over rsa for compact signatures
+# (~88 bytes base64) and key material (~44 bytes base64), and over secp256k1
+# because the JOSE / SSH / cosign ecosystem leans the same way for new code.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+# Verify-only minisign. Used by `mira upgrade --binary` to validate
+# downloaded release tarballs against the embedded public key. We
+# don't need to sign — that's a CI concern handled by the standalone
+# `minisign` binary in the release pipeline.
+minisign-verify = "0.2"
+
+# Random (for jitter in retries)
+rand = "0.8"
+
+# Colored output
+colored = "2.1"
+
+# Environment variable loading
+dotenvy = "0.15"
+
+# Web framework for server mode (Telegram/Signal webhooks)
+axum = { version = "0.8", features = ["multipart"] }
+tower = "0.5"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Security — constant-time comparison, HMAC, SHA-256
+subtle = "2.6"
+hmac = "0.12"
+sha2 = "0.10"
+
+# Skill secrets vault — AES-256-GCM authenticated encryption for the
+# per-skill / per-user env-var store (`skill_secrets.db`). 12-byte
+# random nonce per record; master key stored 0600 at
+# ~/.mira/data/master.key.
+aes-gcm = "0.10"
+
+# Concurrent hashmap for per-IP rate-limit buckets
+dashmap = "6"
+
+# tower HTTP middleware (CORS, request tracing, static files)
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+
+# Auth — password hashing (argon2id) and JWT
+argon2       = "0.5"
+jsonwebtoken = "9"
+
+# LDAP / Active Directory auth (Q2 #11). Async (tokio) search-then-bind for
+# SSO against an enterprise directory. default-features=false drops the sync
+# wrapper + native-tls; tls-rustls keeps the same TLS backend as the rest of
+# the stack (for ldaps:// and STARTTLS).
+ldap3 = { version = "0.11", default-features = false, features = ["tls-rustls"] }
+
+# PDF parsing (future tool)
+lopdf = "0.34"
+
+# Web tools (Tier 2) — readable article extraction + CSS-selector HTML parsing
+# default feature pulls in an old reqwest+native-tls; we only need the extractor
+readability = { version = "0.3", default-features = false }
+scraper     = "0.26"
+
+# MIME type guessing for static files
+mime_guess = "2"
+
+# SSE streaming for chat
+tokio-stream = "0.1"
+
+# Byte buffer utilities and HTTP body helpers (used by security middleware)
+bytes = "1"
+http-body-util = "0.1"
+
+# Hex encoding (HMAC digest formatting)
+hex = "0.4"
+
+# Regex for the automations predicate evaluator (Phase 10 / Slice 5).
+regex = "1"
+
+# OS-level process signalling (nginx liveness check)
+libc = "0.2"
+
+# Per-call sandbox scratch dirs (code_run artifact pipeline)
+tempfile = "3"
+
+# Archive extraction for downloaded TTS binaries (Piper releases ship as .tar.gz)
+flate2 = "1"
+tar    = "0.4"
+
+# Phase 8b — Speech-to-text. whisper-rs is an in-process FFI to whisper.cpp;
+# it builds a static C++ library at compile time. Build prerequisites on
+# Linux: a C++ toolchain (`g++` or `clang++`), CMake, and `libclang-dev`
+# (used by `bindgen` to generate the FFI bindings). On Debian/Ubuntu:
+# `sudo apt install build-essential cmake libclang-dev`.
+# symphonia + rubato decode any common audio container down to the 16 kHz
+# mono f32 PCM that whisper.cpp expects, so users can upload WAV/MP3/OGG-
+# Opus/M4A from a phone or browser without shelling out to ffmpeg.
+whisper-rs = { version = "0.13", default-features = false }
+symphonia  = { version = "0.5", features = ["all-codecs", "all-formats"], default-features = false }
+rubato     = "0.16"
+
+# Voice-note transcoding. Local TTS backends (Piper, eSpeak) emit WAV; Signal
+# and Telegram both require OGG/Opus, so the channel dispatchers run the
+# audio through a WAV→Opus pipe. `opus` is a thin FFI binding to libopus —
+# `audiopus_sys` ships vendored libopus and falls back to it when pkg-config
+# can't find a system install, so the build is self-contained. `ogg` is pure
+# Rust and packetizes the encoded frames into the OGG container.
+opus = "0.3"
+ogg  = "0.9"
+
+# Sandbox (Phase 7a-4) — seccomp-bpf filter compiler. Only pulled in on Linux
+# when the `sandbox-linux` feature is on; other platforms fall back to the
+# stub backend that returns SandboxError::Unsupported.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = { version = "0.5", optional = true }
+
+# Slice 11 — Windows native service via the Service Control Manager.
+# Only compiled on Windows targets. install::windows uses the install/
+# control APIs; main.rs uses the dispatcher entry point to detect being
+# launched by SCM vs the console.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-service = "0.8"
+
+[features]
+default = ["sandbox-linux"]
+# Level A sandbox (Linux namespaces + seccomp). Default-on on Linux; no-op
+# (stub impl) on non-Linux targets even with the flag set.
+sandbox-linux = ["dep:seccompiler"]
+# K1 (Q2 #10) — native in-process Kokoro TTS backend via the kokoroxide
+# crate (ort ONNX runtime, auto-downloaded native lib; espeak-ng for
+# G2P — same runtime dep MIRA's eSpeak fallback already needs).
+# OFF by default: it pulls a large native lib + a libclang build-dep,
+# so only the audience build (and Kokoro users) pay the cost. Enable
+# with `--features kokoro`.
+kokoro = ["dep:any-tts"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,89 @@
+.shell {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg-base);
+  position: relative;
+}
+
+.sidebarWrapper {
+  flex-shrink: 0;
+  transition: width 0.22s ease;
+  width: 260px;
+  overflow: visible;
+  position: relative;
+  z-index: 10;
+}
+
+/* ── Protruding collapse tab ─────────────────────────────────────────────── */
+.collapseTab {
+  position: absolute;
+  top: 50%;
+  right: -16px;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 52px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border-subtle);
+  border-left: none;
+  border-radius: 0 8px 8px 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  z-index: 11;
+  transition: background var(--transition), color var(--transition), box-shadow var(--transition);
+  box-shadow: 2px 0 6px rgba(0, 0, 0, 0.25);
+  padding: 0;
+}
+.collapseTab:hover {
+  background: var(--sidebar-hover);
+  color: var(--text-primary);
+  box-shadow: 3px 0 10px rgba(0, 0, 0, 0.35);
+}
+
+.sidebarCollapsed .sidebarWrapper {
+  width: 56px;
+}
+
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-surface);
+  min-width: 0;
+}
+
+.main {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.backdrop { display: none; }
+
+@media (max-width: 768px) {
+  .sidebarWrapper {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    z-index: 200;
+    width: 260px !important; /* always full width when open on mobile */
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+  }
+  .mobileOpen {
+    transform: translateX(0);
+  }
+  .backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 199;
+  }
+}

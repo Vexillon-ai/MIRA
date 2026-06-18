@@ -1,0 +1,27 @@
+<svg viewBox="55 55 390 390" xmlns="http://www.w3.org/2000/svg">
+  <!-- MIRA robot face (from mira-logo.svg, face only) -->
+  <g transform="matrix(1.9817651,0,0,2.0361592,250.37275,250)">
+    <!-- Head -->
+    <circle cx="0" cy="0" r="70" fill="white" stroke="#001f3f" stroke-width="8" />
+    <!-- Left ear / headphone -->
+    <rect width="17.711512" height="5.9661617" x="138.73376" y="219.1322" fill="#001f3f"
+          transform="matrix(0.71428571,0,0,0.71428571,-178.57143,-178.57143)" />
+    <rect width="17.711512" height="6.9386463" x="137.87634" y="274.50391" fill="#001f3f"
+          transform="matrix(0.71428571,0,0,0.71428571,-178.57143,-178.57143)" />
+    <rect x="-90" y="-20" width="20" height="40" rx="10" fill="white" stroke="#001f3f" stroke-width="8" />
+    <!-- Right ear / headphone -->
+    <rect width="17.711512" height="5.9661617" x="344.38589" y="218.81042" fill="#001f3f"
+          transform="matrix(0.71428571,0,0,0.71428571,-178.57143,-178.57143)" />
+    <rect width="17.711512" height="6.9386463" x="343.52847" y="274.18213" fill="#001f3f"
+          transform="matrix(0.71428571,0,0,0.71428571,-178.57143,-178.57143)" />
+    <rect x="70" y="-20" width="20" height="40" rx="10" fill="white" stroke="#001f3f" stroke-width="8" />
+    <!-- Eyes -->
+    <circle cx="-25" cy="-10" r="8" fill="#001f3f" />
+    <circle cx="25" cy="-10" r="8" fill="#001f3f" />
+    <!-- Cheeks -->
+    <circle cx="-35" cy="15" r="6" fill="#ffb6c1" />
+    <circle cx="35" cy="15" r="6" fill="#ffb6c1" />
+    <!-- Mouth (open smile) -->
+    <path d="m -14.042373,27.599959 a 20,13.136012 0 0 1 30,0 15,9.8520087 0 0 1 -30,0" fill="#001f3f" />
+  </g>
+</svg>

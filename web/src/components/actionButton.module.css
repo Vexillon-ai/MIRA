@@ -1,0 +1,29 @@
+/* Shared small action button for the Settings → Notifications panels
+   (NotificationSettings, DailyBriefingSettings, CompanionCheckinTest), which
+   have no CSS module of their own. Matches the Settings `.button` look so
+   "Send test push" / "Send a briefing now" / "Send a check-in now" /
+   "Disable in this browser" read as proper buttons, not plain text. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: var(--transition);
+}
+.btn:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

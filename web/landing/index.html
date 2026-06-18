@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>MIRA — your AI, on your hardware, in your messenger</title>
+  <meta name="description" content="A self-hostable personal AI agent that texts you on Signal or Telegram, remembers you across conversations, and runs entirely on your hardware. Open source. Hosted plan coming soon." />
+  <meta property="og:title"       content="MIRA — your AI, on your hardware, in your messenger" />
+  <meta property="og:description" content="A self-hostable personal AI agent that texts you on Signal or Telegram, remembers you across conversations, and runs entirely on your hardware." />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="hero">
+  <nav class="nav">
+    <a class="brand" href="#">
+      <img src="favicon.svg" alt="" />
+      <span>MIRA</span>
+    </a>
+    <a class="nav-link" href="https://github.com/Vexillon-ai/MIRA" target="_blank" rel="noreferrer">Source</a>
+    <a class="nav-link" href="#waitlist">Join the waitlist →</a>
+  </nav>
+
+  <div class="hero-inner">
+    <p class="kicker">Personal AI · self-hostable · open source</p>
+    <h1>Your AI, on your hardware,<br>in your messenger.</h1>
+    <p class="lede">
+      MIRA is a single-binary personal AI agent that lives on the hardware you control,
+      remembers you across conversations, and shows up in the apps you already use —
+      Signal, Telegram, the web. No data shipped to a vendor. No "your AI was discontinued."
+    </p>
+    <div class="hero-cta">
+      <a class="btn primary" href="#waitlist">Join the hosted waitlist</a>
+      <a class="btn ghost" href="https://github.com/Vexillon-ai/MIRA" target="_blank" rel="noreferrer">
+        Or self-host it today →
+      </a>
+    </div>
+  </div>
+</header>
+
+<section class="differentiators">
+  <div class="container">
+    <h2>What makes MIRA different</h2>
+    <p class="section-lede">
+      Most AI assistants live in one app, on someone else's cloud, with a memory that resets
+      every conversation. MIRA inverts all three.
+    </p>
+
+    <div class="grid">
+      <div class="card">
+        <h3>📩 Reaches you on real channels</h3>
+        <p>
+          MIRA texts you on Signal or Telegram unprompted — a morning briefing, a check-in,
+          a follow-up on something you asked about yesterday. Not a feed to open. A contact to read.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🧠 Grows a model of you</h3>
+        <p>
+          A markdown wiki you can hand-edit, plus a structured memory layer the agent updates
+          as it learns. Every chat carries the same context — across channels, across months.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🏠 Runs on your hardware</h3>
+        <p>
+          One Rust binary. Linux, macOS, Windows. Your conversations live on disk you own;
+          your provider keys never leave the box. Stop using it tomorrow and you keep
+          everything that happened.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🛡️ Safety floor for the people you care about</h3>
+        <p>
+          Configure MIRA to check in on a loved one daily. If they don't reply within a
+          window you set, MIRA pings a safety contact. The same person doesn't have to
+          be both the user and the worrier.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🎙️ Voice in the box</h3>
+        <p>
+          Speech-to-text and text-to-speech ship with the binary — Whisper and Piper, no
+          ffmpeg, no extra services. Send voice notes on Signal and MIRA replies with
+          one back.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🤝 Multiple humans, one shared brain</h3>
+        <p>
+          Households and small teams can share one MIRA install. Each person's wiki and
+          memories stay theirs; the persona stays consistent. No 30-seat-minimum
+          enterprise sales call.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="container two-col">
+    <div>
+      <h2>Self-host today — for free</h2>
+      <p>
+        MIRA is MIT-licensed and ships every release as a signed tarball.
+        <code>curl | sh</code> installs the binary, registers a systemd / launchd / Windows
+        service, and opens the onboarding flow in your browser. Bring your own API keys
+        (OpenAI, Anthropic, Gemini, DeepSeek, Groq, xAI, OpenRouter, LM Studio, or fully
+        local via Ollama) and MIRA is yours.
+      </p>
+      <p>
+        <strong>The catch:</strong> hosting it well needs a host. Domain, TLS, backups,
+        provider key management, supervised process, browser push, signal-cli daemon — all
+        doable, all takes an afternoon you might not have.
+      </p>
+    </div>
+    <div>
+      <h2>Or join the hosted waitlist</h2>
+      <p>
+        The hosted plan is the same MIRA, on managed infrastructure: provider key pooling
+        (you only pay for tokens, not API account ceremony), nightly backups, automatic
+        upgrades, a public HTTPS hostname so Telegram webhooks just work, and the same
+        Signal/Telegram/web push bridges out of the box.
+      </p>
+      <p class="muted">
+        Pricing TBD. Waitlist members get founder pricing — locked in for the life of
+        the plan.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section id="waitlist" class="waitlist">
+  <div class="container narrow">
+    <h2>Join the waitlist</h2>
+    <p>
+      One email below and you're on the list. I'll be in touch when there's something to invite
+      you to — no broadcast emails, no welcome sequence, no tracking pixels.
+    </p>
+    <form id="waitlist-form" novalidate>
+      <label class="sr-only" for="email">Email</label>
+      <input
+        id="email"
+        name="email"
+        type="email"
+        required
+        autocomplete="email"
+        placeholder="you@somewhere.com"
+      />
+      <button type="submit">Join the waitlist</button>
+    </form>
+    <p id="form-status" class="form-status" role="status"></p>
+    <p class="muted small">
+      Stored in the operator's own MIRA install — not Mailchimp, not ConvertKit. Delete on
+      request. No marketing pipeline.
+    </p>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="container">
+    <p>
+      MIRA is an open-source personal AI agent — a project of
+      <a href="https://vexillon.ai" target="_blank" rel="noreferrer">Vexillon</a>.
+      Built by <a href="https://github.com/tareked" target="_blank" rel="noreferrer">Tarek El Diab</a>.
+    </p>
+    <p class="muted small">© 2026 Tarek El Diab · AGPL-3.0-licensed · Hosted plan coming when it's ready, not before.</p>
+  </div>
+</footer>
+
+<script src="signup.js"></script>
+</body>
+</html>

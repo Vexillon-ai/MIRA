@@ -1,0 +1,61 @@
+[skill]
+id            = "com.mira.claudecode"
+# Version bumps trigger auto-refresh on existing installs (bundled.rs
+# `extract_or_refresh`). Bump whenever the manifest contents change so
+# users on older MIRA builds pick up the new shape on next boot.
+# 0.2.0 — declared ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL
+#         in [permissions.secrets] for the slice-4 secrets UI.
+# 0.3.0 — renamed from `com.mira.coding`; vendor-neutral name was
+#         confusing once a sibling `com.mira.opencode` skill was on
+#         the roadmap. SecretsStore::rename_skill auto-migrates
+#         existing rows on first boot of the renamed manifest.
+# 0.4.0 — manifest gained `example` hints + `sensitive = false` on
+#         model/URL keys so the secrets UI renders them in plain
+#         text with a worked example below the input.
+# 0.5.0 — clarified that `plan` and `review` are PROMPT templates
+#         only (text returned to the model). To actually build/edit
+#         code, the model must call `spawn_background_task(skill=
+#         com.mira.claudecode, brief=…)`. Models were calling the
+#         plan tool, getting back the planning template, then trying
+#         to write code via `code_run` themselves — wasting rounds.
+version       = "0.5.0"
+display_name  = "Claude Code"
+description   = "Reverse-DNS skill id used by `spawn_background_task` to launch the `claude` CLI (Anthropic Claude Code) as a subagent that actually builds/edits code. ALSO exposes two helper prompts (`plan`, `review`) that return text templates — these do NOT execute code. To build something, call `spawn_background_task(skill=\"com.mira.claudecode\", brief=…)`. Configure ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL via the skill secrets UI."
+authors       = ["MIRA Team <hello@mira.dev>"]
+license       = "MIT"
+
+[permissions]
+network_egress                   = []
+filesystem                       = []
+subprocess                       = false
+llm_providers                    = ["primary"]
+max_llm_spend_per_invocation_usd = 2.00
+
+# Env vars MIRA passes to the `claude` subprocess when this skill spawns
+# as a worker. Declared here so the secrets-management UI can render
+# the form without operators memorising variable names.
+[[permissions.secrets]]
+key         = "ANTHROPIC_API_KEY"
+description = "Anthropic API key. Skips the `claude /login` flow when set; required for the headless coding adapter."
+required    = false
+scope       = "user"
+
+[[permissions.secrets]]
+key         = "ANTHROPIC_BASE_URL"
+description = "Base URL override for self-hosted Anthropic-compatible proxies. Leave unset for api.anthropic.com."
+required    = false
+scope       = "system"
+sensitive   = false
+example     = "http://192.168.1.10:1234"
+
+[[permissions.secrets]]
+key         = "ANTHROPIC_MODEL"
+description = "Model id passed to claude when spawned. Overrides the adapter's default. Real Anthropic uses bare ids; LM Studio's Anthropic-compat endpoint takes the model name shown in `/v1/models`."
+required    = false
+scope       = "either"
+sensitive   = false
+example     = "claude-haiku-4-5-20251001"
+
+[tools]
+plan   = { kind = "prompt", template = "prompts/plan.md" }
+review = { kind = "prompt", template = "prompts/review.md" }

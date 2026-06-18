@@ -1,0 +1,17 @@
+[skill]
+id            = "com.mira.memory"
+version       = "0.1.0"
+display_name  = "Long-term Memory"
+description   = "Search the user's past conversations by meaning. Use when the user references something they said before but it isn't in the current visible context (e.g. 'that book I recommended last month')."
+authors       = ["MIRA Team <hello@mira.dev>"]
+license       = "MIT"
+
+[permissions]
+network_egress = []
+filesystem     = []
+subprocess     = false
+secrets        = []
+llm_providers  = ["primary"]
+
+[tools]
+recall = { kind = "builtin", impl = "recall_history" }

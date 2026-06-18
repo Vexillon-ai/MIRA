@@ -1,0 +1,20 @@
+[skill]
+id            = "com.mira.calendar"
+version       = "0.1.0"
+display_name  = "Calendar"
+description   = "List, create, update, and delete events on the user's MIRA-native calendar. Read-only access to events synced from external calendars (Google, Outlook, CalDAV)."
+authors       = ["MIRA Team <hello@mira.dev>"]
+license       = "MIT"
+
+[permissions]
+network_egress = []
+filesystem     = []
+subprocess     = false
+secrets        = []
+llm_providers  = ["primary"]
+
+[tools]
+list_events  = { kind = "builtin", impl = "calendar_list_events" }
+create_event = { kind = "builtin", impl = "calendar_create_event" }
+update_event = { kind = "builtin", impl = "calendar_update_event" }
+delete_event = { kind = "builtin", impl = "calendar_delete_event" }

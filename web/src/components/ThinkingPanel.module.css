@@ -1,0 +1,110 @@
+.panel {
+  margin: 4px 12px 8px;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+/* Live mode — softer pulse on the left border to signal "active". */
+.panelLive {
+  border-left-color: var(--accent);
+  animation: panelPulse 1.6s ease-in-out infinite;
+}
+@keyframes panelPulse {
+  0%, 100% { border-left-color: var(--accent); }
+  50%      { border-left-color: var(--accent-border); }
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  text-align: left;
+}
+.summary:hover { color: var(--text-primary); }
+.chevron { color: var(--text-muted); flex: 0 0 auto; }
+.pulse {
+  animation: spinSlow 1.2s linear infinite;
+  color: var(--accent);
+}
+@keyframes spinSlow { to { transform: rotate(360deg); } }
+
+.summaryLabel { flex: 1; }
+
+.body {
+  padding: 4px 10px 10px;
+  border-top: 1px dashed var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  padding: 2px 0;
+}
+.rowReasoning {
+  flex-direction: column;
+  align-items: stretch;
+  border-top: 1px dashed var(--border-subtle);
+  border-bottom: 1px dashed var(--border-subtle);
+  margin: 2px 0;
+  padding: 6px 4px;
+}
+
+.label {
+  color: var(--text-primary);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.args {
+  color: var(--text-muted);
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+}
+.output {
+  color: var(--text-muted);
+  word-break: break-word;
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+}
+
+.reasoningBody {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+  max-height: 40vh;
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.iconCall   { color: var(--accent); flex: 0 0 auto; margin-top: 3px; }
+.iconOk     { color: #4ade80;       flex: 0 0 auto; margin-top: 3px; }
+.iconFail   { color: #f87171;       flex: 0 0 auto; margin-top: 3px; }
+.iconReason { color: #c084fc;       flex: 0 0 auto; margin-top: 3px; align-self: flex-start; }
+.iconWiki   { color: #fbbf24;       flex: 0 0 auto; margin-top: 3px; }
+
+.empty {
+  font-size: 11px;
+  font-style: italic;
+  color: var(--text-muted);
+  padding: 6px 0;
+}

@@ -1,0 +1,125 @@
+# MIRA features
+
+A tour of what MIRA can do. Each capability has settings (see `settings-reference.md`) and most can be turned on/off.
+
+## Channels — how MIRA reaches you
+
+- **Web chat** — the built-in UI at the server's address. Streaming replies, attachments, per-message timestamps, tool/thinking traces.
+- **Telegram** — connect a bot token (per user). MIRA replies in Telegram, can send **voice notes**, and transcribes voice messages you send it. Proactive messages (check-ins, briefings) arrive here too.
+- **Signal** — via signal-cli. Same two-way text + voice-note support.
+- **Email** — per-user IMAP/SMTP mailbox as a first-class channel: inbound email becomes a conversation; MIRA can send email. Supports Gmail/Outlook OAuth, a system (application) mail account, and inbound webhooks (Postmark/Resend/Mailgun). A security pipeline (sender allowlist, quarantine, rate limits) gates inbound mail. Account credentials (IMAP/SMTP passwords and OAuth tokens) are **encrypted at rest** (AES-256-GCM under the instance master key) and never echoed back to the browser.
+- **Discord** — per-user bot. Each MIRA user creates their own Discord application in the Developer Portal and adds the bot token through Settings → Channel Accounts; MIRA opens a persistent WebSocket gateway connection per enabled bot and routes `MESSAGE_CREATE` events into a conversation per Discord channel. Replies are posted back via REST (long replies split on paragraph boundaries at the 2000-codepoint cap). Optional `mention_only` mode keeps the bot quiet in shared servers. Proactive Discord (companion check-ins + automations dispatch) is live; slash commands and attachments are planned.
+- **Matrix** — per-user (or shared) bot against any homeserver (matrix.org or self-hosted Synapse/Dendrite). Add a homeserver URL + access token in Settings → Channel Accounts; MIRA long-polls the Client-Server `/sync` API, auto-joins rooms it's invited to, and routes messages into a conversation per room. Replies + proactive delivery (companion + automations) are live; text-only, plaintext rooms only (no E2EE yet). Optional `mention_only` mode.
+- **WhatsApp** — via the Meta WhatsApp Business Cloud API. Add a phone-number id + access token + app secret + verify token in Settings → Channel Accounts, then point Meta's webhook at `/webhook/whatsapp/<account-id>`. Inbound messages (signature-verified) route into a conversation per sender; replies + proactive delivery are live. **Caveat:** proactive messages only work within 24h of the user's last message — outside that window Meta requires pre-approved templates (not yet supported). Text-only.
+- **Slack** — via the Slack Events API. Create a Slack app, add the bot token + signing secret in Settings → Channel Accounts, and point Event Subscriptions at `/webhook/slack/<account-id>`. Inbound messages (signature-verified, 5-min replay window) route into a conversation per channel/DM; replies + proactive delivery are live (no 24h restriction). Text-only.
+- **External plugin channels (CPP)** — beyond the built-in channels, MIRA can talk to *any* messaging system through an external **provider** process — no rebuild. Add an "External (plugin)" account with the provider's send URL; MIRA generates two HMAC secrets, exposes a `/webhook/external/<id>` endpoint, and the provider relays messages over the **Channel Provider Protocol** (a small signed-HTTP contract — "MCP for channels"). Inherits routing modes, identity linking, history, and proactive delivery like any channel. **Voice works both ways** when the provider supports audio: flag the account "supports voice" and MIRA attaches a synthesized `audio` object to replies *and* proactive check-ins (per the user's voice policy); a provider can also relay the user's voice note as inbound `audio` for MIRA to transcribe. Write a provider in any language: (Nextcloud Talk, IRC, etc. ship as separate provider repos.)
+- **Shared bots & identity linking** — instead of one bot per user, an admin can run a single Telegram, Discord, Matrix, WhatsApp, Slack, or external-plugin bot that routes each inbound message to the right MIRA user. Set the bot's *routing mode* to Shared or Guest OK; users link themselves by generating a one-time `LINK-XXXX-XXXX` code in Settings → Channels → My channels and sending it to the bot. Personal mode (every message runs as the bot owner) remains the default.
+- **Browser / phone push** — Web Push notifications when MIRA messages you, even with no tab open.
+
+## Proactive features (companion mode)
+
+- **Check-ins** — MIRA reaches out on a schedule/policy (respecting quiet hours), on your preferred channel, as text or voice. Openers draw on your **recent conversations** (a compact cross-channel digest is folded into the cue) so they reference what you've actually been discussing instead of repeating the same stock facts.
+- **Daily briefing** — a morning summary built from your calendar, recent wiki updates, and automation runs.
+- Companion is **per-user** and opt-in. Voice delivery honours your per-channel voice preference.
+- **Cadence is tunable** — instance defaults live in the `companion` config block (`max_per_day`, `min_gap_minutes`, `max_unanswered_checkins`), and each user can override them via the companion tools (e.g. "check in at most twice a day", "pause if I don't reply to two"). Check-ins stop after the unanswered cap and auto-resume the moment you reply.
+- Companion is a **system skill**: like all built-in/bundled skills (companion, memory, wiki, calendar, research, …), its tools and services ship in the binary, so it's **enabled/disabled per user rather than installed/uninstalled**. The Skills page shows a **System** badge and no remove control, and system skills are **verified by construction** ("MIRA (built-in)") since the binary is their trust anchor. Uninstall is reserved for optional, self-contained `.mirapkg` extensions.
+
+## Voice (TTS / STT)
+
+- **Text-to-speech** backends: **Kokoro** (natural, local, in-process), **Piper** (lightweight local default), **eSpeak** (fallback), **OpenAI / OpenAI-compatible** (e.g. your own Chatterbox-Vulkan server), with ElevenLabs/Cartesia config hooks. Per-channel routing + per-user "voice: always / on voice input / never".
+- **Speech-to-text**: whisper (in-process) for transcribing inbound voice notes; OpenAI/compatible options.
+
+## Memory & knowledge
+
+- **Memory** — atomic facts about you, embedded for semantic recall, written automatically (post-turn extractor) and on request. The post-turn extractor comes in two flavours — a cheap built-in **heuristic** and a richer **LLM** pass (confidence-gated, conflict-aware) — and you choose which runs **per channel** via `memory.auto_extract.llm_channels` (e.g. LLM on Telegram, heuristic everywhere else) independently of the global `memory.auto_extract.mode`. Recall is **recency-aware**: semantic similarity is blended with a freshness boost so recently-formed facts surface, not just the most-reinforced ones (tunable via `memory.recency.weight` / `memory.recency.half_life_days`). Facts are tagged with a coarse *topic* (e.g. all bike expenses, every plant you own), and retrieval pulls the whole topic together so counting/totalling questions ("how many plants do I have?", "what have I spent on the bike?") see the complete set rather than just the few most-similar facts. An optional, experimental **knowledge-graph memory** (`memory.graph.enabled`, off by default) goes further — it stores facts as typed, timestamped triples (entity → relation → value) so aggregation questions resolve against the exact set of matching edges.
+- **Wiki** — longer-form personal notes (per user) plus a system wiki. Read/search/append/write tools; optional git sync; can be exposed over MCP.
+
+## Tools the agent can use
+
+Web search, web fetch / URL preview, code execution (sandboxed), shell (opt-in, trusted deployments only), calendar (create/list/update/delete events), PDF extraction, date/time/timezone, conversation summarisation, history recall, **image generation** (`image_generate` — text→image via the OpenAI Images API or a compatible endpoint; the result renders inline in chat with download/copy, and is off unless an OpenAI key is configured), **video generation** (`video_generate` — text→short-clip via the OpenAI Videos / Sora API; rendering is asynchronous so the tool enqueues, polls to completion, then returns the MP4 inline as a `<video>` player with controls/download; `model`/`size`/`seconds` selectable, off unless an OpenAI key is configured), background task spawning, and the automations tools below.
+
+## MCP host mode
+
+MIRA can connect to external **MCP servers** (stdio or Streamable-HTTP) and surface their tools to the agent as `mcp__<server>__<tool>`. A built-in, admin-managed **catalog** of recommended servers (filesystem, memory, fetch, git, GitHub, Slack, Postgres, Puppeteer browser automation, MIRA's own voice, …) makes adding them one click. Servers hot-reload — no restart. Tools that return images/audio/video render inline in chat. Per-user isolation, collision-safe naming, and opt-in sampling are supported.
+
+## Calendar
+
+A **built-in, per-user calendar** — always available, stored locally; no external service required. MIRA can list/create/update/delete events as agent tools, and there's a month-grid **Calendar** page. On top of the native store:
+
+- **External sync (per-user, optional).** Each user connects **their own** account from their Calendar page — there's nothing shared: **Google** and **Outlook/Microsoft 365** via OAuth (per-user tokens), and **CalDAV** (Nextcloud, Fastmail, iCloud, Radicale, …) via their own server URL + username + **app password**. The CalDAV password is **encrypted at rest** (AES-256-GCM under the instance master key). Admins do the one-time instance setup (which provider + its OAuth app) in Settings → Calendar; every user then links their own account. External events mirror in read-only.
+- **Shared organisation events.** Admins can mark an event as an **organisation event** so every user on the server sees it (company holidays, all-hands).
+- **Per-group events.** Admins can scope an event to an **RBAC group** so only that group's members see it (team standups, on-call) — alongside personal and org-wide events. Set via the editor's **Visibility** picker (Just me / Everyone / a group).
+- **Agenda overlay.** MIRA's own planned actions for you show on the calendar read-only: upcoming **automation** fires and your **daily briefing**, so the proactive things MIRA does are visible where you already look.
+
+## Automations
+
+Cron-scheduled and event-triggered actions: scheduled follow-ups, webhooks, event subscriptions, recurring tasks. Plus internal heartbeats (watchdog, memory janitor, rollups).
+
+## Skills & agents
+
+A Skills system (signed, packaged units of capability) and the ability to spawn background sub-agents for longer tasks.
+
+**Named agents.** Admins can save reusable **agent profiles** on a **Named Agents** page — each a persona (system prompt), a tool allowlist, an optional model alias, and an optional budget, addressed by a lowercase `@handle`. Configure an agent once (e.g. an `@researcher` with web tools and a research model) and reuse it: invoke it by name from a chat, or let MIRA delegate to it in its own automations and proactive activity. The **Agents** page gives live observability over running workers — fleet totals, per-worker progress and burn-rate, typed failure reasons, and a browsable view of each task's artifact files.
+
+**Workflows (orchestration).** Saved **workflows** chain named agents and skills into a DAG: each step targets an agent/skill, carries a brief that can interpolate the run input (`{{input}}`) and any upstream step's output (`{{steps.<id>.output}}`), and declares its dependencies. The orchestrator runs the graph in waves — independent steps execute in parallel, a step starts once its dependencies finish, and outputs feed forward. Steps can be made resilient (`continue-on-error` — a failure there skips its dependents but lets independent branches finish), conditional (a `when` **guard** runs the step only if an upstream output matches), or gated by a **human-in-the-loop checkpoint** (`requires approval` — the run pauses before the step and waits for a person to approve or reject it; the pause is persisted, so it survives a restart, and approving resumes from exactly where it left off). A **Workflows** admin page builds and edits workflows visually (step editor with target/brief/dependencies/guard/budget), runs them with an input, and shows **run history** with live per-step status and output. You can also trigger a run conversationally with `run_workflow` ("run the weekly brief"); it returns immediately and pings you on completion. Every run is persisted with per-step status/output for inspection.
+
+## Plugin packages & sandboxing
+
+MIRA installs signed **`.mirapkg` plugin packages** through an admin **Plugins** page, behind a verify → trust-gated install. Two kinds of component install today:
+
+- **`mcp_server`** — an extra MCP tool server. One-click install (native-confined or containerized).
+- **`cpp_provider`** — a channel-provider (CPP) bridge like Nextcloud Talk. Installs through a short **guided wizard**: MIRA mints the CPP HMAC secrets, creates the External channel account (live immediately — no restart), and walks you through the provider-side steps (e.g. an `occ` command, pasting an app-password), pre-filled and verified with reachability probes. The wizard **persists and resumes**, so an install that pauses on an external step picks up exactly where it left off. The provider can run **connection-only** (you run the process — MIRA owning the secrets means no manual copy and no drift) or, on Linux, as a **MIRA-managed service** (a supervised `systemd --user` unit installed and torn down with the package).
+
+Spawned components are **confined**, and their network access is **deny-by-default**: a component reaches the network only if its manifest declares an **egress allowlist** (`network_egress`), and then only the hosts on that list. Two runtimes enforce the allowlist:
+
+- **Native components** (`mira pkg-exec`) run in their own user/mount/network namespaces — no-new-privileges, resource limits, a read-only host filesystem with only declared paths writable and secrets (MIRA config, SSH/AWS keys) masked, and a seccomp denylist. For egress, MIRA's least-privilege **privileged helper** wires the component's network namespace to a kernel filter that permits only the declared hosts (per-process veth + NAT + nftables, with a dnsmasq that resolves *only* the allowlisted names). If the helper isn't installed, the component runs **offline** (no network) and MIRA tells you — it never silently runs unfiltered.
+- **Container components** (`runtime: container`) run as a hardened `docker run` (read-only rootfs, all caps dropped, no-new-privs, pid/memory caps, no network unless egress is declared). The egress allowlist is enforced by a `CAP_NET_ADMIN` nftables+dnsmasq **sidecar** (hostname-accurate, any protocol) or — where that capability can't be granted (locked-down/rootless Docker) — a best-effort HTTP/S proxy that allowlists by hostname.
+
+Either way: you declare the hosts a plugin may reach, and it reaches those and nothing else.
+
+## Security & multi-user
+
+Per-user accounts (JWT auth), admin vs user roles, a tool policy layer, a per-skill secrets vault (AES-256-GCM), an optional Linux sandbox for code execution, and an optional nginx reverse proxy. Secrets in config are redacted on read.
+
+**SSO / OIDC login.** Alongside local username/password, MIRA supports **single sign-on via OpenID Connect** — one generic, discovery-driven provider type covers Google, Microsoft Entra, Keycloak, Authentik, Okta, etc. Configure a provider under `auth.oidc` (issuer, client id/secret) and the web login page automatically shows a "Sign in with …" button. The flow is server-mediated (Authorization Code + PKCE → the IdP's userinfo endpoint); MIRA maps the identity to a user by stable `(issuer, subject)`, then by email (account **linking**), and — when `auto_provision` is on and the email domain is allowed — **creates** an SSO account on first login. After the IdP round-trip MIRA issues its own session (the same JWT + refresh-cookie as a password login; no token ever rides the redirect URL). MIRA also supports **LDAP / Active Directory** login (`auth.ldap`): a username/password that fails local auth is tried against the directory via search-then-bind (optional STARTTLS, optional `required_group` membership check), then mapped to a MIRA user the same way (link by username/email, or auto-provision). Both are off by default; **local login always works**, so a bootstrap admin or a directory outage never locks everyone out.
+
+**Admin session control.** From the Users page an admin can **sign a user out of all sessions** ("Sign out everywhere") — this revokes every refresh token, so the user is fully locked out within ~15 minutes (when their short-lived access token expires). Useful when an account is compromised, a role changes, or someone leaves.
+
+**Self-service onboarding.** Admins no longer have to hand-create every account. From the **Users** page, an admin can mint a single-use (or multi-use, optionally expiring) **invite link** with a pre-assigned role — the invitee opens it, picks a username + password, and is signed in immediately. Optionally, **open self-signup** can be enabled (`auth.signup.enabled`); open signups land in a **pending** state and appear in a "pending approval" queue on the Users page for an admin to approve or reject (unless `require_approval` is turned off). The signup page lives at `/signup`; the login page links to it. Invite-only by default; an unapproved account is told it's awaiting approval at login rather than being treated as a bad password.
+
+**Capability RBAC.** Beyond per-user *isolation* (whose data a user sees), an admin can govern what a user is *allowed to do* via **capability profiles** attached to groups and/or individual users. A profile restricts, on four axes, which **providers**, **models**, **tools**, and **channels** a user may use, plus optional **per-task / per-session budget caps**. Edit a profile from the **Groups** or **Users** admin page (the shield button). Semantics are deliberately simple: an axis with no restriction is **allow-all** (so existing installs are unaffected); grants are **additive** across a user's groups (add a user to a group to grant them a model or tool); budget caps take the **tightest** value; **admins bypass all restrictions**. Enforcement is live across all four axes — the chat model picker hides disallowed models and an explicitly-selected disallowed provider/model is refused; the per-turn tool set is intersected with the allow-list; **adding or enabling a channel account the user isn't permitted to use is refused** (and disallowed channels are hidden on the Channels page); and autonomous background-task budgets are clamped to the user's cap. To make a user fully restricted (e.g. a kid-safe account), keep them only in groups that grant the intended subset.
+
+## Reasoning auto-routing
+
+Optionally, MIRA can detect "hard" turns (code, math, multi-step reasoning, long or multi-question prompts) and automatically route them to a stronger reasoning model — and raise that model's reasoning effort — instead of making you flip a manual toggle. Off by default; the operator enables it and points it at a configured strong-model provider (`agent.reasoning`).
+
+## Fallback transparency
+
+MIRA degrades gracefully when a configured backend is unavailable — but it no longer does so *silently*.
+
+- **LLM provider failover.** If your primary provider fails mid-turn (e.g. a dead API key returning 401), MIRA falls back to the next configured provider, and surfaces a **warning inline on that message** ("Your configured provider … was unavailable … this reply was generated by … instead") plus a **toast**, so a silently-degraded (often local) answer is never mistaken for your chosen model. The warning is saved on the message, so it's still visible after a reload.
+- **Subsystem fallbacks.** When **voice synthesis (TTS)** falls back to Piper/eSpeak, **speech recognition (STT)** falls back to the internal whisper backend, the **embedding server** is unreachable (→ internal fastembed), or the **reasoning-router** provider fails to build, MIRA fires a **toast notification** and raises a **server-health indicator**: a live `subsystem.degraded` signal on the System Health page (a banner listing what's degraded and why), backed by `GET /api/health/degradations`. Persistent (startup/config) degradations stay flagged until they recover or you restart; transient per-request fallbacks (a single TTS/STT call) clear after an hour.
+
+## Backup & restore
+
+A one-click backup bundles MIRA's full data directory — every database
+(history, memory, automations, channel accounts, calendar, wiki, MCP servers,
+email, …), the wiki tree, avatars, artifacts, installed skills + their
+secrets vault, the VAPID keypair, and the config file (including provider
+API keys) — into a single `tar.gz`. The on-demand download/upload (in
+Settings → Server) is always available; optional AES-256-GCM /
+argon2id-derived-key encryption protects archives at rest with a passphrase
+that never leaves the browser. Optional scheduled backups (`backup.scheduled_*`)
+write to `<data_dir>/backups/` on a configurable interval with retention.
+Restore is two-phase: the upload (or in-chat `backup_restore` tool, admin-
+only) stages a `.restore_pending` marker and triggers a clean restart; on
+the next boot, MIRA archives the current data to `.pre_restore_backup/` and
+swaps in the new one. Cross-major version mismatches are refused before
+the swap. The agent can also be asked "back up my data" / "what backups do
+I have" / "restore from yesterday's backup" — the destructive restore is
+admin-gated, requires `confirm: true`, and refuses encrypted archives via
+chat (passphrases in chat would leak).
+
+## Memory benchmarking
+
+A built-in harness (`mira bench memory`) measures MIRA's memory stack against the LongMemEval long-term-memory benchmark, so the wiki + memory story can be reported as numbers comparable to mem0 / Zep / Letta. It replays each benchmark conversation through MIRA's real extraction pipeline, asks the question through the normal turn path (real memory + wiki retrieval), and LLM-judges the answer against the gold — reporting per-question-type and overall accuracy. `--model` picks a cheap provider model for the run; `--extract-model` pins the extraction model independently of the answer model (so you can isolate retrieval quality from answer-model capability).

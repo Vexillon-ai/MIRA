@@ -1,0 +1,14 @@
+.badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  line-height: 1.4;
+  letter-spacing: 0.3px;
+}
+
+.badge[data-channel="telegram"] { background: rgba(41,182,246,0.15); color: #29b6f6; }
+.badge[data-channel="signal"]   { background: rgba(102,187,106,0.15); color: #66bb6a; }
+.badge[data-channel="tui"]      { background: rgba(171,71,188,0.15);  color: #ab47bc; }
+.badge[data-channel="web"]      { background: rgba(79,142,247,0.15);  color: #4f8ef7; }
