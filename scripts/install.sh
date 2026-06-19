@@ -125,9 +125,9 @@ need sha256sum 2>/dev/null || need shasum  # macOS ships shasum, Linux sha256sum
 if [ -z "$VERSION" ]; then
   echo "→ resolving latest release from $RELEASES_URL"
   VERSION=$(curl -fsSL "$RELEASES_URL" \
-    | grep -o '"tag_name":"[^"]*"' \
+    | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
     | head -n1 \
-    | sed 's/"tag_name":"\(.*\)"/\1/' \
+    | sed 's/.*"\([^"]*\)"$/\1/' \
     | sed 's/^v//')
   if [ -z "$VERSION" ]; then
     echo "Couldn't resolve latest release from $RELEASES_URL." >&2
