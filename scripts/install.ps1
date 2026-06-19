@@ -58,7 +58,7 @@ if (-not $Version) {
     try {
         $releases = Invoke-RestMethod -Uri $ReleasesUrl -UseBasicParsing
     } catch {
-        throw "Couldn't fetch releases from $ReleasesUrl: $_"
+        throw "Couldn't fetch releases from ${ReleasesUrl}: $_"
     }
     if (-not $releases -or $releases.Count -eq 0) {
         throw "Releases API returned no entries. Pin a version with -Version 0.X.Y."
