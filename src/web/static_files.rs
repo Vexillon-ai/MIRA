@@ -3,18 +3,21 @@
 // src/web/static_files.rs
 //! SPA static file serving.
 //!
-//! At runtime we look for a built `web/dist/` directory (the React bundle
-//! produced by `npm run build`). When found, we serve it via tower-http's
-//! `ServeDir` with `index.html` as the SPA fallback so client-side routes
-//! like `/login` work. When absent, we serve a minimal placeholder so
-//! API-only deployments aren't broken.
+//! The React bundle (`web/dist/`, produced by `npm run build`) is **embedded
+//! into the binary** at compile time via `include_dir!` (staged into `OUT_DIR`
+//! by `build.rs`), so a single self-contained binary serves the UI with no
+//! files on disk. A disk `web/dist/` still takes precedence when present, so
+//! `cargo run` from the repo picks up live rebuilds without recompiling.
 //!
 //! Resolution order:
-//!   1. `MIRA_WEB_DIR` env var (absolute path; set by `mira install`)
+//!   1. `MIRA_WEB_DIR` env var (absolute path) — disk override
 //!   2. `<cwd>/web/dist/` — works for `cargo run` from the project root
 //!   3. `<binary_dir>/../../../web/dist/` — `target/release/mira` → repo
+//!   4. the **embedded** bundle baked into the binary (the normal case for a
+//!      released build)
 //!
-//! When none match, the placeholder explains how to build the SPA.
+//! If the binary was compiled without a built SPA, the embedded bundle is a
+//! placeholder page explaining how to build it.
 
 use std::path::{Path, PathBuf};
 
@@ -27,6 +30,13 @@ use axum::{
     Router,
 };
 use tower_http::services::{ServeDir, ServeFile};
+
+use include_dir::{include_dir, Dir};
+
+/// The React SPA, embedded at compile time. `build.rs` stages `web/dist/`
+/// (or a placeholder, for builds without a built SPA) into `$OUT_DIR/web-embed`;
+/// this bakes it into the binary so no on-disk `web/dist` is needed.
+static EMBEDDED_WEB: Dir<'_> = include_dir!("$OUT_DIR/web-embed");
 
 /// Try to locate a built `web/dist/` on disk. Returns the directory path
 /// (containing at least `index.html`) when found.
@@ -66,7 +76,7 @@ pub fn spa_router() -> Router {
             let serve = ServeDir::new(&dir).fallback(ServeFile::new(&index));
             Router::new().fallback_service(serve)
         }
-        None => Router::new().fallback(placeholder_handler),
+        None => Router::new().fallback(embedded_handler),
     };
 
     // Q1.7 — landing page mounted at /landing when web/landing/ exists.
@@ -126,20 +136,50 @@ fn resolve_landing() -> Option<PathBuf> {
     None
 }
 
-async fn placeholder_handler(_uri: axum::http::Uri) -> Response {
-    let body = r#"<!DOCTYPE html>
-<html><head><title>MIRA Web</title></head>
-<body style="background:#0d1117;color:#e6edf3;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
-<div style="text-align:center;max-width:560px;padding:0 1.5rem">
-  <h1 style="font-size:2rem;margin-bottom:0.5rem">MIRA</h1>
-  <p style="color:#8b949e">No built web bundle found. Run <code>npm run build</code> in <code>web/</code> to produce <code>web/dist/</code>, or set <code>MIRA_WEB_DIR</code> to its absolute path.</p>
-  <p style="color:#58a6ff;font-size:0.875rem">Backend API is running at <code>/api/status</code>.</p>
-</div>
-</body></html>"#;
+/// Serve the embedded SPA. Looks the request path up in the baked-in bundle,
+/// falling back to `index.html` for client-side routes (so `/login`,
+/// `/chat/<id>`, etc. work on a full-page load). Cache headers are applied by
+/// the `set_cache_headers` layer on the router.
+async fn embedded_handler(req: Request) -> Response {
+    let raw = req.uri().path().trim_start_matches('/');
+    let path = if raw.is_empty() { "index.html" } else { raw };
+    let file = EMBEDDED_WEB
+        .get_file(path)
+        .or_else(|| EMBEDDED_WEB.get_file("index.html"));
+    match file {
+        Some(f) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type_for(f.path()))
+            .body(Body::from(f.contents()))
+            .unwrap(),
+        // `index.html` is always embedded (real or placeholder), so this arm is
+        // unreachable in practice; 404 rather than panic if it somehow isn't.
+        None => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("not found"))
+            .unwrap(),
+    }
+}
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "text/html")
-        .body(Body::from(body))
-        .unwrap()
+/// Minimal extension → MIME map for the embedded bundle. Vite emits html, js,
+/// css, and svg; the rest cover common static asset types.
+fn content_type_for(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("html")         => "text/html; charset=utf-8",
+        Some("js" | "mjs")   => "text/javascript; charset=utf-8",
+        Some("css")          => "text/css; charset=utf-8",
+        Some("svg")          => "image/svg+xml",
+        Some("json")         => "application/json",
+        Some("webmanifest")  => "application/manifest+json",
+        Some("map")          => "application/json",
+        Some("ico")          => "image/x-icon",
+        Some("png")          => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp")         => "image/webp",
+        Some("woff2")        => "font/woff2",
+        Some("woff")         => "font/woff",
+        Some("ttf")          => "font/ttf",
+        Some("txt")          => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
 }

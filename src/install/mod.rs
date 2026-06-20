@@ -202,17 +202,14 @@ pub fn run_install(opts: InstallOptions) -> Result<(), Box<dyn Error>> {
     }
     std::fs::create_dir_all(&opts.working_dir)?;
 
-    // Locate the built React bundle. The server falls back to a placeholder
-    // page when this is missing — usable but unhelpful, so warn the user.
+    // The web UI is embedded in the binary, so a release build always serves it
+    // with no extra files. An on-disk `web/dist` (MIRA_WEB_DIR / cwd / repo) only
+    // takes precedence as a dev override for live rebuilds.
     let web_dir = opts.web_dir.clone()
         .or_else(crate::web::static_files::resolve_web_dist);
     match &web_dir {
-        Some(p) => println!("✓ web bundle: {}", p.display()),
-        None => {
-            println!("(no web bundle found — the web UI will show a placeholder.");
-            println!(" Build it with `cd web && npm run build`, then re-run `mira install --force`,");
-            println!(" or pass `--web-dir <path/to/web/dist>`.)");
-        }
+        Some(p) => println!("✓ web bundle (disk override): {}", p.display()),
+        None    => println!("✓ web UI: embedded in binary"),
     }
 
     // Resolve the data dir to an ABSOLUTE path now, as the installing user, and
