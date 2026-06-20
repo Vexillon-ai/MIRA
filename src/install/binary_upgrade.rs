@@ -8,8 +8,9 @@
 //! prebuilt tarball. Binary upgrade closes that loop:
 //!
 //!   1. Resolve the target version (CLI flag, or "latest" via the
-//!      GitHub Releases API)
-//!   2. Download the matching tarball + .minisig from the GitHub
+//!      releases API of the configured provider — GitHub by default,
+//!      GitLab when selected)
+//!   2. Download the matching tarball + .minisig from that provider's
 //!      release assets
 //!   3. Verify the signature against the public key embedded into
 //!      this binary at compile time (`include_str!` from
@@ -36,13 +37,49 @@ use minisign_verify::{PublicKey, Signature};
 /// any out-of-band trust bootstrap.
 const RELEASE_PUBKEY: &str = include_str!("../../verification/release-pubkey.minisign");
 
-/// Default base URL for the GitHub repository hosting public releases.
-/// Release assets live under `<base>/releases/download/v<version>/…` and
-/// the version list under the GitHub Releases API derived from this base.
-/// Overridable via `MIRA_RELEASE_BASE_URL` env so forks / mirrors can use
-/// the same upgrade plumbing.
-const DEFAULT_RELEASE_BASE_URL: &str =
-    "https://github.com/Vexillon-ai/MIRA";
+/// Which forge hosts the release artifacts. GitHub and GitLab have
+/// different API shapes and asset-URL layouts, so the upgrade plumbing
+/// branches on this rather than just swapping a hostname.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseProvider {
+    /// GitHub Releases: `api.github.com/repos/<org>/<repo>/releases` for
+    /// the version list, `<repo>/releases/download/v<version>/<file>` for
+    /// assets. This is the public release source.
+    GitHub,
+    /// GitLab generic package registry: `<base>/releases` for the version
+    /// list, `<base>/packages/generic/mira/<version>/<file>` for assets.
+    /// Used by internal builds against the private GitLab.
+    GitLab,
+}
+
+impl ReleaseProvider {
+    /// Parse a provider name (case-insensitive) from config / env.
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "github" | "gh" => Some(Self::GitHub),
+            "gitlab" | "gl" => Some(Self::GitLab),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::GitHub => "github",
+            Self::GitLab => "gitlab",
+        }
+    }
+}
+
+/// Provider used when neither the option nor `MIRA_RELEASE_PROVIDER`
+/// selects one. Public releases live on GitHub.
+const DEFAULT_RELEASE_PROVIDER: ReleaseProvider = ReleaseProvider::GitHub;
+
+/// Default release base for the GitHub provider — the public repo.
+/// Overridable via `MIRA_RELEASE_BASE_URL`. Forks / mirrors point this at
+/// their own repo. An internal GitLab build selects the other backend
+/// with `MIRA_RELEASE_PROVIDER=gitlab` + `MIRA_RELEASE_BASE_URL=<api base>`
+/// (e.g. `https://gitlab.example.com/api/v4/projects/<id>`).
+const DEFAULT_RELEASE_BASE_URL: &str = "https://github.com/Vexillon-ai/MIRA";
 
 /// Target triple this binary was built for. Determines which tarball
 /// suffix we download. v1 ships only one target; later targets get
@@ -51,7 +88,7 @@ const BUILD_TARGET: &str = "x86_64-unknown-linux-gnu";
 
 pub struct BinaryUpgradeOptions {
     /// Specific version to upgrade to (e.g. `"0.84.0"` or `"v0.84.0"`).
-    /// `None` = whatever the GitHub API reports as the latest release.
+    /// `None` = whatever the provider's API reports as the latest release.
     pub version: Option<String>,
     /// Skip the post-swap supervisor restart. The new binary is on
     /// disk; admin can restart manually later.
@@ -61,32 +98,47 @@ pub struct BinaryUpgradeOptions {
     /// testing the download/verify/swap pipeline without bumping
     /// versions. The actual swap still proceeds atomically.
     pub force: bool,
-    /// Override the release base URL. Defaults to
-    /// [`DEFAULT_RELEASE_BASE_URL`]. Useful for forks or for
-    /// pointing at a staging environment.
+    /// Which forge to pull releases from. `None` falls back to
+    /// `MIRA_RELEASE_PROVIDER`, then [`DEFAULT_RELEASE_PROVIDER`].
+    pub provider: Option<ReleaseProvider>,
+    /// Override the release base URL. `None` falls back to
+    /// `MIRA_RELEASE_BASE_URL`, then [`DEFAULT_RELEASE_BASE_URL`] (GitHub).
+    /// Required for the GitLab provider. Useful for forks, mirrors, or a
+    /// staging environment.
     pub release_base_url: Option<String>,
-    /// Personal access token for the GitHub API. Optional for public
-    /// repositories; raises the rate limit and is required for private
-    /// forks. `None` = no auth, fine for the public release repo.
-    /// Reads from `$MIRA_RELEASE_TOKEN` when not passed explicitly.
+    /// Access token for the release host. Optional for public GitHub;
+    /// required for private projects / forks. `None` reads
+    /// `$MIRA_RELEASE_TOKEN`.
     pub token: Option<String>,
 }
 
 pub fn run_binary_upgrade(opts: BinaryUpgradeOptions) -> Result<(), Box<dyn Error>> {
-    let base = opts.release_base_url
-        .or_else(|| std::env::var("MIRA_RELEASE_BASE_URL").ok())
-        .unwrap_or_else(|| DEFAULT_RELEASE_BASE_URL.to_string());
+    let provider = opts.provider
+        .or_else(|| std::env::var("MIRA_RELEASE_PROVIDER").ok()
+            .as_deref()
+            .and_then(ReleaseProvider::parse))
+        .unwrap_or(DEFAULT_RELEASE_PROVIDER);
+    let explicit_base = opts.release_base_url
+        .or_else(|| std::env::var("MIRA_RELEASE_BASE_URL").ok());
+    let base = match (provider, explicit_base) {
+        (_, Some(b)) => b,
+        (ReleaseProvider::GitHub, None) => DEFAULT_RELEASE_BASE_URL.to_string(),
+        (ReleaseProvider::GitLab, None) => return Err(
+            "MIRA_RELEASE_PROVIDER=gitlab requires a base URL — set MIRA_RELEASE_BASE_URL to the \
+             GitLab project API base, e.g. https://gitlab.example.com/api/v4/projects/<id>".into(),
+        ),
+    };
     let token = opts.token
         .or_else(|| std::env::var("MIRA_RELEASE_TOKEN").ok());
 
     println!("Current version:  {}", env!("CARGO_PKG_VERSION"));
     println!("Build target:     {BUILD_TARGET}");
-    println!("Release source:   {base}");
+    println!("Release source:   {base} [{}]", provider.label());
 
     // 1. Resolve target version.
     let version = match opts.version.as_deref() {
         Some(v) => normalise_version(v),
-        None    => fetch_latest_version(&base, token.as_deref())?,
+        None    => fetch_latest_version(provider, &base, token.as_deref())?,
     };
     println!("Upgrading to:     {version}");
     if version == env!("CARGO_PKG_VERSION") && !opts.force {
@@ -103,18 +155,16 @@ pub fn run_binary_upgrade(opts: BinaryUpgradeOptions) -> Result<(), Box<dyn Erro
     let tmpdir = tempfile::Builder::new().prefix("mira-upgrade-").tempdir()?;
     let tarball_name = format!("mira-{version}-{BUILD_TARGET}.tar.gz");
     let sig_name     = format!("{tarball_name}.minisig");
-    // GitHub release assets are addressed by the git tag (`v<version>`),
-    // not the bare semver — note the `v` prefix on the tag path segment.
-    let tarball_url  = format!("{base}/releases/download/v{version}/{tarball_name}");
-    let sig_url      = format!("{base}/releases/download/v{version}/{sig_name}");
+    let tarball_url  = asset_url(provider, &base, &version, &tarball_name);
+    let sig_url      = asset_url(provider, &base, &version, &sig_name);
 
     let tarball_path = tmpdir.path().join(&tarball_name);
     let sig_path     = tmpdir.path().join(&sig_name);
     println!();
     println!("Downloading {tarball_name}…");
-    download(&tarball_url, &tarball_path, token.as_deref())?;
+    download(provider, &tarball_url, &tarball_path, token.as_deref())?;
     println!("Downloading {sig_name}…");
-    download(&sig_url, &sig_path, token.as_deref())?;
+    download(provider, &sig_url, &sig_path, token.as_deref())?;
 
     // 3. Verify signature with embedded public key.
     println!();
@@ -169,29 +219,71 @@ fn normalise_version(v: &str) -> String {
     v.trim_start_matches('v').to_string()
 }
 
-/// Hit GitHub's Releases API and pull out the most recent v* tag.
-/// Returns the version string with the `v` stripped. We query
-/// `/releases` (not `/releases/latest`) so a pre-release/beta is still
-/// returned as the newest entry; the array is newest-first.
-fn fetch_latest_version(base: &str, token: Option<&str>) -> Result<String, Box<dyn Error>> {
-    // Derive the API host from the repo base: github.com/<org>/<repo>
-    // → api.github.com/repos/<org>/<repo>.
-    let api_base = base.replace("https://github.com/", "https://api.github.com/repos/");
-    let url = format!("{api_base}/releases?per_page=1");
+/// Releases-list API URL for the provider. GitHub derives the API host
+/// from the repo base; GitLab uses the project API base directly. Both
+/// return a newest-first JSON array of releases.
+fn releases_api_url(provider: ReleaseProvider, base: &str) -> String {
+    match provider {
+        ReleaseProvider::GitHub => {
+            let api = base.replace("https://github.com/", "https://api.github.com/repos/");
+            // `/releases` (not `/releases/latest`) so a pre-release / beta
+            // is still returned as the newest entry.
+            format!("{api}/releases?per_page=1")
+        }
+        ReleaseProvider::GitLab => {
+            format!("{base}/releases?per_page=1&order_by=released_at&sort=desc")
+        }
+    }
+}
+
+/// Download URL for a release asset. GitHub addresses assets by the git
+/// tag (`v<version>`); GitLab by the generic-package-registry path.
+fn asset_url(provider: ReleaseProvider, base: &str, version: &str, file: &str) -> String {
+    match provider {
+        ReleaseProvider::GitHub => format!("{base}/releases/download/v{version}/{file}"),
+        ReleaseProvider::GitLab => format!("{base}/packages/generic/mira/{version}/{file}"),
+    }
+}
+
+/// Apply provider-appropriate auth + headers. GitHub requires a
+/// User-Agent (it rejects API calls without one) and uses
+/// `Authorization: Bearer`; GitLab uses the `PRIVATE-TOKEN` header.
+fn apply_auth(
+    req: reqwest::blocking::RequestBuilder,
+    provider: ReleaseProvider,
+    token: Option<&str>,
+) -> reqwest::blocking::RequestBuilder {
+    match provider {
+        ReleaseProvider::GitHub => {
+            let req = req
+                .header("User-Agent", concat!("mira/", env!("CARGO_PKG_VERSION")))
+                .header("Accept", "application/vnd.github+json");
+            match token {
+                Some(t) => req.header("Authorization", format!("Bearer {t}")),
+                None    => req,
+            }
+        }
+        ReleaseProvider::GitLab => match token {
+            Some(t) => req.header("PRIVATE-TOKEN", t),
+            None    => req,
+        },
+    }
+}
+
+/// Hit the provider's Releases API and pull out the most recent tag.
+/// Both GitHub and GitLab return a newest-first JSON array whose first
+/// element carries `tag_name`. Returns the version with the `v` stripped.
+fn fetch_latest_version(provider: ReleaseProvider, base: &str, token: Option<&str>) -> Result<String, Box<dyn Error>> {
+    let url = releases_api_url(provider, base);
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
-    // GitHub rejects API requests without a User-Agent.
-    let mut req = client.get(&url)
-        .header("User-Agent", concat!("mira/", env!("CARGO_PKG_VERSION")))
-        .header("Accept", "application/vnd.github+json");
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {t}"));
-    }
-    let resp = req.send()?.error_for_status()?;
+    let resp = apply_auth(client.get(&url), provider, token)
+        .send()?
+        .error_for_status()?;
     let body: serde_json::Value = resp.json()?;
     let arr = body.as_array()
-        .ok_or("unexpected GitHub API response — expected an array")?;
+        .ok_or("unexpected releases API response — expected a JSON array")?;
     let first = arr.first()
         .ok_or("no releases found — the project hasn't tagged anything yet")?;
     let tag = first.get("tag_name")
@@ -202,20 +294,15 @@ fn fetch_latest_version(base: &str, token: Option<&str>) -> Result<String, Box<d
 
 /// Download a single URL to a file. Streams to disk so multi-MB
 /// tarballs don't sit in memory.
-fn download(url: &str, dest: &Path, token: Option<&str>) -> Result<(), Box<dyn Error>> {
+fn download(provider: ReleaseProvider, url: &str, dest: &Path, token: Option<&str>) -> Result<(), Box<dyn Error>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
-    let mut req = client.get(url)
-        .header("User-Agent", concat!("mira/", env!("CARGO_PKG_VERSION")));
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {t}"));
-    }
-    let mut resp = req.send()?;
+    let mut resp = apply_auth(client.get(url), provider, token).send()?;
     if !resp.status().is_success() {
         return Err(format!(
             "download failed: {} for {url}\n\
-             (private fork? set MIRA_RELEASE_TOKEN to a personal access token with repo/read access)",
+             (private source? set MIRA_RELEASE_TOKEN to an access token with read access)",
             resp.status(),
         ).into());
     }
@@ -329,6 +416,34 @@ mod tests {
         assert_eq!(normalise_version("v0.83.0"), "0.83.0");
         assert_eq!(normalise_version("0.83.0"),  "0.83.0");
         assert_eq!(normalise_version(""),        "");
+    }
+
+    #[test]
+    fn provider_parses_case_insensitively() {
+        assert_eq!(ReleaseProvider::parse("GitHub"), Some(ReleaseProvider::GitHub));
+        assert_eq!(ReleaseProvider::parse(" gitlab "), Some(ReleaseProvider::GitLab));
+        assert_eq!(ReleaseProvider::parse("gh"), Some(ReleaseProvider::GitHub));
+        assert_eq!(ReleaseProvider::parse("bitbucket"), None);
+    }
+
+    #[test]
+    fn asset_and_api_urls_match_each_provider_layout() {
+        let gh = "https://github.com/Vexillon-ai/MIRA";
+        assert_eq!(
+            asset_url(ReleaseProvider::GitHub, gh, "0.272.0", "mira-0.272.0-x.tar.gz"),
+            "https://github.com/Vexillon-ai/MIRA/releases/download/v0.272.0/mira-0.272.0-x.tar.gz",
+        );
+        assert_eq!(
+            releases_api_url(ReleaseProvider::GitHub, gh),
+            "https://api.github.com/repos/Vexillon-ai/MIRA/releases?per_page=1",
+        );
+        let gl = "https://gitlab.example.com/api/v4/projects/3";
+        assert_eq!(
+            asset_url(ReleaseProvider::GitLab, gl, "0.272.0", "mira-0.272.0-x.tar.gz"),
+            "https://gitlab.example.com/api/v4/projects/3/packages/generic/mira/0.272.0/mira-0.272.0-x.tar.gz",
+        );
+        assert!(releases_api_url(ReleaseProvider::GitLab, gl).starts_with(
+            "https://gitlab.example.com/api/v4/projects/3/releases?per_page=1"));
     }
 
     #[test]

@@ -81,7 +81,7 @@ fn smoke_router() -> (axum::Router, TempDir) {
     let supervisor = Arc::new(mira::agent::Supervisor::new(agent_registry.clone()));
     let mcp_servers = Arc::new(mira::mcp::McpServerRegistry::empty());
     let email_pollers = Arc::new(mira::email::EmailPollerRegistry::empty());
-    // build_router grew to 38 params; this integration smoke test only needs a
+    // build_router grew to 41 params; this integration smoke test only needs a
     // handful of real services — every optional dependency is passed as None.
     let router = build_router(
         core, &sec, &cfg, None, None, None, bus, tg_accounts,
@@ -90,6 +90,8 @@ fn smoke_router() -> (axum::Router, TempDir) {
         None, None, None, None, None, None, mcp_servers, None, None, None,
         email_pollers, None, None, None, None,
         None, // degradations
+        None, // guardian_actions
+        None, // audit_store
     );
     (router, dir)
 }

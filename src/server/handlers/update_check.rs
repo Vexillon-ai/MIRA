@@ -84,7 +84,7 @@ pub async fn update_check(
     };
 
     // GitHub's API rejects requests without a User-Agent (and ignores the
-    // Accept header for non-GitHub forks), so set both unconditionally.
+    // Accept header for non-GitHub sources), so set both unconditionally.
     let resp = match client.get(&cfg.server.update_check.source_url)
         .header("User-Agent", concat!("mira/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
@@ -169,6 +169,7 @@ pub async fn upgrade(
             version: None,        // latest
             no_restart: false,
             force: false,
+            provider: None,       // env/default selects the forge
             release_base_url: None,
             token: None,          // reads $MIRA_RELEASE_TOKEN if set
         };

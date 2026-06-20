@@ -325,12 +325,12 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         branch: Option<String>,
         // (--binary only) Specific version to install (e.g. `0.84.0`
-        // or `v0.84.0`). Defaults to whatever the GitLab API
-        // reports as the latest release.
+        // or `v0.84.0`). Defaults to whatever the release provider's
+        // API reports as the latest release.
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
-        // (--binary only) Personal-access / deploy token for fetching
-        // from a private GitLab project. Reads from
+        // (--binary only) Access token for fetching from a private
+        // release host (e.g. a private GitLab/GitHub fork). Reads from
         // `$MIRA_RELEASE_TOKEN` when not passed.
         #[arg(long, value_name = "TOKEN")]
         token: Option<String>,
@@ -974,6 +974,7 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
                 version:          version.clone(),
                 no_restart:       *no_restart,
                 force:            *force,
+                provider:         None,
                 release_base_url: None,
                 token:            token.clone(),
             };

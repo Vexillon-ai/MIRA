@@ -9,7 +9,7 @@
 # What it does:
 #   1. Detects platform (Linux x86_64 / Linux aarch64 / macOS x86_64 /
 #      macOS aarch64).
-#   2. Downloads the matching release tarball from the configured RELEASES_URL.
+#   2. Downloads the matching release tarball from the configured release source.
 #   3. Verifies the SHA-256 checksum.
 #   4. Places the `mira` binary on PATH (under ~/.local/bin so it doesn't need
 #      sudo; falls back to /usr/local/bin if --system).
@@ -17,20 +17,41 @@
 #      — interactive, or unattended from MIRA_SETUP_* env with --unattended.
 #   6. Runs `mira install` (or `mira install --system`) to register the service.
 #   7. Opens the browser to the web UI to finish voice + channels.
-#
-# Slice 7 (CI release pipeline) has to land before this is useful in
-# production — until then the download will 404. The script is still
-# correct; it just needs tarballs to download.
 
 set -eu
 
 # ── Defaults — override via env or flag ──────────────────────────────────────
 
-: "${RELEASES_URL:=https://api.github.com/repos/Vexillon-ai/MIRA/releases}"
-# Release assets are published as GitHub Release assets, addressed by the
-# git tag: <download-base>/v<version>/<file>. We resolve the version from
-# RELEASES_URL above, then pull tarballs + SHA256SUMS from this base.
-: "${DOWNLOAD_BASE_URL:=https://github.com/Vexillon-ai/MIRA/releases/download}"
+# Release source — provider-aware. Defaults to GitHub (the public release
+# source). Internal builds can target a GitLab generic-package-registry by
+# setting MIRA_RELEASE_PROVIDER=gitlab and MIRA_RELEASE_BASE_URL to the GitLab
+# project API base (e.g. https://gitlab.example.com/api/v4/projects/<id>).
+# RELEASES_URL / DOWNLOAD_BASE_URL may also be overridden directly.
+: "${MIRA_RELEASE_PROVIDER:=github}"
+case "$MIRA_RELEASE_PROVIDER" in
+  github|gh)
+    : "${MIRA_RELEASE_BASE_URL:=https://github.com/Vexillon-ai/MIRA}"
+    api_base=$(printf '%s' "$MIRA_RELEASE_BASE_URL" \
+      | sed 's#^https://github\.com/#https://api.github.com/repos/#')
+    : "${RELEASES_URL:=${api_base}/releases}"
+    : "${DOWNLOAD_BASE_URL:=${MIRA_RELEASE_BASE_URL}/releases/download}"
+    TAG_PREFIX=v        # GitHub addresses release assets under the v<version> tag
+    ;;
+  gitlab|gl)
+    if [ -z "${MIRA_RELEASE_BASE_URL:-}" ]; then
+      echo "MIRA_RELEASE_PROVIDER=gitlab requires MIRA_RELEASE_BASE_URL" >&2
+      echo "  (the GitLab project API base, e.g. https://gitlab.example.com/api/v4/projects/<id>)" >&2
+      exit 1
+    fi
+    : "${RELEASES_URL:=${MIRA_RELEASE_BASE_URL}/releases}"
+    : "${DOWNLOAD_BASE_URL:=${MIRA_RELEASE_BASE_URL}/packages/generic/mira}"
+    TAG_PREFIX=         # GitLab's generic-package path uses the bare version
+    ;;
+  *)
+    echo "Unknown MIRA_RELEASE_PROVIDER: '$MIRA_RELEASE_PROVIDER' (use 'github' or 'gitlab')" >&2
+    exit 1
+    ;;
+esac
 : "${INSTALL_DIR:=$HOME/.local/bin}"
 : "${SYSTEM_INSTALL:=}"        # set to "1" to install system-scope
 : "${VERSION:=}"               # blank = latest; e.g. "0.146.0"
@@ -66,8 +87,9 @@ Options:
   --unattended           Run \`mira setup --unattended\` (configure from
                          MIRA_SETUP_* env vars — for CI / scripted installs)
 
-Environment variables map to the same flags. Set RELEASES_URL to use a
-custom releases endpoint.
+Environment variables map to the same flags. The release source defaults to
+GitHub; override with MIRA_RELEASE_PROVIDER=github|gitlab + MIRA_RELEASE_BASE_URL,
+or set RELEASES_URL / DOWNLOAD_BASE_URL directly.
 EOF
       exit 0
       ;;
@@ -120,8 +142,10 @@ need curl
 need tar
 need sha256sum 2>/dev/null || need shasum  # macOS ships shasum, Linux sha256sum
 
-# Pick latest version if not pinned. GitHub's releases API returns an
-# array sorted newest-first; the first entry's tag_name is the latest.
+# Pick latest version if not pinned. The releases API returns an array
+# sorted newest-first; the first entry's tag_name is the latest. The grep
+# tolerates optional whitespace after the colon so it works against both
+# GitLab's compact JSON and GitHub's pretty-printed JSON (the public mirror).
 if [ -z "$VERSION" ]; then
   echo "→ resolving latest release from $RELEASES_URL"
   VERSION=$(curl -fsSL "$RELEASES_URL" \
@@ -137,10 +161,11 @@ if [ -z "$VERSION" ]; then
   echo "✓ latest is $VERSION"
 fi
 
-# Download URL pattern. Each tarball + a combined SHA256SUMS is attached
-# to the GitHub Release for the matching tag (v<version>); release assets
-# are addressed by the tag path segment.
-RELEASE_BASE="${DOWNLOAD_BASE_URL}/v${VERSION}"
+# Download URL pattern. GitHub serves release assets at
+# <repo>/releases/download/v<version>/<file>; GitLab's generic package
+# registry at <base>/packages/generic/mira/<version>/<file>. TAG_PREFIX
+# (set per provider above) accounts for the v-prefix difference.
+RELEASE_BASE="${DOWNLOAD_BASE_URL}/${TAG_PREFIX}${VERSION}"
 ASSET="mira-${VERSION}-${target}.tar.gz"
 ASSET_URL="${RELEASE_BASE}/${ASSET}"
 

@@ -4,7 +4,7 @@
   MIRA bootstrap installer for Windows.
 
 .DESCRIPTION
-  Downloads a release zip from the configured Releases API, verifies SHA-256,
+  Downloads a release zip from the configured release source, verifies SHA-256,
   unpacks `mira.exe` onto PATH, runs the guided `mira setup` wizard (admin
   account, LLM provider, security), registers the Windows service, and opens the
   web UI. Use -NoSetup / -Unattended / -NoSupervisor to skip steps.
@@ -15,8 +15,11 @@
 .PARAMETER InstallDir
   Where to place mira.exe. Defaults to "$HOME\.mira\bin".
 
-.PARAMETER ReleasesUrl
-  Override the Releases API endpoint.
+.PARAMETER Provider
+  Release source: github (default) or gitlab.
+
+.PARAMETER ReleaseBaseUrl
+  For gitlab: the project API base. For a GitHub fork: the repo URL.
 
 .EXAMPLE
   irm https://get.vexillon.ai/install.ps1 | iex
@@ -25,8 +28,13 @@
 param(
     [string]$Version,
     [string]$InstallDir = (Join-Path $env:USERPROFILE ".mira\bin"),
-    [string]$ReleasesUrl = "https://api.github.com/repos/Vexillon-ai/MIRA/releases",
-    [string]$DownloadBaseUrl = "https://github.com/Vexillon-ai/MIRA/releases/download",
+    # Release source. Defaults to GitHub (the public release source). Internal
+    # builds target GitLab with -Provider gitlab + -ReleaseBaseUrl <api base>
+    # (or the MIRA_RELEASE_PROVIDER / MIRA_RELEASE_BASE_URL env vars).
+    [string]$Provider = $(if ($env:MIRA_RELEASE_PROVIDER) { $env:MIRA_RELEASE_PROVIDER } else { 'github' }),
+    [string]$ReleaseBaseUrl = $env:MIRA_RELEASE_BASE_URL,
+    [string]$ReleasesUrl,
+    [string]$DownloadBaseUrl,
     [switch]$NoBrowser,
     [switch]$NoSetup,        # skip the guided `mira setup` wizard
     [switch]$Unattended,     # `mira setup --unattended` (reads MIRA_SETUP_* env)
@@ -34,6 +42,29 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ── Release source (provider-aware) ──────────────────────────────────────────
+# Defaults to GitHub; internal builds set -Provider gitlab + -ReleaseBaseUrl.
+switch ($Provider.ToLower()) {
+    { $_ -in 'github','gh' } {
+        if (-not $ReleaseBaseUrl) { $ReleaseBaseUrl = 'https://github.com/Vexillon-ai/MIRA' }
+        $apiBase = $ReleaseBaseUrl -replace '^https://github\.com/', 'https://api.github.com/repos/'
+        if (-not $ReleasesUrl)     { $ReleasesUrl     = "$apiBase/releases" }
+        if (-not $DownloadBaseUrl) { $DownloadBaseUrl = "$ReleaseBaseUrl/releases/download" }
+        $TagPrefix = 'v'        # GitHub addresses release assets under the v<version> tag
+    }
+    { $_ -in 'gitlab','gl' } {
+        if (-not $ReleaseBaseUrl) {
+            throw "Provider 'gitlab' requires -ReleaseBaseUrl (or MIRA_RELEASE_BASE_URL): the GitLab project API base, e.g. https://gitlab.example.com/api/v4/projects/<id>"
+        }
+        if (-not $ReleasesUrl)     { $ReleasesUrl     = "$ReleaseBaseUrl/releases" }
+        if (-not $DownloadBaseUrl) { $DownloadBaseUrl = "$ReleaseBaseUrl/packages/generic/mira" }
+        $TagPrefix = ''          # GitLab's generic-package path uses the bare version
+    }
+    default {
+        throw "Unknown -Provider '$Provider' (use 'github' or 'gitlab')"
+    }
+}
 
 function Detect-Arch {
     switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -70,9 +101,10 @@ if (-not $Version) {
 # ── Download + verify + extract ─────────────────────────────────────────────
 
 $asset       = "mira-$Version-$target.zip"
-# GitHub Release assets are addressed by the git tag (`v<version>`),
-# same layout as install.sh.
-$releaseBase = "$DownloadBaseUrl/v$Version"
+# GitHub serves release assets at <repo>/releases/download/v<version>/<file>;
+# GitLab's generic package registry at <base>/packages/generic/mira/<version>/
+# <file>. $TagPrefix (set per provider above) handles the v-prefix difference.
+$releaseBase = "$DownloadBaseUrl/$TagPrefix$Version"
 $assetUrl    = "$releaseBase/$asset"
 $sumsUrl     = "$releaseBase/SHA256SUMS"
 

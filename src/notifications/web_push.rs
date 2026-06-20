@@ -65,6 +65,7 @@ impl WebPushService {
         let keypair = load_or_create_keypair(&data_dir.join(VAPID_KEY_FILENAME))?;
         let store   = Arc::new(WebPushStore::open(db_path)?);
         let http    = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| MiraError::ConfigError(format!("web push http client: {e}")))?;
@@ -180,7 +181,9 @@ impl WebPushService {
             }
         }
         let resp = req.send().await
-            .map_err(|e| WebPushSendError::Other(format!("send: {e}")))?;
+            // `without_url()` keeps the FCM endpoint URL — which embeds the
+            // browser's push-subscription token — out of the logged error.
+            .map_err(|e| WebPushSendError::Other(format!("send: {}", e.without_url())))?;
         let status = resp.status();
         if status.is_success() {
             return Ok(());
