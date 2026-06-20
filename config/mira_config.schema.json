@@ -1690,8 +1690,8 @@
               "minimum": 1
             },
             "auto_apply_above": {
-              "description": "In mode='review', ops with extractor confidence at or above this threshold [0.0, 1.0] are applied immediately instead of waiting in the review queue; lower-confidence ops still land as pending. Omit (default) to require review for every extracted op. Ignored when mode is 'auto' or 'off'.",
-              "type": "number",
+              "description": "In mode='review', ops with extractor confidence at or above this threshold [0.0, 1.0] are applied immediately instead of waiting in the review queue; lower-confidence ops still land as pending. Omit/null (default) to require review for every extracted op. Ignored when mode is 'auto' or 'off'.",
+              "type": ["number", "null"],
               "minimum": 0.0,
               "maximum": 1.0
             }
