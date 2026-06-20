@@ -1,0 +1,51 @@
+name: "CodeQL"
+
+# Static analysis (SAST) for the no-build languages in this repo: the React
+# web UI (JavaScript/TypeScript) and Python helpers. Rust (the core) is GA in
+# CodeQL but requires a full build; it's intentionally not enabled here yet.
+#
+# Note: this repo is a sanitized public mirror — development happens upstream,
+# so fixes for any alerts land in the source repo and arrive via the next sync.
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '23 5 * * 1'   # weekly, Monday 05:23 UTC
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # Add the broader security-focused query suite on top of the default.
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
