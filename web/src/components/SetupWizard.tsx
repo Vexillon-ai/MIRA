@@ -139,7 +139,7 @@ export default function SetupWizard() {
     mutationFn: () => {
       const label = INLINE_CHANNELS.find((c) => c.kind === chanKind)?.label ?? 'Account'
       const config =
-        chanKind === 'telegram' ? { bot_token: chanToken.trim(), mode: 'webhook', secret_token: null }
+        chanKind === 'telegram' ? { bot_token: chanToken.trim(), mode: 'polling', secret_token: null }
         : chanKind === 'discord' ? { bot_token: chanToken.trim(), application_id: '', mention_only: false }
         : { bot_token: chanToken.trim(), signing_secret: chanSecret.trim(), mention_only: false }
       return channelAccountsApi.create({ channel: chanKind, account_label: label, config, enabled: true })

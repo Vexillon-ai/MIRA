@@ -57,7 +57,9 @@ function blankConfig(channel: ChannelKind): AnyChannelConfig {
   if (channel === 'external') {
     return { provider_kind: '', send_url: '', mention_only: false }
   }
-  return { bot_token: '', mode: 'webhook', secret_token: null }
+  // Polling works behind NAT/localhost with no public URL — the right default
+  // for a self-hosted install. Webhook is for public deployments behind a proxy.
+  return { bot_token: '', mode: 'polling', secret_token: null }
 }
 
 function summarise(acct: ChannelAccount): string {

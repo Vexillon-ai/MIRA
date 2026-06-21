@@ -337,11 +337,19 @@ fn extract_archive(bytes: &[u8], kind: ArchiveKind, dest: &Path) -> Result<(), T
             ))?;
             Ok(())
         }
-        ArchiveKind::Zip => Err(TtsError::BackendUnavailable(
-            "piper".into(),
-            "ZIP extraction not built in this binary — install Piper manually \
-             and set tts.internal.binary_path".into(),
-        )),
+        ArchiveKind::Zip => {
+            // Piper's Windows release is a .zip (piper/piper.exe + DLLs +
+            // espeak-ng-data). Unpack the whole tree into `dest`, preserving the
+            // `piper/` prefix the manifest's binary_path_in_archive expects.
+            let reader = std::io::Cursor::new(bytes);
+            let mut archive = zip::ZipArchive::new(reader).map_err(|e| {
+                TtsError::BackendUnavailable("piper".into(), format!("zip open failed: {e}"))
+            })?;
+            archive.extract(dest).map_err(|e| {
+                TtsError::BackendUnavailable("piper".into(), format!("zip extract failed: {e}"))
+            })?;
+            Ok(())
+        }
     }
 }
 

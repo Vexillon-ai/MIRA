@@ -404,6 +404,25 @@ fn apply(a: &Answers, config_path: &PathBuf) -> Result<(), Box<dyn Error>> {
     cfg.primary_provider = a.provider_id.clone();
 
     let p = &mut cfg.providers;
+    // Start from a clean slate: every provider defaults to `enabled = true`, so
+    // without this a fresh install would show all 11 providers toggled on in
+    // Settings → Providers even though the user configured only one. Disable
+    // them all, then the match below enables just the selected provider. (Cloud
+    // providers with no key were already skipped at runtime, so this is a
+    // clarity fix — the Settings page now reflects what's actually active. A
+    // user who later pastes an API key for another provider gets it auto-enabled
+    // on save, so this doesn't add a step for them.)
+    p.ollama.enabled = false;
+    p.lmstudio.enabled = false;
+    p.openrouter.enabled = false;
+    p.openai.enabled = false;
+    p.deepseek.enabled = false;
+    p.moonshot.enabled = false;
+    p.groq.enabled = false;
+    p.xai.enabled = false;
+    p.openai_compat.enabled = false;
+    p.anthropic.enabled = false;
+    p.gemini.enabled = false;
     match a.provider_id.as_str() {
         "ollama" => { p.ollama.enabled = true; p.ollama.url = a.base_url.clone(); p.ollama.default_model = a.model.clone(); }
         "lmstudio" => { p.lmstudio.enabled = true; p.lmstudio.url = a.base_url.clone(); p.lmstudio.default_model = a.model.clone(); }

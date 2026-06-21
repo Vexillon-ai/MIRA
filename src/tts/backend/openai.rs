@@ -56,7 +56,9 @@ pub struct OpenAiBackend {
 }
 
 impl OpenAiBackend {
-    pub fn new(cfg: OpenAiConfig) -> Self {
+    pub fn new(mut cfg: OpenAiConfig) -> Self {
+        // The OpenAI audio endpoints live under /v1; forgive a host-only base.
+        cfg.base_url = crate::providers::normalize_openai_base_url(&cfg.base_url, "/v1");
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(cfg.timeout_secs.max(5)))
             .build()

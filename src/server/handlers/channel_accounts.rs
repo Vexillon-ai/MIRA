@@ -27,7 +27,9 @@ use crate::channel_accounts::{
     DiscordAccountConfig, ExternalAccountConfig, MatrixAccountConfig, SignalAccountConfig,
     SlackAccountConfig, TelegramAccountConfig, UpdateChannelAccount, WhatsAppAccountConfig,
 };
+use crate::web::LiveConfig;
 use crate::MiraError;
+use tracing::{info, warn};
 
 // ── Wire types ───────────────────────────────────────────────────────────────
 
@@ -154,6 +156,27 @@ fn redact(s: &str) -> String {
             "•".repeat(chars.len() - 6),
             chars[chars.len() - 2..].iter().collect::<String>(),
         )
+    }
+}
+
+/// Restore secret fields the client sent back in redacted form. GET masks
+/// secrets with the '•' bullet; when an update carries a value still containing
+/// '•', the user didn't re-type it, so we substitute the real value from the
+/// stored config. Generic over the flat channel-config objects (top-level string
+/// fields), so it covers bot_token / access_token / signing_secret / app_secret /
+/// inbound_secret / outbound_secret / secret_token without enumerating them. No
+/// legitimate secret contains '•'.
+fn restore_redacted_config(incoming: &mut serde_json::Value, existing_json: &str) {
+    let Ok(existing) = serde_json::from_str::<serde_json::Value>(existing_json) else { return };
+    let (Some(obj), Some(exist)) = (incoming.as_object_mut(), existing.as_object()) else { return };
+    for (k, v) in obj.iter_mut() {
+        if let Some(s) = v.as_str() {
+            if s.contains('•') {
+                if let Some(orig) = exist.get(k) {
+                    *v = orig.clone();
+                }
+            }
+        }
     }
 }
 
@@ -304,12 +327,47 @@ pub async fn list_accounts(
     }
 }
 
+// Turn on the global `channels.<kind>.enabled` gate for a channel type when an
+// account of that type is added. The per-account row is the primary control;
+// this global flag is a kill switch that defaults off, so without flipping it an
+// added account is gated off and receives nothing. No-op if already on.
+async fn ensure_channel_type_enabled(live: &LiveConfig, kind: ChannelKind) {
+    let cur = live.get().await;
+    let already = match kind {
+        ChannelKind::Signal   => cur.channels.signal.enabled,
+        ChannelKind::Telegram => cur.channels.telegram.enabled,
+        ChannelKind::Discord  => cur.channels.discord.enabled,
+        ChannelKind::Matrix   => cur.channels.matrix.enabled,
+        ChannelKind::WhatsApp => cur.channels.whatsapp.enabled,
+        ChannelKind::Slack    => cur.channels.slack.enabled,
+        ChannelKind::External => cur.channels.external.enabled,
+    };
+    if already {
+        return;
+    }
+    let mut next = (*cur).clone();
+    match kind {
+        ChannelKind::Signal   => next.channels.signal.enabled = true,
+        ChannelKind::Telegram => next.channels.telegram.enabled = true,
+        ChannelKind::Discord  => next.channels.discord.enabled = true,
+        ChannelKind::Matrix   => next.channels.matrix.enabled = true,
+        ChannelKind::WhatsApp => next.channels.whatsapp.enabled = true,
+        ChannelKind::Slack    => next.channels.slack.enabled = true,
+        ChannelKind::External => next.channels.external.enabled = true,
+    }
+    match live.update(next).await {
+        Ok(())  => info!("Auto-enabled '{}' channel (an account was added)", kind.as_str()),
+        Err(e)  => warn!("Could not auto-enable '{}' channel: {e}", kind.as_str()),
+    }
+}
+
 // ── POST /api/channel-accounts ───────────────────────────────────────────────
 
 pub async fn create_account(
     AuthUser(caller): AuthUser,
     Extension(store): Extension<Arc<ChannelAccountStore>>,
     Extension(auth):  Extension<Arc<LocalAuthService>>,
+    Extension(live_cfg): Extension<Arc<LiveConfig>>,
     Json(req): Json<CreateAccountRequest>,
 ) -> impl IntoResponse {
     let kind = match parse_kind(&req.channel) {
@@ -353,6 +411,16 @@ pub async fn create_account(
         // them into the provider. All other channels + all later reads
         // redact. (A re-fetch of an External account via GET is redacted.)
         Ok(acct) => {
+            // Adding an enabled account is intent to use that channel — flip the
+            // global `channels.<kind>.enabled` gate on so messages aren't
+            // silently dropped. Without this, a freshly-added Telegram bot
+            // (per-account enabled=true) still never receives anything because
+            // the global kill switch defaults off. Best-effort: a config write
+            // failure shouldn't fail the account creation. Takes effect live
+            // (the inbound handlers read the gate per-message).
+            if acct.enabled {
+                ensure_channel_type_enabled(&live_cfg, kind).await;
+            }
             let resp = if kind == ChannelKind::External {
                 ChannelAccountResponse::from_row_unredacted(acct)
             } else {
@@ -413,7 +481,14 @@ pub async fn update_account(
     }
 
     // Re-encode config if provided, else keep the existing string as-is.
-    let config_json = if let Some(cfg) = req.config {
+    let config_json = if let Some(mut cfg) = req.config {
+        // Restore redacted secrets: GET redacts secret fields to a masked form
+        // containing the '•' bullet. If the UI sends that masked value back
+        // (e.g. the user only changed `mode` and never re-typed the token), keep
+        // the real stored value instead of persisting the mask — otherwise
+        // editing any field destroys the secret. Mirrors the `***` sentinel
+        // restore on PUT /api/config. No real secret contains '•'.
+        restore_redacted_config(&mut cfg, &existing.config_json);
         match encode_config(existing.channel, &cfg) {
             Ok(s)  => Some(s),
             Err(e) => return err_resp(e),
@@ -779,6 +854,27 @@ mod tests {
     #[test]
     fn redact_short_string_all_dots() {
         assert_eq!(redact("abc"), "•••");
+    }
+
+    #[test]
+    fn restore_redacted_keeps_real_secret_when_mask_sent_back() {
+        // Simulate: GET redacted the token; the UI sends it back unchanged while
+        // only flipping `mode`. The real token must survive.
+        let real = "8941234567:AAHrealtokenrealtokenrealtoken12345";
+        let existing = serde_json::json!({ "bot_token": real, "mode": "webhook" }).to_string();
+        let mut incoming = serde_json::json!({ "bot_token": redact(real), "mode": "polling" });
+        restore_redacted_config(&mut incoming, &existing);
+        assert_eq!(incoming["bot_token"], real, "real token must be restored");
+        assert_eq!(incoming["mode"], "polling", "non-secret edit preserved");
+    }
+
+    #[test]
+    fn restore_redacted_accepts_newly_typed_secret() {
+        // A freshly-typed token (no bullet) must pass through unchanged.
+        let existing = serde_json::json!({ "bot_token": "oldoldoldold:OLD" }).to_string();
+        let mut incoming = serde_json::json!({ "bot_token": "9999999999:AAHbrandnewtokenbrandnewtoken99999" });
+        restore_redacted_config(&mut incoming, &existing);
+        assert_eq!(incoming["bot_token"], "9999999999:AAHbrandnewtokenbrandnewtoken99999");
     }
 
     #[test]

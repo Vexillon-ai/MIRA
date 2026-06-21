@@ -139,10 +139,10 @@ impl TtsService {
         if cfg.enabled {
             let mut piper_cfg = PiperConfig::under_data_dir(&mira.data_dir_path());
             if !cfg.internal.voices_dir.is_empty() {
-                piper_cfg.voices_dir = crate::config::expand_path(&cfg.internal.voices_dir);
+                piper_cfg.voices_dir = crate::config::resolve_state_path(&cfg.internal.voices_dir);
             }
             if !cfg.internal.binary_path.is_empty() {
-                piper_cfg.binary_path = Some(crate::config::expand_path(&cfg.internal.binary_path));
+                piper_cfg.binary_path = Some(crate::config::resolve_state_path(&cfg.internal.binary_path));
             }
             piper_cfg.default_voice = cfg.internal.default_voice.clone();
             piper_cfg.auto_download = cfg.internal.auto_download_voices;
@@ -161,7 +161,7 @@ impl TtsService {
             if cfg.kokoro.enabled {
                 let mut k = KokoroConfig::under_data_dir(&mira.data_dir_path());
                 if !cfg.kokoro.model_path.is_empty() {
-                    k.model_path = crate::config::expand_path(&cfg.kokoro.model_path);
+                    k.model_path = crate::config::resolve_state_path(&cfg.kokoro.model_path);
                 }
                 k.default_voice = cfg.kokoro.default_voice.clone();
                 k.device        = cfg.kokoro.device.clone();

@@ -2,7 +2,7 @@
 name = "mira"
 # First public release: 0.272.0 = "public beta 1" (tag v0.272.0; GitHub release
 # marked pre-release). Post-beta fixes continue from 0.272.1.
-version = "0.273.0"
+version = "0.273.1"
 edition = "2024"
 description = "Multi-tasking Intelligent Responsive Assistant - A personal AI agent framework"
 authors = ["Tarek El Diab"]
@@ -229,9 +229,13 @@ libc = "0.2"
 # Per-call sandbox scratch dirs (code_run artifact pipeline)
 tempfile = "3"
 
-# Archive extraction for downloaded TTS binaries (Piper releases ship as .tar.gz)
+# Archive extraction for downloaded TTS binaries. Piper ships .tar.gz on
+# Linux/macOS and .zip on Windows — both are needed so the internal (Piper)
+# voice backend can auto-install on a fresh box. default-features=false keeps
+# `zip` to just the deflate codec Piper's archives use.
 flate2 = "1"
 tar    = "0.4"
+zip    = { version = "2", default-features = false, features = ["deflate"] }
 
 # Phase 8b — Speech-to-text. whisper-rs is an in-process FFI to whisper.cpp;
 # it builds a static C++ library at compile time. Build prerequisites on

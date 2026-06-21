@@ -109,9 +109,12 @@ fn default_signal_data_dir() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramAccountConfig {
     pub bot_token:    String,
-    /// `webhook` (default) or `polling`. Webhook mode receives via the shared
-    /// `/webhook/telegram/{account_id}` endpoint; polling mode spawns a
-    /// long-poll task per account.
+    /// `polling` (default) or `webhook`. Polling spawns a long-poll task per
+    /// account (`getUpdates`) and works anywhere — behind NAT, on localhost, no
+    /// public URL needed — so it's the right default for self-hosted installs.
+    /// Webhook mode receives via the shared `/webhook/telegram/{account_id}`
+    /// endpoint and requires a public HTTPS URL Telegram can reach (production
+    /// deployments behind a reverse proxy).
     #[serde(default = "default_tg_mode")]
     pub mode:         String,
     /// Value sent by Telegram in the `X-Telegram-Bot-Api-Secret-Token` header.
@@ -126,7 +129,7 @@ pub struct TelegramAccountConfig {
     pub poll_timeout_secs: u64,
 }
 
-fn default_tg_mode() -> String { "webhook".to_string() }
+fn default_tg_mode() -> String { "polling".to_string() }
 fn default_poll_timeout_secs() -> u64 { 30 }
 
 /// Discord per-account bot settings. Persisted as JSON in `config_json`.

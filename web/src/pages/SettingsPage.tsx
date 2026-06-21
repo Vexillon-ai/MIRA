@@ -232,6 +232,26 @@ function stripSentinels(obj: unknown): unknown {
   return result
 }
 
+/** After sentinel-stripping, any provider block still carrying a non-empty
+ *  `api_key` is one the user *just typed* (an unchanged key was the "***"
+ *  sentinel and got stripped). Treat that as intent to use the provider and
+ *  flip its `enabled` on, so a freshly-pasted key works without a separate
+ *  toggle step. Local providers (ollama/lmstudio) have no key and are unaffected
+ *  — and an already-keyed provider the user deliberately disabled stays disabled
+ *  (its key is the stripped sentinel, not a real value). Mutates in place. */
+function autoEnableKeyedProviders(body: unknown): void {
+  if (typeof body !== 'object' || body === null) return
+  const providers = (body as { providers?: unknown }).providers
+  if (typeof providers !== 'object' || providers === null) return
+  for (const blk of Object.values(providers as Record<string, unknown>)) {
+    if (typeof blk !== 'object' || blk === null) continue
+    const b = blk as { api_key?: unknown; enabled?: unknown }
+    if (typeof b.api_key === 'string' && b.api_key.length > 0) {
+      b.enabled = true
+    }
+  }
+}
+
 function getPath(obj: Config, path: string): unknown {
   return path.split('.').reduce<unknown>((cur, k) => {
     if (cur && typeof cur === 'object') return (cur as Record<string, unknown>)[k]
@@ -241,19 +261,26 @@ function getPath(obj: Config, path: string): unknown {
 
 function setPath(obj: Config, path: string, value: unknown): Config {
   const parts = path.split('.')
-  // Guard against prototype pollution: a dotted path like `__proto__.x` would
-  // otherwise walk into Object.prototype. No legitimate config key uses these.
-  if (parts.some((p) => p === '__proto__' || p === 'prototype' || p === 'constructor')) {
-    return obj
-  }
   const clone = { ...obj }
   let cur: Record<string, unknown> = clone as Record<string, unknown>
-  for (let i = 0; i < parts.length - 1; i++) {
-    const existing = cur[parts[i]]
-    cur[parts[i]] = typeof existing === 'object' && existing !== null ? { ...existing } : {}
-    cur = cur[parts[i]] as Record<string, unknown>
+  for (let i = 0; i < parts.length; i++) {
+    const key = parts[i]
+    // Per-key prototype-pollution guard, checked immediately before each write.
+    // A dotted path like `__proto__.x` would otherwise walk into
+    // Object.prototype; no legitimate config key uses these. (Kept per-key
+    // inside the loop, not as an upfront array check, so CodeQL's
+    // js/prototype-pollution-utility query recognises the barrier.)
+    if (key === '__proto__' || key === 'prototype' || key === 'constructor') {
+      return obj
+    }
+    if (i === parts.length - 1) {
+      cur[key] = value
+    } else {
+      const existing = cur[key]
+      cur[key] = typeof existing === 'object' && existing !== null ? { ...existing } : {}
+      cur = cur[key] as Record<string, unknown>
+    }
   }
-  cur[parts[parts.length - 1]] = value
   return clone
 }
 
@@ -815,10 +842,14 @@ export default function SettingsPage() {
     if (tab === 'advanced') {
       try {
         const parsed = JSON.parse(rawJson)
-        saveMut.mutate(stripSentinels(parsed) as Config)
+        const body = stripSentinels(parsed)
+        autoEnableKeyedProviders(body)
+        saveMut.mutate(body as Config)
       } catch { setRawError('Invalid JSON'); return }
     } else {
-      saveMut.mutate(stripSentinels(draft) as Config)
+      const body = stripSentinels(draft)
+      autoEnableKeyedProviders(body)
+      saveMut.mutate(body as Config)
     }
     setRawError('')
   }

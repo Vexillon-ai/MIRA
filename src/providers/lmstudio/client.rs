@@ -247,7 +247,9 @@ impl LmStudioProvider {
         Self {
             client,
             model,
-            base_url: url.trim_end_matches('/').to_string(),
+            // LM Studio serves the OpenAI surface under `/v1`; tolerate a
+            // host-only URL (the common case) by grafting it on.
+            base_url: crate::providers::normalize_openai_base_url(&url, "/v1"),
             tool_round_max_tokens: FALLBACK_TOOL_ROUND_TOKENS,
             response_max_tokens:   FALLBACK_RESPONSE_TOKENS,
         }
@@ -550,5 +552,20 @@ impl ModelProvider for LmStudioProvider {
                 false
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructed_provider_targets_v1_endpoints() {
+        // Host-only URL (the setup default / common hand-typed form) gets `/v1`.
+        let p = LmStudioProvider::new("http://localhost:1234".into(), "m".into());
+        assert_eq!(p.api_url(), "http://localhost:1234/v1/chat/completions");
+        // Already-correct URL is preserved.
+        let p2 = LmStudioProvider::new("http://localhost:1234/v1".into(), "m".into());
+        assert_eq!(p2.api_url(), "http://localhost:1234/v1/chat/completions");
     }
 }

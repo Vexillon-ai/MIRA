@@ -381,7 +381,7 @@ fn service_main(_args: Vec<OsString>) {
             // without this the service would load the default-path config (for
             // LocalSystem, under systemprofile) and ignore the operator's.
             let cfg_override = std::env::var_os("MIRA_CONFIG").map(PathBuf::from);
-            let config = match crate::config::MiraConfig::load(cfg_override) {
+            let mut config = match crate::config::MiraConfig::load(cfg_override) {
                 Ok(c) => c,
                 Err(e) => {
                     return Err::<(), Box<dyn Error + Send + Sync>>(
@@ -389,6 +389,26 @@ fn service_main(_args: Vec<OsString>) {
                     );
                 }
             };
+            // Put the service's log under its data-dir (next to the databases)
+            // so it's findable. The default `~/.mira/logs/mira.log` resolves
+            // under the *supervisor account's* `~` (LocalSystem's profile),
+            // which is effectively hidden. Only override the default — an
+            // operator who set a custom `logging.file` keeps it.
+            if config.logging.file == crate::config::default_log_file() {
+                let log_path = config.data_dir_path().join("logs").join("mira.log");
+                config.logging.file = log_path.to_string_lossy().into_owned();
+            }
+            // Install file logging before anything else logs. The console
+            // `--server`/TUI path does this in `main`; the service entry has to
+            // do it itself. Without it the tracing subscriber is never set, no
+            // log file is written, and the web UI Logs page hangs on
+            // "connecting to log stream" (the stream handler has no file to
+            // tail). The stream handler reads the same `logging.file` in this
+            // same process, so reader and writer always agree.
+            crate::log_filter::init_to_file(
+                &config.logging.level,
+                &config.log_file_path(),
+            );
             let gateway = crate::gateway::GatewayBuilder::new()
                 .with_config(Arc::new(config))
                 .build()

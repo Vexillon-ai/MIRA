@@ -281,11 +281,7 @@ pub async fn delete_agent_avatar(
 pub(crate) fn redact_secrets(value: &mut Value) {
     if let Value::Object(map) = value {
         for (k, v) in map.iter_mut() {
-            if matches!(
-                k.as_str(),
-                "api_key" | "auth_token" | "webhook_secret" | "hmac_key"
-                    | "secret_token" | "bot_token" | "jwt_secret" | "password_hash"
-            ) {
+            if is_secret_field(k.as_str()) {
                 if !v.is_null() {
                     *v = Value::String("***".to_owned());
                 }
@@ -300,11 +296,18 @@ pub(crate) fn redact_secrets(value: &mut Value) {
     }
 }
 
+// Single source of truth for which config keys are secrets — used by both the
+// GET redactor and the PUT restore/sentinel-check, so they can't drift. A key
+// missing here leaks in plaintext on GET *and* can be overwritten on PUT.
 fn is_secret_field(k: &str) -> bool {
     matches!(
         k,
         "api_key" | "auth_token" | "webhook_secret" | "hmac_key"
             | "secret_token" | "bot_token" | "jwt_secret" | "password_hash"
+            // Added after a release audit found these reaching GET in plaintext:
+            | "client_secret"   // OIDC providers + Google/Outlook calendar OAuth
+            | "bind_password"   // LDAP service-account bind password
+            | "smtp_password"   // system outbound-email relay password
     )
 }
 
@@ -367,5 +370,49 @@ fn contains_unreplaced_sentinel(value: &Value) -> bool {
         }),
         Value::Array(arr) => arr.iter().any(contains_unreplaced_sentinel),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // GET /api/config must never return a real secret. This pins the keys that
+    // were leaking in plaintext before the 0.273.x audit (client_secret,
+    // bind_password, smtp_password) alongside the core ones, nested the way they
+    // sit in the real config tree, so removing any from is_secret_field fails
+    // loudly. The matching restore on PUT is exercised too.
+    #[test]
+    fn redacts_all_known_secret_fields_including_audit_finds() {
+        let mut v = json!({
+            "providers": { "openai": { "api_key": "sk-REAL" } },
+            "security":  { "jwt_secret": "JWT-REAL" },
+            "auth": {
+                "oidc": { "providers": [ { "client_secret": "OIDC-REAL" } ] },
+                "ldap": { "bind_password": "LDAP-REAL" }
+            },
+            "calendar": { "google": { "client_secret": "CAL-REAL" } },
+            "system_email": { "smtp_password": "SMTP-REAL" },
+            "channels": { "telegram": { "bot_token": "BOT-REAL" } }
+        });
+        redact_secrets(&mut v);
+        let dump = v.to_string();
+        for leaked in ["sk-REAL","JWT-REAL","OIDC-REAL","LDAP-REAL","CAL-REAL","SMTP-REAL","BOT-REAL"] {
+            assert!(!dump.contains(leaked), "secret leaked through redaction: {leaked}");
+        }
+        // And a non-secret value is preserved.
+        assert_eq!(v["channels"]["telegram"]["bot_token"], "***");
+    }
+
+    #[test]
+    fn restore_puts_back_redacted_secret_from_live() {
+        // Client sends "***" for an unchanged secret; restore_redacted must
+        // recover the live value so it isn't wiped.
+        let mut incoming = json!({ "security": { "jwt_secret": "***" } });
+        let current      = json!({ "security": { "jwt_secret": "LIVE-SECRET" } });
+        restore_redacted(&mut incoming, &current);
+        assert_eq!(incoming["security"]["jwt_secret"], "LIVE-SECRET");
+        assert!(!contains_unreplaced_sentinel(&incoming));
     }
 }

@@ -46,6 +46,14 @@ impl AnthropicProvider {
             .timeout(Duration::from_secs(timeout_secs.max(1)))
             .build()
             .expect("anthropic: failed to build HTTP client");
+        // This client appends `/v1/...` itself, so the base must be host-only.
+        // Forgive a user who included `/v1` (default is host-only) — otherwise
+        // requests go to `…/v1/v1/messages` and 404.
+        let base_url = base_url
+            .trim_end_matches('/')
+            .trim_end_matches("/v1")
+            .trim_end_matches('/')
+            .to_string();
         Self {
             http,
             api_key,

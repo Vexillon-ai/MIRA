@@ -43,7 +43,9 @@ pub struct OpenAiCompatBackend {
 }
 
 impl OpenAiCompatBackend {
-    pub fn new(cfg: OpenAiCompatConfig) -> Self {
+    pub fn new(mut cfg: OpenAiCompatConfig) -> Self {
+        // The OpenAI transcription endpoints live under /v1; forgive a host-only base.
+        cfg.base_url = crate::providers::normalize_openai_base_url(&cfg.base_url, "/v1");
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(cfg.timeout_secs.max(5)))
             .build()

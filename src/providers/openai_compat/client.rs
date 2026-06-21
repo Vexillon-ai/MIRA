@@ -275,11 +275,21 @@ pub struct OpenAiCompatClient {
 }
 
 impl OpenAiCompatClient {
-    pub fn new(config: OpenAiCompatConfig) -> Self {
+    pub fn new(mut config: OpenAiCompatConfig) -> Self {
         let http = ClientBuilder::new()
             .timeout(Duration::from_secs(config.timeout_secs.max(1)))
             .build()
             .expect("openai_compat: failed to build HTTP client");
+        // Be forgiving about the API version path: users often paste just the
+        // host. Graft the provider's canonical path onto a bare host so
+        // `{base}/chat/completions` resolves. Groq serves the OpenAI surface
+        // under `/openai/v1`; everyone else uses `/v1`.
+        let canonical = if config.provider_name.eq_ignore_ascii_case("groq") {
+            "/openai/v1"
+        } else {
+            "/v1"
+        };
+        config.base_url = crate::providers::normalize_openai_base_url(&config.base_url, canonical);
         Self { http, config }
     }
 
@@ -581,6 +591,19 @@ mod tests {
         assert_eq!(c.model_name(),    "test-model");
         assert_eq!(c.chat_url(),      "https://api.openai.com/v1/chat/completions");
         assert_eq!(c.models_url(),    "https://api.openai.com/v1/models");
+    }
+
+    #[test]
+    fn bare_host_gets_canonical_path() {
+        // Most providers: append /v1 to a host-only URL.
+        let c = OpenAiCompatClient::new(cfg("openai", "https://api.openai.com"));
+        assert_eq!(c.chat_url(), "https://api.openai.com/v1/chat/completions");
+        // Groq's OpenAI surface lives under /openai/v1.
+        let g = OpenAiCompatClient::new(cfg("groq", "https://api.groq.com"));
+        assert_eq!(g.chat_url(), "https://api.groq.com/openai/v1/chat/completions");
+        // Already-correct URLs are preserved (idempotent).
+        let g2 = OpenAiCompatClient::new(cfg("groq", "https://api.groq.com/openai/v1"));
+        assert_eq!(g2.chat_url(), "https://api.groq.com/openai/v1/chat/completions");
     }
 
     #[test]

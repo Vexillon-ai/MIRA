@@ -30,6 +30,11 @@ quickest channel to set up.
 
 That's it — reply to the bot and you're talking to MIRA from your phone.
 
+> Adding the account turns the Telegram channel on automatically, and MIRA
+> receives messages by **polling** Telegram — no public URL, port-forwarding, or
+> reverse proxy needed, so it works on a home/localhost install behind NAT. (For
+> a public deployment you can switch the account to **webhook** mode.)
+
 ## Signal
 
 Signal is end-to-end encrypted and great for a private, phone-native MIRA, but

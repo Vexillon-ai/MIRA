@@ -72,6 +72,7 @@ function StreamPanel({ isAdmin }: { isAdmin: boolean }) {
   const [filter, setFilter]       = useState<LogLevel>('ALL')
   const [autoScroll, setAutoScroll] = useState(true)
   const [connected, setConnected] = useState(false)
+  const [streamError, setStreamError] = useState<string | null>(null)
   const [copied, setCopied]       = useState(false)
   const [serverLevel, setServerLevel]       = useState<ServerLogLevel | null>(null)
   const [serverLevels, setServerLevels]     = useState<ServerLogLevel[]>([])
@@ -117,8 +118,20 @@ function StreamPanel({ isAdmin }: { isAdmin: boolean }) {
 
     es.addEventListener('init', (e) => {
       setConnected(true)
+      setStreamError(null)
       const incoming = (e as MessageEvent).data.split('\n').filter(Boolean)
       setLines(incoming)
+    })
+
+    // The server emits an `error` event (e.g. the log file can't be opened)
+    // instead of an `init`. Surface it so the page doesn't sit forever on
+    // "Connecting…" with no explanation.
+    es.addEventListener('error', (e) => {
+      const msg = (e as MessageEvent).data
+      if (typeof msg === 'string' && msg.length > 0) {
+        setStreamError(msg)
+        setConnected(false)
+      }
     })
 
     es.addEventListener('lines', (e) => {
@@ -228,7 +241,9 @@ function StreamPanel({ isAdmin }: { isAdmin: boolean }) {
         })}
         {filtered.length === 0 && (
           <p className={styles.empty}>
-            {connected ? 'No log lines match the current filter.' : 'Connecting to log stream…'}
+            {streamError
+              ? `Log stream error: ${streamError}`
+              : connected ? 'No log lines match the current filter.' : 'Connecting to log stream…'}
           </p>
         )}
         <div ref={bottomRef} />

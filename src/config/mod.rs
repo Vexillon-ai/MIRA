@@ -3130,7 +3130,11 @@ fn default_ollama_url()      -> String  { "http://localhost:11434".to_string() }
 fn default_ollama_model()    -> String  { "llama3.2".to_string() }
 fn default_ollama_timeout()  -> u64     { 120 }
 
-fn default_lmstudio_url()    -> String  { "http://localhost:1234".to_string() }
+// LM Studio's OpenAI-compatible API is served under `/v1`. Include it in the
+// default so the stored config is self-consistent and the chat/model endpoints
+// resolve correctly. (The client also normalizes a `/v1`-less URL, so existing
+// configs and hand-typed URLs without it still work.)
+fn default_lmstudio_url()    -> String  { "http://localhost:1234/v1".to_string() }
 fn default_lmstudio_model()  -> String  { "local-model".to_string() }
 fn default_lmstudio_timeout()-> u64     { 300 }
 
@@ -3161,15 +3165,18 @@ fn default_signal_data_dir() -> String  {
 
 fn default_log_level()       -> String  { "info".to_string() }
 fn default_log_format()      -> String  { "compact".to_string() }
-fn default_log_file()        -> String  { "~/.mira/logs/mira.log".to_string() }
+pub(crate) fn default_log_file() -> String  { "~/.mira/logs/mira.log".to_string() }
 fn default_log_max_size()    -> u32     { 10 }
 fn default_log_max_files()   -> u32     { 5 }
 
 fn default_vector_backend()      -> String  { "sqlite".to_string() }
-fn default_embedding_provider()  -> String  { "lmstudio".to_string() }
-fn default_embedding_model()     -> String  {
-    "text-embedding-sentence-transformers_all-minilm-l12-v2".to_string()
-}
+// Default to the in-process fastembed engine: no external server, no model to
+// load in LM Studio, works on a fresh install with no setup. (The previous
+// lmstudio default named a model that doesn't exist in a stock LM Studio, so
+// memory silently fell back anyway.) BGE-small is 384-dim, matching
+// default_embedding_dim below.
+fn default_embedding_provider()  -> String  { "internal".to_string() }
+fn default_embedding_model()     -> String  { "BGE-small-en-v1.5".to_string() }
 fn default_model_cache_dir()     -> String  { "~/.mira/models".to_string() }
 fn default_embedding_dim()       -> usize   { 384 }
 fn default_embedding_cache_size()-> usize   { 1000 }
@@ -3484,9 +3491,11 @@ impl MiraConfig {
         data_dir_env_override().unwrap_or_else(|| expand_path(&self.data_dir))
     }
 
-    // Resolved artifacts root. ~ is expanded. 0.111.0+.
+    // Resolved artifacts root. Follows the data dir for a relocated/service
+    // install (like log_file_path) so a LocalSystem service's artifacts land
+    // next to its data, not under the supervisor account's `~`.
     pub fn artifacts_root_path(&self) -> PathBuf {
-        expand_path(&self.artifacts.root_dir)
+        resolve_state_path(&self.artifacts.root_dir)
     }
 
     // Returns the resolved log file path. Follows the data dir for a relocated

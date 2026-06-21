@@ -1661,21 +1661,9 @@ async fn run_tts_command(
 // ── Logging setup ─────────────────────────────────────────────────────────────
 
 fn init_logging(config: &MiraConfig) {
-    let log_path = config.log_file_path();
-    let log_dir  = log_path.parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .to_path_buf();
-    std::fs::create_dir_all(&log_dir).ok();
-
-    let log_file = tracing_appender::rolling::never(
-        &log_dir,
-        log_path.file_name().unwrap_or_default(),
-    );
-    let (non_blocking, guard) = tracing_appender::non_blocking(log_file);
-    // Guard must live for the entire process lifetime.
-    Box::leak(Box::new(guard));
-
-    mira::log_filter::init(&config.logging.level, non_blocking);
+    // Shared with the Windows service entry (install::windows::service_main) so
+    // both write logs the same way and the Logs page always has a file to tail.
+    mira::log_filter::init_to_file(&config.logging.level, &config.log_file_path());
 }
 
 // ── Simple reedline CLI (--simple flag) ───────────────────────────────────────
