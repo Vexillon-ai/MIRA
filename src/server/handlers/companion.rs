@@ -353,6 +353,100 @@ pub async fn update_my_membership(
     Ok(Json(MemberView::from(m)))
 }
 
+// ── Self-serve enable (setup wizard) ─────────────────────────────────────────
+//
+// POST /api/me/companion/enable — turn companion check-ins on for the CALLER
+// with an optional safety contact, a per-user cadence cap, and a daily-briefing
+// schedule, in one request. This is the HTTP equivalent of the chat-driven
+// `companion_enable` (+ `companion_briefing_set`) flow, added so the web setup
+// wizard can enable check-ins without sending the user through chat. It mirrors
+// the tool's safety rule: a non-admin must name a safety contact; an admin may
+// enable without one (the safety floor still audit-logs, just doesn't notify).
+
+#[derive(Debug, Deserialize)]
+pub struct EnableCompanionRequest {
+    /// Another MIRA user to notify if the safety floor triggers. Optional for
+    /// admins; required for non-admins. Empty string is treated as omitted.
+    #[serde(default)]
+    pub safety_contact_user_id: Option<String>,
+    /// Per-user cap on proactive check-ins per local day (overrides the
+    /// instance default). Omit to inherit the default.
+    #[serde(default)]
+    pub max_per_day: Option<u32>,
+    /// Turn the daily briefing on as part of enabling.
+    #[serde(default)]
+    pub briefing_enabled: Option<bool>,
+    /// Local hour (0..=23) the briefing fires at. Defaults to 7 on first enable.
+    #[serde(default)]
+    pub briefing_hour: Option<u8>,
+}
+
+pub async fn enable_companion(
+    AuthUser(me):     AuthUser,
+    Extension(agent): Extension<Arc<AgentCore>>,
+    Json(body):       Json<EnableCompanionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let sys = agent.companion().ok_or_else(|| err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "companion feature not enabled on this server",
+    ))?;
+
+    // Normalise the safety contact: blank → None.
+    let safety: Option<String> = body.safety_contact_user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    // Mirror `companion_enable`: a non-admin must name a safety contact.
+    if safety.is_none() && me.role != crate::auth::Role::Admin {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "a safety contact is required to enable check-ins",
+        ));
+    }
+    if let Some(h) = body.briefing_hour {
+        if h > 23 {
+            return Err(err(StatusCode::BAD_REQUEST, "briefing_hour must be 0..=23"));
+        }
+    }
+
+    // Enable: validates the contact, stamps setup, seeds the persona wiki.
+    let mut s = sys.enable(&me.id, safety.as_deref()).map_err(|e| {
+        use crate::companion::CompanionError::*;
+        match e {
+            SelfSafetyContact => err(StatusCode::BAD_REQUEST,
+                "you can't be your own safety contact — pick someone else"),
+            UnknownSafetyContact(u) => err(StatusCode::BAD_REQUEST,
+                format!("'{u}' is not a known MIRA user")),
+            Invalid(m) => err(StatusCode::BAD_REQUEST, m),
+            other => err(StatusCode::INTERNAL_SERVER_ERROR, format!("enable: {other}")),
+        }
+    })?;
+
+    // Apply the wizard's cadence + briefing choices in a single follow-up write.
+    if let Some(mpd) = body.max_per_day      { s.cadence.max_per_day = Some(mpd); }
+    if let Some(en)  = body.briefing_enabled { s.daily_briefing_enabled = en; }
+    if let Some(h)   = body.briefing_hour    { s.daily_briefing_hour = h; }
+    s.updated_at = Utc::now();
+    sys.store().upsert(&s).map_err(|e| err(
+        StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}")))?;
+
+    tracing::info!(
+        user = %me.username,
+        "companion enabled via setup wizard (briefing={}, hour={}, contact={:?})",
+        s.daily_briefing_enabled, s.daily_briefing_hour, s.safety_contact_user_id,
+    );
+
+    Ok(Json(serde_json::json!({
+        "companion_active":       s.is_active(Utc::now()),
+        "enabled":                s.daily_briefing_enabled,
+        "hour":                   s.daily_briefing_hour,
+        "safety_contact_user_id": s.safety_contact_user_id,
+        "max_per_day":            s.cadence.max_per_day,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

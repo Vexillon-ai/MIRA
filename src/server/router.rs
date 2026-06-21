@@ -696,6 +696,11 @@ pub fn build_router(
                    get(crate::server::handlers::companion::list_my_memberships))
             .route("/api/me/companion/groups/{group_id}",
                    patch(crate::server::handlers::companion::update_my_membership))
+            // Self-serve enable for the setup wizard: turn check-ins on for the
+            // caller (optional safety contact + cadence cap + daily briefing) in
+            // one shot — the HTTP equivalent of the chat `companion_enable` flow.
+            .route("/api/me/companion/enable",
+                   post(crate::server::handlers::companion::enable_companion))
             // On-demand check-in trigger — fire a companion check-in to the
             // caller right now (bypassing scheduler policy) and return the
             // delivery outcome. Makes proactive delivery testable. (The

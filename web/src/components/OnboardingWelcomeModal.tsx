@@ -8,6 +8,7 @@ import toast from 'react-hot-toast'
 import { onboardingApi, onboardingErrorMessage } from '@/api/onboarding'
 import { useAuthStore } from '@/store/authStore'
 import { useUiStore } from '@/store/uiStore'
+import { useSetupChecklist } from '@/hooks/useSetupChecklist'
 import styles from './OnboardingWelcomeModal.module.css'
 
 // "Maybe later" puts the modal on a 7-day cooldown. Long enough not to nag,
@@ -44,10 +45,19 @@ export default function OnboardingWelcomeModal() {
   const cooldownActive = dismissedAt !== null &&
     (Date.now() - dismissedAt) < DISMISS_COOLDOWN_MS
 
+  // On a fresh install the admin is also the first user, so the install
+  // walkthrough (SetupChecklistBanner) and this "get to know you" modal both
+  // want the screen at once. Hold onboarding back until the walkthrough is
+  // finished or dismissed, so the assistant doesn't introduce itself in front
+  // of the setup steps. For non-admins (or once setup is done) `complete` is
+  // true and this is a no-op.
+  const { complete: setupComplete } = useSetupChecklist()
+
   const eligible = !!state
     && state.onboarded_at === null
     && state.active_conversation_id === null
     && !cooldownActive
+    && setupComplete
 
   // Escape closes (counts as "Maybe later").
   useEffect(() => {

@@ -105,11 +105,19 @@ mod tests {
     #[tokio::test]
     async fn default_backend_round_trips_supported_flag() {
         let backend = default_backend();
-        // Whatever platform we're on, the name and supported() should agree.
+        // Two directions always hold and are environment-independent:
+        //   - a supported backend is never the stub, and
+        //   - the stub is never supported.
+        // The converse ("unsupported at runtime ⇒ it's the stub") does NOT
+        // hold: on Linux with the feature on, default_backend() is always the
+        // real NamespaceSandbox, which legitimately reports supported()==false
+        // where the kernel/container forbids unprivileged namespaces (e.g. a
+        // locked-down CI Docker runner) while keeping its "namespace" name.
         if backend.supported() {
             assert_ne!(backend.name(), "unsupported");
-        } else {
-            assert_eq!(backend.name(), "unsupported");
+        }
+        if backend.name() == "unsupported" {
+            assert!(!backend.supported());
         }
     }
 }

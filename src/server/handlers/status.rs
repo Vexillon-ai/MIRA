@@ -100,5 +100,18 @@ fn detect_supervisor() -> Option<&'static str> {
             return Some("docker");
         }
     }
+    // Windows: supervised iff the Service Control Manager launched us (the
+    // dispatcher ran `service_main`, which sets the shutdown notify). We key
+    // off that — not merely `target_os = "windows"` — because a bare console
+    // `mira serve` is NOT supervised (exiting wouldn't relaunch). Under SCM,
+    // the recovery actions set at install relaunch us on the non-zero exit an
+    // app-initiated restart produces, the same exit→relaunch contract as
+    // systemd/launchd, so the web-UI Restart button is valid.
+    #[cfg(target_os = "windows")]
+    {
+        if crate::install::windows::is_running_under_scm() {
+            return Some("scm");
+        }
+    }
     None
 }

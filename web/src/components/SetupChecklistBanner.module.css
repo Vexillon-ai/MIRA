@@ -100,3 +100,22 @@
   border: 1px solid var(--accent-border, var(--accent, #58a6ff));
 }
 .action:hover { background: var(--accent-dim, rgba(88, 166, 255, 0.12)); }
+
+.footer {
+  display: flex;
+  justify-content: flex-start;
+  padding: 0 14px 10px;
+}
+.skip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--accent, #58a6ff);
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 5px;
+}
+.skip:hover { color: var(--text-primary); text-decoration: underline; }

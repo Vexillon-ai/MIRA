@@ -601,7 +601,11 @@ mod tests {
             root_id, depth, "com.test.hermes", "what is 6 * 7", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        // Generous deadline: with the fake executor these complete in <1ms;
+        // the timeout only guards against a true hang. Kept high so the lib
+        // suite doesn't flake when the worker is CPU-starved under a fully
+        // parallel `cargo test` run (the blocking CI gate runs the whole suite).
+        let outcome = timeout(Duration::from_secs(30), h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Complete(c) => assert_eq!(c.result_summary, "The answer is 42."),
@@ -623,7 +627,11 @@ mod tests {
             root_id, depth, "com.test.hermes", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        // Generous deadline: with the fake executor these complete in <1ms;
+        // the timeout only guards against a true hang. Kept high so the lib
+        // suite doesn't flake when the worker is CPU-starved under a fully
+        // parallel `cargo test` run (the blocking CI gate runs the whole suite).
+        let outcome = timeout(Duration::from_secs(30), h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Failed(f) => {
@@ -643,7 +651,11 @@ mod tests {
             root_id, depth, "com.test.hermes", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        // Generous deadline: with the fake executor these complete in <1ms;
+        // the timeout only guards against a true hang. Kept high so the lib
+        // suite doesn't flake when the worker is CPU-starved under a fully
+        // parallel `cargo test` run (the blocking CI gate runs the whole suite).
+        let outcome = timeout(Duration::from_secs(30), h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Complete(c) => {
@@ -664,7 +676,11 @@ mod tests {
             root_id, depth, "com.test.hermes", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        // Generous deadline: with the fake executor these complete in <1ms;
+        // the timeout only guards against a true hang. Kept high so the lib
+        // suite doesn't flake when the worker is CPU-starved under a fully
+        // parallel `cargo test` run (the blocking CI gate runs the whole suite).
+        let outcome = timeout(Duration::from_secs(30), h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Failed(f) => assert!(f.error.starts_with("spawn"), "got: {}", f.error),
@@ -680,7 +696,11 @@ mod tests {
             root_id, depth, "com.test.hermes", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        // Generous deadline: with the fake executor these complete in <1ms;
+        // the timeout only guards against a true hang. Kept high so the lib
+        // suite doesn't flake when the worker is CPU-starved under a fully
+        // parallel `cargo test` run (the blocking CI gate runs the whole suite).
+        let outcome = timeout(Duration::from_secs(30), h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Failed(f) => {

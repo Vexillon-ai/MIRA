@@ -665,7 +665,7 @@ fn run_verify(
 ) -> Result<(), String> {
     let resolved = match resolve_probe(probe, session, host) {
         Ok(p) => p,
-        Err(e) => return Err((format!("resolve probe: {e}"))),
+        Err(e) => return Err(format!("resolve probe: {e}")),
     };
     let outcome = host.run_probe(&resolved);
     match outcome {
@@ -684,7 +684,7 @@ fn run_verify(
                 .map(|f| format!("{} ({why})", f.message))
                 .unwrap_or(why);
             if blocking {
-                Err((msg))
+                Err(msg)
             } else {
                 // Non-blocking: pass with a warning the admin can read.
                 set_step(session, &step.id, StepStatus::Done, None, Some(msg), &[]);

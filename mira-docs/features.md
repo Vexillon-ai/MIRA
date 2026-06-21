@@ -63,12 +63,14 @@ A Skills system (signed, packaged units of capability) and the ability to spawn 
 
 **Workflows (orchestration).** Saved **workflows** chain named agents and skills into a DAG: each step targets an agent/skill, carries a brief that can interpolate the run input (`{{input}}`) and any upstream step's output (`{{steps.<id>.output}}`), and declares its dependencies. The orchestrator runs the graph in waves — independent steps execute in parallel, a step starts once its dependencies finish, and outputs feed forward. Steps can be made resilient (`continue-on-error` — a failure there skips its dependents but lets independent branches finish), conditional (a `when` **guard** runs the step only if an upstream output matches), or gated by a **human-in-the-loop checkpoint** (`requires approval` — the run pauses before the step and waits for a person to approve or reject it; the pause is persisted, so it survives a restart, and approving resumes from exactly where it left off). A **Workflows** admin page builds and edits workflows visually (step editor with target/brief/dependencies/guard/budget), runs them with an input, and shows **run history** with live per-step status and output. You can also trigger a run conversationally with `run_workflow` ("run the weekly brief"); it returns immediately and pings you on completion. Every run is persisted with per-step status/output for inspection.
 
-## Plugin packages & sandboxing
+## Plugin packages
 
 MIRA installs signed **`.mirapkg` plugin packages** through an admin **Plugins** page, behind a verify → trust-gated install. Two kinds of component install today:
 
 - **`mcp_server`** — an extra MCP tool server. One-click install (native-confined or containerized).
 - **`cpp_provider`** — a channel-provider (CPP) bridge like Nextcloud Talk. Installs through a short **guided wizard**: MIRA mints the CPP HMAC secrets, creates the External channel account (live immediately — no restart), and walks you through the provider-side steps (e.g. an `occ` command, pasting an app-password), pre-filled and verified with reachability probes. The wizard **persists and resumes**, so an install that pauses on an external step picks up exactly where it left off. The provider can run **connection-only** (you run the process — MIRA owning the secrets means no manual copy and no drift) or, on Linux, as a **MIRA-managed service** (a supervised `systemd --user` unit installed and torn down with the package).
+
+## Plugin sandboxing & network egress
 
 Spawned components are **confined**, and their network access is **deny-by-default**: a component reaches the network only if its manifest declares an **egress allowlist** (`network_egress`), and then only the hosts on that list. Two runtimes enforce the allowlist:
 

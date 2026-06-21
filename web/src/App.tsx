@@ -38,6 +38,7 @@ import AuthGuard from '@/components/AuthGuard'
 import AdminGuard from '@/components/AdminGuard'
 import LoadingScreen from '@/components/LoadingScreen'
 import OnboardingWelcomeModal from '@/components/OnboardingWelcomeModal'
+import SetupWizard from '@/components/SetupWizard'
 
 function NotificationWatcher() {
   useNotifications()
@@ -72,6 +73,10 @@ export default function App() {
         }}
       />
       <NotificationWatcher />
+      {/* The setup wizard renders above the onboarding modal (higher z-index)
+          and gates it via the shared setup-checklist state, so the two never
+          visibly overlap on a fresh install. */}
+      {isAuthenticated && <SetupWizard />}
       {isAuthenticated && <OnboardingWelcomeModal />}
 
       <Routes>

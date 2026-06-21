@@ -241,6 +241,11 @@ function getPath(obj: Config, path: string): unknown {
 
 function setPath(obj: Config, path: string, value: unknown): Config {
   const parts = path.split('.')
+  // Guard against prototype pollution: a dotted path like `__proto__.x` would
+  // otherwise walk into Object.prototype. No legitimate config key uses these.
+  if (parts.some((p) => p === '__proto__' || p === 'prototype' || p === 'constructor')) {
+    return obj
+  }
   const clone = { ...obj }
   let cur: Record<string, unknown> = clone as Record<string, unknown>
   for (let i = 0; i < parts.length - 1; i++) {

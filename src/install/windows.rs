@@ -312,6 +312,17 @@ pub fn external_shutdown_notify() -> Option<Arc<tokio::sync::Notify>> {
     SHUTDOWN.get().cloned()
 }
 
+/// True once `service_main` has run — i.e. we were launched by the Windows
+/// Service Control Manager rather than a console `mira serve`. The status
+/// endpoint reports `supervised = true` in this case: SCM's recovery actions
+/// (configured at install) relaunch us on the non-zero exit an app-initiated
+/// restart produces, so the web-UI Restart button works the same way it does
+/// under systemd/launchd. A bare console run leaves the notify unset and is
+/// correctly reported as unsupervised.
+pub fn is_running_under_scm() -> bool {
+    SHUTDOWN.get().is_some()
+}
+
 // Where the dispatcher hands control once SCM has connected.
 // Registers a control handler that trips [`SHUTDOWN`] on Stop /
 // Shutdown, reports Running, then runs the standard server loop.
