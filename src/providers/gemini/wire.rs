@@ -407,7 +407,7 @@ mod tests {
     fn assistant(s: &str) -> ChatMessage { ChatMessage::assistant(s) }
 
     #[test]
-    fn system_messages_become_systemInstruction() {
+    fn system_messages_become_system_instruction() {
         let msgs = vec![
             ChatMessage::system("You are MIRA."),
             user("hi"),

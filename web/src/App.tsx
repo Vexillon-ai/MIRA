@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
 import { useAuthStore } from '@/store/authStore'
+import { useUiStore } from '@/store/uiStore'
 import { useNotifications } from '@/hooks/useNotifications'
 import AppShell from '@/layouts/AppShell'
 import LoginPage from '@/pages/LoginPage'
@@ -46,9 +47,15 @@ function NotificationWatcher() {
 }
 
 export default function App() {
-  const { isLoading, isAuthenticated, refresh, logout } = useAuthStore()
+  const { isLoading, isAuthenticated, refresh, logout, user } = useAuthStore()
+  const syncOwner = useUiStore((s) => s.syncOwner)
 
   useEffect(() => { refresh() }, [refresh])
+
+  // Scope per-user UI flags (wizard skip, banner dismiss, onboarding cooldown)
+  // to the current user id, so a reinstall (fresh admin) doesn't inherit stale
+  // localStorage and the first-run prompts reappear.
+  useEffect(() => { if (user?.id) syncOwner(user.id) }, [user?.id, syncOwner])
 
   useEffect(() => {
     const handler = () => logout()

@@ -123,9 +123,8 @@ mod tests {
     #[test]
     fn test_command_names_use_dashes_not_spaces() {
         for cmd in all_commands() {
-            let base = cmd.command.split_whitespace().next().unwrap_or(cmd.command);
-            // Command base (before args) must not contain spaces when hyphen was intended
-            // This checks that multi-word commands like "/memory list" are gone
+            // Multi-word commands like "/memory list" must be gone — the legacy
+            // space-separated forms below should no longer appear.
             let legacy = ["/memory list", "/memory store", "/memory delete",
                           "/memory search", "/provider list", "/provider use",
                           "/model list", "/model use", "/session info",

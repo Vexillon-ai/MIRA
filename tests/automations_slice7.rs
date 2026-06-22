@@ -69,6 +69,7 @@ fn internal_log_cleanup() -> Action {
 #[derive(Debug, Default)]
 struct CapturedRequest {
     headers: HashMap<String, String>,
+    #[allow(dead_code)] // captured for completeness; this test only asserts on headers
     body:    String,
 }
 
@@ -404,7 +405,7 @@ async fn dead_letter_notification_on_failure_cap() {
     let disp  = make_dispatcher(Arc::clone(&store), &dir, 5);
     let worker = Arc::new(Worker::new(Arc::clone(&store), Arc::clone(&disp)));
 
-    let now = Utc::now().timestamp();
+    let _now = Utc::now().timestamp();
     let s = store.create_schedule(NewSchedule {
         user_id:     "alice".into(),
         owner_kind:  OwnerKind::User,

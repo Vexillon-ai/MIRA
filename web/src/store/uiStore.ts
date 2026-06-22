@@ -25,6 +25,15 @@ interface UiState {
   /// browser.
   setupChecklistSkippedAt: number | null
   setSetupChecklistSkippedAt: (v: number | null) => void
+
+  /// Which user id the per-user dismissal flags above belong to. These flags
+  /// live in browser localStorage, which survives an uninstall + data-dir wipe
+  /// — so without scoping, a reinstall (which mints a fresh admin) would
+  /// inherit the old "skipped"/"dismissed" state and the setup wizard would
+  /// never re-appear. `syncOwner` resets the per-user flags whenever the
+  /// current user id differs from the one they were set under.
+  ownerUserId: string | null
+  syncOwner: (userId: string) => void
 }
 
 export const useUiStore = create<UiState>()(
@@ -42,6 +51,21 @@ export const useUiStore = create<UiState>()(
 
       setupChecklistSkippedAt: null,
       setSetupChecklistSkippedAt: (v) => set({ setupChecklistSkippedAt: v }),
+
+      ownerUserId: null,
+      syncOwner: (userId) => set((s) => {
+        if (s.ownerUserId === userId) return s
+        // New (or first-seen) user — e.g. after a reinstall: drop the stale
+        // per-user dismissal flags so first-run prompts behave like a fresh
+        // browser. (A pre-scoping flag has ownerUserId=null, so it resets once
+        // on upgrade; the user re-skips and it's re-pinned to their id.)
+        return {
+          ownerUserId:               userId,
+          onboardingDismissedAt:     null,
+          setupChecklistDismissedAt: null,
+          setupChecklistSkippedAt:   null,
+        }
+      }),
     }),
     { name: 'mira-ui' }
   )

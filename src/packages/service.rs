@@ -46,6 +46,7 @@ pub fn unit_name(package_id: &str) -> String {
 }
 
 // `~/.config/systemd/user`.
+#[allow(dead_code)] // used on Linux; dead on macOS/Windows builds
 fn user_unit_dir() -> Option<PathBuf> {
     if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
         if !x.is_empty() {
@@ -97,6 +98,7 @@ WantedBy=default.target
 }
 
 // Render the `0600` EnvironmentFile body (`KEY=VALUE` per line).
+#[allow(dead_code)] // used on Linux + in tests; dead on macOS/Windows non-test builds
 fn render_env_file(env: &BTreeMap<String, String>) -> String {
     let mut s = String::new();
     for (k, v) in env {

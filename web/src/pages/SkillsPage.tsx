@@ -8,6 +8,7 @@ import {
   Upload, Trash2, AlertTriangle, X, KeyRound, RefreshCw, Plug,
 } from 'lucide-react'
 import { skillsApi, type SkillSummary, type SkillPermissions, type PreviewResponse } from '@/api/skills'
+import { providersApi } from '@/api/providers'
 import { useAuthStore } from '@/store/authStore'
 import styles from './SkillsPage.module.css'
 
@@ -901,10 +902,7 @@ function LlmRoutingSection({ skill }: { skill: SkillSummary }) {
   })
   const providersQ = useQuery({
     queryKey: ['providers'],
-    queryFn:  async () => {
-      const { providersApi } = await import('@/api/providers')
-      return providersApi.health()
-    },
+    queryFn:  () => providersApi.health(),
   })
   const aliases = aliasesQ.data ?? []
   const providers = providersQ.data ?? []
