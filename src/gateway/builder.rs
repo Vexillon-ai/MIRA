@@ -205,6 +205,48 @@ impl GatewayBuilder {
             _ => memory_config,
         };
 
+        // `internal` embeddings (fastembed) need the ONNX Runtime native lib,
+        // loaded dynamically. It isn't bundled and `mira setup` doesn't fetch
+        // it, so on a fresh install the provider silently degrades to noop
+        // embeddings (semantic memory DISABLED — only a WARN nobody sees).
+        // Auto-provision it via the managed deps installer (same as
+        // `mira deps install`) so memory works out of the box. The model
+        // download on first embed already assumes first-run network, so this is
+        // consistent. If it fails (e.g. offline), record a degradation the UI
+        // can surface and let the noop fallback in new_from_embedding_config
+        // stand.
+        if memory_config.embedding.provider == "internal"
+            && !crate::install::deps::is_onnxruntime_available()
+        {
+            info!("Memory: ONNX Runtime not found — provisioning it for internal embeddings (first run only)…");
+            match tokio::task::spawn_blocking(|| {
+                // Map to String inside the closure — Box<dyn Error> isn't Send,
+                // so it can't be returned across the spawn_blocking boundary.
+                crate::install::deps::install_named("onnxruntime", false)
+                    .map_err(|e| e.to_string())
+            }).await {
+                Ok(Ok(_)) => {
+                    crate::install::deps::maybe_apply_runtime_env();
+                    if crate::install::deps::is_onnxruntime_available() {
+                        info!("Memory: ONNX Runtime provisioned — semantic embeddings enabled");
+                    }
+                }
+                Ok(Err(e)) => {
+                    warn!("Memory: ONNX Runtime auto-install failed ({e}) — semantic search \
+                           disabled until `mira deps install` + restart");
+                    degradation_tracker.record(
+                        "embeddings", "Embeddings (memory)",
+                        "internal fastembed", "noop (disabled)",
+                        &format!("ONNX Runtime unavailable; auto-install failed: {e}"), true,
+                    );
+                }
+                Err(e) => {
+                    warn!("Memory: ONNX Runtime auto-install task failed to join ({e}) — \
+                           semantic search disabled");
+                }
+            }
+        }
+
         let memory = Arc::new(
             match memory_config.embedding.provider.as_str() {
                 "lmstudio" | "ollama" | "openai" | "openrouter" | "internal" => {

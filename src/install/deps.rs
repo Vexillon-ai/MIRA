@@ -148,8 +148,10 @@ fn install_one(
     fs::create_dir_all(&install_dir)?;
 
     // Download to a tempfile inside install_dir (same FS so the
-    // extract step doesn't cross-mount).
-    let tmpfile = install_dir.join(".incoming.tar.gz");
+    // extract step doesn't cross-mount). Some deps ship as .zip (Windows ONNX
+    // Runtime) rather than .tar.gz; pick the extractor by URL extension.
+    let is_zip = plat.url.to_ascii_lowercase().ends_with(".zip");
+    let tmpfile = install_dir.join(if is_zip { ".incoming.zip" } else { ".incoming.tar.gz" });
     println!("    fetching {} …", plat.url);
     download(&plat.url, &tmpfile)?;
 
@@ -166,7 +168,11 @@ fn install_one(
     }
 
     println!("    extracting …");
-    extract_tarball(&tmpfile, &install_dir)?;
+    if is_zip {
+        extract_zip(&tmpfile, &install_dir)?;
+    } else {
+        extract_tarball(&tmpfile, &install_dir)?;
+    }
     fs::remove_file(&tmpfile).ok();
 
     // Sanity-check the lib_path actually exists post-extract — guards
@@ -379,6 +385,16 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
     let gz = flate2::read::GzDecoder::new(f);
     let mut archive = tar::Archive::new(gz);
     archive.unpack(dest)?;
+    Ok(())
+}
+
+// Zip extraction for deps that ship as .zip (e.g. the Windows ONNX Runtime
+// release). Preserves the archive's directory tree so the manifest's
+// `lib_path` (relative to dest) resolves the same way as the tarball path.
+fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
+    let f = fs::File::open(archive)?;
+    let mut zip = zip::ZipArchive::new(f)?;
+    zip.extract(dest)?;
     Ok(())
 }
 

@@ -187,8 +187,30 @@ pub async fn run_tool_loop_with_context(
         // `_agent_id`. Skips cleanly otherwise (tests, legacy callers).
         gate_llm_call(tools, provider, inject_args).await?;
 
-        // Generate (non-streaming during tool rounds, streaming on final answer)
-        let resp = provider.generate(messages, &opts_with_tools).await?;
+        // Generate (non-streaming during tool rounds, streaming on final answer).
+        //
+        // Resilience: some local backends reject *any* tool-enabled request
+        // outright — e.g. LM Studio loaded with a model whose GGUF has no tool
+        // template returns a "Channel Error" the moment `tools` is present.
+        // Tool calls here are best-effort (see the note above — onboarding's
+        // extractor and the user can still drive the turn), so rather than abort
+        // the whole turn with no reply, retry once without tools when a
+        // tool-enabled call fails. A model that genuinely supports tools never
+        // hits this: its first call succeeds.
+        let resp = match provider.generate(messages, &opts_with_tools).await {
+            Ok(r) => r,
+            Err(e) if opts_with_tools.tools.is_some() => {
+                warn!(
+                    "tool-enabled generate failed ({e}); retrying without tools \
+                     — the model/backend may not support tool calls"
+                );
+                let mut opts_no_tools = opts_with_tools.clone();
+                opts_no_tools.tools = None;
+                opts_no_tools.tool_choice = None;
+                provider.generate(messages, &opts_no_tools).await?
+            }
+            Err(e) => return Err(e),
+        };
         // Provider failover surfacing — the configured/primary provider failed
         // and a fallback answered. Tell the user once so a silently-degraded
         // (e.g. local) reply isn't mistaken for their chosen model.
@@ -1296,6 +1318,53 @@ Nice to meet you!
             })
         }
         async fn health_check(&self) -> bool { true }
+    }
+
+    // Provider that rejects any tool-enabled request (like LM Studio's
+    // "Channel Error" on a model with no tool template) but answers fine
+    // without tools — the exact shape that broke onboarding.
+    struct ToolFailingProvider;
+    #[async_trait::async_trait]
+    impl ModelProvider for ToolFailingProvider {
+        fn name(&self) -> &str { "tool-failing" }
+        async fn generate(&self, _msgs: &[ChatMessage], opts: &GenerationOptions)
+            -> Result<GenerationResponse, MiraError>
+        {
+            if opts.tools.is_some() {
+                return Err(MiraError::ProviderError("Channel Error".into()));
+            }
+            Ok(GenerationResponse {
+                content:     "degraded reply".into(),
+                tool_calls:  None,
+                reasoning:   None,
+                usage:       TokenUsage::default(),
+                provider_id: ProviderId::Local("tool-failing".into()),
+                model_name:  "tool-failing".into(),
+                fallback:    None,
+            })
+        }
+        async fn health_check(&self) -> bool { true }
+    }
+
+    #[tokio::test]
+    async fn tool_enabled_failure_degrades_to_no_tools_reply() {
+        // With a tool registered, the loop attaches tools → the provider errors
+        // → it must retry WITHOUT tools and return that reply, not abort.
+        let provider: Arc<dyn ModelProvider> = Arc::new(ToolFailingProvider);
+        let tools = Arc::new(registry_with(StubTool {
+            name: "record_profile", reply: ToolResult::success("ok"),
+        }));
+        let mut messages = vec![ChatMessage::user("Tarek")];
+        let opts = GenerationOptions::default();
+        let (tx, mut rx) = mpsc::channel(64);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let res = run_tool_loop(
+            &provider, &tools, &mut messages, &opts, &ToolMode::Auto, 4, &tx,
+        ).await;
+        drop(tx);
+        let _ = drain.await;
+        let (content, _usage) = res.expect("turn must degrade to a no-tools reply, not error");
+        assert_eq!(content, "degraded reply");
     }
 
     fn engineless_registry() -> Arc<ToolRegistry> {

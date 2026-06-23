@@ -42,6 +42,12 @@ WORKDIR /build
 # with workspaces+lib+bin, and the apt/JRE layers in stage 3 are the slow
 # ones anyway. Cargo's own incremental cache handles iterative rebuilds.
 COPY Cargo.toml Cargo.lock ./
+# build.rs MUST be copied: it stages the web SPA into $OUT_DIR/web-embed, and
+# (crucially) its mere presence makes cargo set OUT_DIR — without it the
+# `include_dir!("$OUT_DIR/web-embed")` in static_files.rs panics with
+# MissingVariable{OUT_DIR}. (The real SPA is served at runtime via MIRA_WEB_DIR
+# from /app/web; build.rs writes a placeholder embed here, which is fine.)
+COPY build.rs ./
 COPY src/ ./src/
 COPY tests/ ./tests/
 COPY config/ ./config/
@@ -64,8 +70,12 @@ ARG SIGNAL_CLI_VERSION=0.14.2
 # fastembed (`ort-load-dynamic` feature) dlopens libonnxruntime.so at runtime
 # whenever the configured embedding endpoint is unreachable — which is the
 # default inside a container with no external LM Studio / Ollama. Ship a
-# matching ORT build so the fallback path works out of the box.
-ARG ONNXRUNTIME_VERSION=1.20.0
+# matching ORT build so the fallback path works out of the box. Keep this in
+# step with deps/manifest.toml's onnxruntime pin. `ORT_DYLIB_PATH` (set below)
+# points MIRA at it — its is_onnxruntime_available() check only looks at
+# ORT_DYLIB_PATH / ~/.mira/deps, never system loader paths, so without the env
+# the bundled lib would be invisible and embeddings would fall back to noop.
+ARG ONNXRUNTIME_VERSION=1.20.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -99,7 +109,8 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # mounted /data volume. MIRA_WEB_DIR is read by the static-files resolver
 # in the server.
 ENV HOME=/data \
-    MIRA_WEB_DIR=/app/web
+    MIRA_WEB_DIR=/app/web \
+    ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 
 # Bind-mount any host directory here to persist config/state across recreates.
 VOLUME ["/data"]

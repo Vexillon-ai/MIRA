@@ -724,6 +724,22 @@ impl AgentCore {
         }
         messages.push(user_msg);
 
+        // Drop any leading assistant/tool turns before the first user message
+        // (keeping the system prompt). Onboarding seeds an assistant greeting
+        // for the UI, which would otherwise make the transcript start
+        // system → assistant → … — a shape some local-model chat templates
+        // reject ("No user query found in messages"). The greeting's intent is
+        // folded into the onboarding system prompt instead. Normal chat never
+        // leads with an assistant turn, so this is a no-op there.
+        if let Some(first_user) = messages.iter().position(|m| m.role == crate::types::MessageRole::User) {
+            let mut idx = 0usize;
+            messages.retain(|m| {
+                let keep = m.role == crate::types::MessageRole::System || idx >= first_user;
+                idx += 1;
+                keep
+            });
+        }
+
         debug!(
             "AgentCore: session='{}' history_turns={} total_messages={}",
             session_id,
