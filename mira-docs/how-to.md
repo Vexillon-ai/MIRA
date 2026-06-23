@@ -3,9 +3,23 @@
 Practical recipes. Most can be done in the web UI or by asking MIRA in chat.
 
 ## Connect a channel
-- **Telegram:** create a bot with @BotFather, copy the token, add it under Settings → Channels (or "add my telegram bot"). Message the bot once from your phone so MIRA learns your chat id (needed for proactive messages).
+- **Telegram:** create a bot with @BotFather (`/newbot`), copy the token, add it under Settings → Channels → My channels (or "add my telegram bot"). The bot starts receiving immediately — no restart. Then **link your chat**: Settings → My channels → Link Telegram, and send the `LINK-XXXX-XXXX` code to the bot. (Linking is what captures your chat id for proactive messages.) See "Telegram: delivery mode and routing mode" below for polling vs webhook and Personal/Shared/Guest.
 - **Signal:** register a number with signal-cli (operator setup), then add it as your Signal account.
 - **Email:** add an email account (IMAP/SMTP, or Gmail/Outlook OAuth) under Settings → Email. Inbound mail from allowlisted senders becomes a conversation.
+
+## Telegram: delivery mode and routing mode
+Two independent settings on a Telegram account:
+
+**Delivery mode — how MIRA receives messages:**
+- **Polling (default):** MIRA long-polls Telegram's `getUpdates`. Works anywhere — behind NAT, on localhost, no public URL / port-forward / reverse proxy / TLS. The right choice for self-hosted/home installs. Cost: one poll loop per account.
+- **Webhook:** Telegram pushes updates to `https://<host>/webhook/telegram/<account-id>` (authenticated by a secret-token header). Efficient and instant, but needs a public HTTPS URL Telegram can reach (domain + reverse proxy + cert) — for production deployments.
+
+**Routing mode — who each inbound message runs as** (change it in place from the account row; it applies live):
+- **Personal (default):** serves **only the owner's verified chat**. You link your own chat once (send a LINK code); any other sender is ignored. *Pro:* simplest, private, secure-by-default (a stranger who finds the bot can't act as you). *Con:* one person only.
+- **Shared:** one bot for several people. An admin creates the bot once; each member **keeps their own MIRA account** and links by sending their own LINK code. *Pro:* family/team bot, members never touch BotFather, each keeps their own context/memory/persona/voice. *Con:* one bot identity for all; members must link first; admin holds the token.
+- **Guest-OK:** like Shared, but unlinked senders get a temporary **guest** session. *Pro:* open access. *Con:* anyone who finds the bot can use it; least private.
+
+> Recommended for a household: a single **Shared** bot. Use **Personal** for a solo bot; **Guest-OK** only when you want it open to anyone.
 
 ## Turn on proactive check-ins / daily briefing
 - Enable companion mode and pick a preferred channel + quiet hours.

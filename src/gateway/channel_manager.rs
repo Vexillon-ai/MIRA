@@ -346,6 +346,13 @@ impl ChannelManager {
             self.telegram.remove(&account_id);
             return Ok(true);
         }
+        // Telegram webhook-mode (no poller task — just the outbound ctx). Drop
+        // it so a `restart_account` can re-register a changed token, and so
+        // `start_account`'s already-running guard doesn't block a fresh start.
+        if self.telegram.remove(account_id).is_some() {
+            info!("Removed Telegram webhook ctx for account {}", account_id);
+            return Ok(true);
+        }
         // Then Discord. Notify the gateway loop to send a clean WS close,
         // give it a brief moment, then abort the task if it's still alive
         // (covers a hang during close write).
@@ -403,9 +410,23 @@ impl ChannelManager {
             ).await,
             ChannelKind::Discord => self.register_discord_account(&acct),
             ChannelKind::Matrix  => self.register_matrix_account(&acct),
-            ChannelKind::Telegram => Err(format!(
-                "account {account_id} is channel=telegram; telegram lifecycle is webhook-driven",
-            )),
+            ChannelKind::Telegram => {
+                // Telegram is NOT purely webhook-driven: the per-account mode
+                // defaults to "polling", and a polling account needs its
+                // getUpdates poller spawned just like at boot. (`stop_account`
+                // already aborts that poller + drops the ctx.) Reuse the same
+                // registrar `start_all` uses — it spawns the poller for polling
+                // mode and registers the outbound ctx for webhook mode. Without
+                // this, a Telegram account added after boot (e.g. a second
+                // user's bot) is saved + enabled but never polled until the
+                // next full restart.
+                if self.telegram_polling.iter().any(|rt| rt.account_id == account_id)
+                    || self.telegram.contains_key(account_id)
+                {
+                    return Err(format!("account {account_id} already running"));
+                }
+                self.register_telegram_account(&acct)
+            }
             ChannelKind::WhatsApp => Err(format!(
                 "account {account_id} is channel=whatsapp; whatsapp lifecycle is webhook-driven",
             )),

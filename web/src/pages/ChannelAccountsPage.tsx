@@ -62,6 +62,32 @@ function blankConfig(channel: ChannelKind): AnyChannelConfig {
   return { bot_token: '', mode: 'polling', secret_token: null }
 }
 
+// Cautionary copy shown before switching an account's routing mode — these
+// changes affect who can use the bot and how identities are resolved, so the
+// user should acknowledge them (matches the page's confirm()-on-destructive
+// convention).
+function routingModeWarning(next: 'personal' | 'shared' | 'guest_ok'): string {
+  switch (next) {
+    case 'shared':
+      return 'Switch to SHARED mode?\n\n'
+        + 'All members use the SAME bot, but each person must LINK their own '
+        + 'MIRA account first: they open Settings → My Channels → Link Telegram '
+        + 'and send their LINK-XXXX-XXXX code to the bot. Until they link, their '
+        + 'messages are ignored.\n\n'
+        + 'Each linked member keeps their own separate context, memory, and '
+        + 'persona — nothing is shared between them except the bot itself.'
+    case 'guest_ok':
+      return 'Switch to GUEST-OK mode?\n\n'
+        + 'Like Shared (members link with a code for their own account), BUT '
+        + 'anyone who messages the bot WITHOUT linking gets a temporary guest '
+        + 'session. Only use this if you want the bot open to anyone who finds it.'
+    case 'personal':
+      return 'Switch to PERSONAL mode?\n\n'
+        + 'The bot will serve ONLY the owner’s linked chat. Any other members '
+        + 'currently linked to this bot will no longer be able to use it.'
+  }
+}
+
 function summarise(acct: ChannelAccount): string {
   if (acct.channel === 'signal') {
     const c = acct.config as SignalAccountConfig
@@ -218,6 +244,19 @@ export default function ChannelAccountsPage() {
       const msg = (err as { response?: { data?: string } })?.response?.data ?? 'Update failed'
       setEditConfigError(typeof msg === 'string' ? msg : 'Update failed')
     },
+  })
+
+  // Change an existing account's routing mode in place (Personal ⇄ Shared ⇄
+  // Guest-OK). The server reconciles the live poller/daemon on update, so the
+  // switch takes effect immediately — no restart needed.
+  const routingMut = useMutation({
+    mutationFn: ({ id, routing_mode }: { id: string; routing_mode: 'personal' | 'shared' | 'guest_ok' }) =>
+      channelAccountsApi.update(id, { routing_mode }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['channel-accounts'] })
+      toast.success('Routing mode updated — applied live.')
+    },
+    onError: () => toast.error('Couldn’t change routing mode'),
   })
 
   // Per-account daemon lifecycle. Each mutation refreshes the health
@@ -559,6 +598,31 @@ export default function ChannelAccountsPage() {
                     />
                     <span className={styles.toggleTrack} />
                   </label>
+                  {/* Routing mode — editable in place for non-Signal channels
+                      (Signal numbers are inherently personal). Applies live. */}
+                  {a.channel !== 'signal' && (
+                    <select
+                      className={styles.select}
+                      value={a.routing_mode}
+                      title="Routing mode — who inbound messages run as. Shared/Guest-OK honour LINK codes; Personal serves only the owner's linked chat."
+                      disabled={routingMut.isPending}
+                      onChange={(e) => {
+                        const next = e.target.value as 'personal' | 'shared' | 'guest_ok'
+                        if (next === a.routing_mode) return
+                        if (!confirm(routingModeWarning(next))) {
+                          // Cancelled — refetch so the dropdown snaps back to
+                          // the stored mode (it's a controlled value).
+                          qc.invalidateQueries({ queryKey: ['channel-accounts'] })
+                          return
+                        }
+                        routingMut.mutate({ id: a.id, routing_mode: next })
+                      }}
+                    >
+                      <option value="personal">Personal</option>
+                      <option value="shared">Shared</option>
+                      <option value="guest_ok">Guest OK</option>
+                    </select>
+                  )}
                   {(a.channel === 'signal' || a.channel === 'discord' || a.channel === 'matrix') && (
                     <>
                       <button

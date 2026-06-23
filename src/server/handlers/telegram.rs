@@ -122,9 +122,9 @@ pub struct TelegramState {
     // drops voice-only messages with a warning rather than silently
     // ignoring them.
     pub stt:         Option<SttService>,
-    // Auth service — used by the reply dispatcher to look up the bot
-    // owner's per-channel voice prefs (response policy + voice id
-    // override). `None` falls back to server defaults only.
+    // Auth service — used by the reply dispatcher to look up the *recipient's*
+    // per-channel voice prefs (response policy + voice id override), and by the
+    // identity lookups above. `None` falls back to server defaults only.
     pub auth:        Option<Arc<LocalAuthService>>,
     // Live config used to honour the MIRA-wide
     // `channels.telegram.enabled` kill switch at request time, so
@@ -263,15 +263,86 @@ pub async fn process_message_for_account(
 
     // ── R1+R2: resolve which MIRA user this turn runs as ───────────────
     //
-    // `Personal` (the default) runs everything as the bot owner — exactly
-    // the v1 single-user behaviour, and the hot path. `Shared`/`GuestOk`
-    // look the sender's Telegram id up in the identity table; on a miss
-    // we either redeem a `LINK-XXXX-XXXX` code, prompt the sender to link
-    // (Shared), or fall through to a `guest:telegram:<id>` identity
-    // (GuestOk). Mirrors the Discord dispatcher.
+    // SECURITY: a Telegram bot is reachable by anyone who knows its @username,
+    // so we must never run a turn as a MIRA user we haven't *verified* owns the
+    // sending chat.
+    //
+    // `Personal` — a single-owner bot. It serves ONLY the owner's verified
+    //   chat: the owner links their own chat once (send a `LINK-XXXX-XXXX`
+    //   code), and from then on any other sender is refused. Before this lock,
+    //   Personal ran every inbound as the owner — meaning a stranger who found
+    //   the bot acted as the owner (full memory + admin). Now an unlinked chat
+    //   is prompted to link (owner) or ignored (everyone else).
+    // `Shared`/`GuestOk` — multi-user: look the sender's Telegram id up in the
+    //   identity table; on a miss redeem a code, prompt to link (Shared), or
+    //   fall through to a `guest:telegram:<id>` identity (GuestOk).
     use crate::channel_accounts::RoutingMode;
+    use crate::channel_identity::link_codes::looks_like_link_code;
     let resolved_user_id: String = match ctx.routing_mode {
-        RoutingMode::Personal => ctx.owner_user_id.clone(),
+        RoutingMode::Personal => 'personal: {
+            let Some(idstore) = state.identity.as_ref() else {
+                // No identity store wired (minimal/test build) — can't verify
+                // the sender. Degrade to the legacy owner-as-sender behaviour
+                // with a loud warning; production always wires the store, so
+                // the lock applies there.
+                warn!("Telegram acct={} is Personal but no IdentityStore is wired — \
+                       cannot verify sender; running as owner (INSECURE fallback)", account);
+                break 'personal ctx.owner_user_id.clone();
+            };
+            match idstore.lookup("telegram", &tg_user) {
+                // The owner's own verified chat — the only one served.
+                Ok(Some(uid)) if uid == ctx.owner_user_id => uid,
+                // A chat linked to a different MIRA user: this is a *personal*
+                // bot, not a shared one. Refuse rather than leak the owner.
+                Ok(Some(_)) => {
+                    send_telegram_message(&state.http_client, &ctx.bot_token, chat_id,
+                        "This is a personal bot and isn't linked to your account.").await;
+                    return;
+                }
+                Ok(None) => {
+                    // Unknown chat. Accept a link code ONLY if it belongs to the
+                    // owner — a personal bot binds the owner's chat, nobody
+                    // else's.
+                    if let Some(code) = looks_like_link_code(&effective_text) {
+                        match state.link_codes.as_ref()
+                            .and_then(|cs| cs.consume(code, "telegram").ok().flatten())
+                        {
+                            Some(uid) if uid == ctx.owner_user_id => {
+                                if let Err(e) = idstore.link(&uid, "telegram", &tg_user) {
+                                    warn!("Telegram owner-link persist failed: {}", e);
+                                    send_telegram_message(&state.http_client, &ctx.bot_token, chat_id,
+                                        "Link accepted but couldn't be saved — try again.").await;
+                                    return;
+                                }
+                                info!("Telegram personal bot bound to owner chat: user={} tg_user={}", uid, tg_user);
+                                send_telegram_message(&state.http_client, &ctx.bot_token, chat_id,
+                                    "✅ This bot is now secured to your account — go ahead and talk to me.").await;
+                                return;
+                            }
+                            Some(_) => {
+                                send_telegram_message(&state.http_client, &ctx.bot_token, chat_id,
+                                    "That code isn't for this bot — a personal bot can only be linked by its owner.").await;
+                                return;
+                            }
+                            None => {
+                                send_telegram_message(&state.http_client, &ctx.bot_token, chat_id,
+                                    "That link code didn't match — generate a fresh one in MIRA → Settings → My Channels (valid 10 minutes).").await;
+                                return;
+                            }
+                        }
+                    }
+                    // No code from an unknown sender → prompt the owner to
+                    // secure the bot; anyone else is simply ignored.
+                    send_telegram_message(&state.http_client, &ctx.bot_token, chat_id,
+                        "🔒 This bot isn't linked yet. If you're the owner, open MIRA → Settings → My Channels → Link Telegram and send me the LINK-XXXX-XXXX code.").await;
+                    return;
+                }
+                Err(e) => {
+                    warn!("Telegram identity lookup failed: {}", e);
+                    return;
+                }
+            }
+        }
         RoutingMode::Shared | RoutingMode::GuestOk => 'resolve: {
             let idstore = match state.identity.as_ref() {
                 Some(s) => s,
@@ -286,7 +357,6 @@ pub async fn process_message_for_account(
             match idstore.lookup("telegram", &tg_user) {
                 Ok(Some(uid)) => uid,
                 Ok(None) => {
-                    use crate::channel_identity::link_codes::looks_like_link_code;
                     if let Some(code) = looks_like_link_code(&effective_text) {
                         match state.link_codes.as_ref()
                             .and_then(|cs| cs.consume(code, "telegram").ok().flatten())
@@ -428,7 +498,7 @@ pub async fn process_message_for_account(
         }
     }
 
-    dispatch_telegram_reply(state, ctx, chat_id, &response_text, inbound_was_voice).await;
+    dispatch_telegram_reply(state, ctx, chat_id, &resolved_user_id, &response_text, inbound_was_voice).await;
 }
 
 // Build the initial conversation title for an inbound Telegram chat.
@@ -524,10 +594,16 @@ async fn transcribe_telegram_voice(
 // Reply dispatch — voice prefs first, falls through to plain sendMessage.
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Voice replies are gated by the layered prefs resolver:
-// 1. Bot owner's `users.voice_prefs.telegram` (if set)
+// Voice replies are gated by the layered prefs resolver, keyed on the
+// RECIPIENT (the MIRA user this turn resolved to), not the bot owner:
+// 1. Recipient's `users.voice_prefs.telegram` (if set)
 // 2. Server defaults (`tts.voice_prefs.telegram`)
 // 3. Built-in fallback: ResponsePolicy::Never
+//
+// On a Personal bot the recipient IS the owner, so this is unchanged. On a
+// Shared bot each linked member gets THEIR own voice — otherwise everyone
+// hears the owner's voice (the "Annika set Michael but still hears Emily" bug).
+// A guest session (`guest:telegram:<id>`) has no profile → server defaults.
 //
 // `OnVoiceInput` requires the inbound message to itself be a voice note.
 //
@@ -540,10 +616,11 @@ async fn dispatch_telegram_reply(
     state:             &TelegramState,
     ctx:               &TelegramAccountCtx,
     chat_id:           i64,
+    recipient_id:      &str,
     text:              &str,
     inbound_was_voice: bool,
 ) {
-    let resolved = resolve_voice_for_owner(state, &ctx.owner_user_id, "telegram");
+    let resolved = resolve_voice_for_user(state, recipient_id, "telegram");
     let want_voice = match resolved.policy {
         ResponsePolicy::Always       => true,
         ResponsePolicy::OnVoiceInput => inbound_was_voice,
@@ -573,20 +650,22 @@ async fn dispatch_telegram_reply(
     send_telegram_message(&state.http_client, &ctx.bot_token, chat_id, text).await;
 }
 
-// Resolve the voice prefs for a given channel using the bot owner's
-// per-user prefs (when available) layered over server defaults. The owner
-// not the inbound contact — is the MIRA user the bot belongs to, so
-// "this is how my agent should sound" tracks the right person.
-fn resolve_voice_for_owner(
+// Resolve the voice prefs for a given channel using a specific MIRA user's
+// per-user prefs (when available) layered over server defaults. The caller
+// passes the RECIPIENT (the user this turn resolved to) so a shared bot honours
+// each member's own voice choice; on a Personal bot that's the owner. An
+// unknown id (e.g. a `guest:telegram:<id>` session) yields no user prefs and
+// falls through to the server defaults.
+fn resolve_voice_for_user(
     state:    &TelegramState,
-    owner_id: &str,
+    user_id:  &str,
     channel:  &str,
 ) -> crate::voice::ResolvedVoice {
     let server_defaults = state.tts.as_ref()
         .map(|t| t.voice_prefs_defaults())
         .unwrap_or_default();
     let user_prefs = state.auth.as_ref()
-        .and_then(|a| a.get_user(owner_id).ok().flatten())
+        .and_then(|a| a.get_user(user_id).ok().flatten())
         .map(|u| parse_user_prefs(u.voice_prefs.as_deref()))
         .unwrap_or_default();
     resolve_voice(channel, Some(&user_prefs), &server_defaults)

@@ -652,6 +652,18 @@ pub enum TtsCacheAction {
 // `unshare(CLONE_NEWUSER)` (for plugin network isolation) requires a
 // single-threaded process, which tokio's multi-thread runtime is not.
 fn main() -> Result<(), Box<dyn Error>> {
+    // Windows post-restart relauncher: a deliberate restart exits the service
+    // cleanly (exit 0, no SCM crash event) and spawns a detached copy of us
+    // with MIRA_WIN_RELAUNCH set, whose only job is to start the service again
+    // once SCM marks it Stopped. Handle that here, before any arg parsing —
+    // the relauncher takes no CLI args. See install::windows.
+    #[cfg(target_os = "windows")]
+    {
+        if mira::install::windows::maybe_run_relauncher() {
+            return Ok(());
+        }
+    }
+
     let args = Args::parse();
 
     // Wire the global `--data-dir` flag into MIRA_DATA_DIR so a single resolver

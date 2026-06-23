@@ -23,17 +23,57 @@ quickest channel to set up.
    `123456:ABC-DEF...`.
 2. **Add it to MIRA.** Go to **Settings → Channels → My channels**, add a
    **Telegram** account, and paste the token. (You can also just ask MIRA in
-   chat: *"add my telegram bot"* and follow along.)
-3. **Message the bot once.** Open your new bot in Telegram and send it any
-   message. This lets MIRA learn your **chat id**, which it needs before it can
-   message you proactively.
+   chat: *"add my telegram bot"* and follow along.) The bot starts receiving
+   straight away — no restart needed.
+3. **Link your chat.** Because a bot is reachable by anyone who knows its
+   @username, MIRA won't act as you until it has *verified* your chat. In
+   **Settings → My channels → Link Telegram**, copy the one-time
+   `LINK-XXXX-XXXX` code and send it to your bot. The bot replies *"✅ secured
+   to your account"* — now you're talking to MIRA from your phone, and it has
+   your **chat id** for proactive messages.
 
-That's it — reply to the bot and you're talking to MIRA from your phone.
+### How MIRA receives messages: polling (default) vs. webhook
 
-> Adding the account turns the Telegram channel on automatically, and MIRA
-> receives messages by **polling** Telegram — no public URL, port-forwarding, or
-> reverse proxy needed, so it works on a home/localhost install behind NAT. (For
-> a public deployment you can switch the account to **webhook** mode.)
+Each Telegram account runs in one of two delivery modes (set when you add it,
+changeable later by editing the account's config):
+
+- **Polling** (**default**) — MIRA long-polls Telegram's `getUpdates`. It works
+  **anywhere**: behind NAT, on `localhost`, with **no public URL, no
+  port-forwarding, no reverse proxy, no TLS cert**. This is the right choice for
+  a home or self-hosted install, and it's why a freshly added bot just works.
+  Trade-off: one lightweight poll loop per account and a touch more latency than
+  a push.
+- **Webhook** — Telegram pushes updates to
+  `https://your-host/webhook/telegram/<account-id>`. More efficient and instant,
+  with no idle polling. Trade-off: it needs a **public HTTPS URL Telegram can
+  reach** (a domain + reverse proxy + certificate), so it's for production
+  deployments. MIRA authenticates the pushes with a secret-token header.
+
+Most self-hosters should stay on **polling**. Switch to webhook only when you're
+behind a public HTTPS endpoint and want to drop the poll loop.
+
+### Routing mode: Personal vs. Shared vs. Guest-OK
+
+When you add a Telegram (or Discord) account you choose a **routing mode** — who
+each inbound message runs as. You can change it later in place from the account
+row on the **Channel Accounts** page (it applies live; switching to Shared/Guest
+shows a confirmation explaining the implications).
+
+| Mode | Who it serves | Pros | Cons |
+|---|---|---|---|
+| **Personal** *(default)* | **Only the owner's verified chat** (you link once). Any other sender is ignored. | Simplest; private; secure-by-default (a stranger who finds the bot can't act as you). | One person only. |
+| **Shared** | Any member who has **linked** their own MIRA account to the bot (each sends their own `LINK-XXXX-XXXX` code). Unlinked senders are turned away. | One bot for a whole **family/team**; admin creates it once, members never touch BotFather; **each member keeps their own context, memory, persona, and voice** — nothing is merged. | One bot identity/name for everyone; members must link before first use; the admin holds the token. |
+| **Guest-OK** | Same as Shared, **plus** unlinked senders get a temporary **guest** session instead of being refused. | Open access — good for a public-facing or casual bot where you don't want to gate on linking. | Anyone who finds the bot can use it (as a guest); least private; guests share a generic identity. |
+
+> **Security note.** Because a bot is reachable by anyone who knows its
+> @username, **Personal** is locked to the owner's verified chat — it will not
+> act as you for an unknown sender. For multiple people, use **Shared** (each
+> member links with their own code) rather than handing out a Personal bot.
+
+**Recommended:** a single **Shared** bot for a household — the admin creates one
+bot, and each family member links their own account and gets their own private
+MIRA behind it. Use **Personal** for your own solo bot, and **Guest-OK** only
+when you deliberately want the bot open to anyone.
 
 ## Signal
 
@@ -95,8 +135,14 @@ check-in or briefing immediately to confirm delivery.
 
 ## Troubleshooting
 
-- **MIRA can't message me proactively on Telegram.** Make sure you've sent the
-  bot at least one message — MIRA needs to capture your chat id first.
+- **MIRA can't message me proactively on Telegram.** Make sure you've **linked
+  your chat** (Settings → My channels → Link Telegram, then send the
+  `LINK-XXXX-XXXX` code to the bot) — MIRA captures your chat id at link time.
+- **The bot just answers my link code like a normal message.** The account is
+  in **Personal** mode and your chat isn't linked yet, *or* it's a shared bot
+  still set to Personal. Personal serves only the owner's linked chat; for a
+  multi-user/family bot, set the account's routing mode to **Shared** so it
+  honours link codes from everyone.
 - **Nothing arrives.** Check that the channel account is **enabled** in Settings
   → Channels, and that your account is permitted to use that channel (an admin
   can restrict channels per user).

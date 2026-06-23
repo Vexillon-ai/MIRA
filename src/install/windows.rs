@@ -120,21 +120,24 @@ pub fn install(inputs: &InstallInputs) -> Result<(), Box<dyn Error>> {
     // termination, never on a reported Stop. Without the config below, a
     // self-initiated restart would leave the service Stopped on Windows.
     //
-    // So: (1) register a Restart recovery action (escalating 1s/5s/30s
-    // backoff guards against a tight crash-loop, resetting after 10 min of
-    // stable uptime), and (2) flip the "act on non-crash failures" flag so
-    // SCM treats a clean Stop carrying a *non-zero* exit code as a failure
-    // too. `service_main` reports a non-zero exit on an app-initiated
-    // restart and exit 0 on an operator/SCM Stop, so only the former trips
-    // the relaunch. See design-docs/install-and-supervisor.md.
+    // So we register a Restart recovery action and (via
+    // `set_failure_actions_on_non_crash_failures`) let a non-zero clean Stop
+    // trip it. This recovery path is now the **crash safety net**, not the
+    // normal restart route: a deliberate restart takes the clean
+    // exit-0 + self-relauncher path in `service_main` (no event-log "failure",
+    // no backoff). So the delays here only ever apply to genuine crash loops
+    // — and we keep them SHORT and flat (1s/2s/2s) with a short reset window
+    // so even the fallback path (relauncher couldn't spawn) restarts in ~1s
+    // instead of the old escalating 1s/5s/30s that pinned rapid restarts at
+    // 30 s. See design-docs/install-and-supervisor.md.
     let failure_actions = ServiceFailureActions {
-        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(600)),
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(120)),
         reboot_msg:   None,
         command:      None,
         actions:      Some(vec![
             ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(1) },
-            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(5) },
-            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(30) },
+            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(2) },
+            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(2) },
         ]),
     };
     if let Err(e) = service.update_failure_actions(failure_actions) {
@@ -323,6 +326,66 @@ pub fn is_running_under_scm() -> bool {
     SHUTDOWN.get().is_some()
 }
 
+// Env var that marks a process as the post-restart relauncher (see
+// `spawn_restart_relauncher` / `maybe_run_relauncher`). Kept private; only the
+// service ever sets it on the detached child it spawns.
+const RELAUNCH_ENV: &str = "MIRA_WIN_RELAUNCH";
+
+/// Spawn a detached copy of ourselves whose only job is to start the service
+/// again once SCM has marked it Stopped (see [`maybe_run_relauncher`]). This is
+/// how a **deliberate** restart comes back WITHOUT the non-zero exit that SCM
+/// logs as a crash — so `service_main` can report a clean exit 0 and keep the
+/// Windows event log quiet. Returns whether the spawn succeeded; the caller
+/// falls back to the exit-1 (SCM crash-recovery) relaunch if it didn't, so a
+/// restart is never stranded.
+fn spawn_restart_relauncher() -> bool {
+    use std::os::windows::process::CommandExt;
+    // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP — outlive the parent and don't
+    // attach to its (nonexistent) console.
+    const DETACHED_PROCESS:         u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    let Ok(exe) = std::env::current_exe() else { return false };
+    std::process::Command::new(exe)
+        .env(RELAUNCH_ENV, "1")
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .is_ok()
+}
+
+/// If this process was launched as the relauncher (env set by
+/// [`spawn_restart_relauncher`]), poll until SCM reports the service Stopped,
+/// then start it again — retrying to ride out the STOP_PENDING window. Returns
+/// `true` when it handled the relaunch (caller should exit immediately and NOT
+/// fall through to clap / the service dispatcher). Must run at the very top of
+/// `main`, before arg parsing, since the relauncher takes no CLI args.
+pub fn maybe_run_relauncher() -> bool {
+    if std::env::var_os(RELAUNCH_ENV).is_none() {
+        return false;
+    }
+    if let Ok(mgr) = open_manager(ServiceManagerAccess::CONNECT) {
+        // ~60s budget (120 × 500ms) — generous enough for a slow graceful
+        // shutdown, bounded so a wedged stop doesn't hang the relauncher.
+        for _ in 0..120 {
+            if let Ok(svc) = mgr.open_service(
+                SERVICE_NAME,
+                ServiceAccess::QUERY_STATUS | ServiceAccess::START,
+            ) {
+                match svc.query_status().map(|s| s.current_state) {
+                    // Already back up (SCM beat us, or a previous iteration
+                    // started it) — nothing left to do.
+                    Ok(ServiceState::Running | ServiceState::StartPending) => return true,
+                    // Fully stopped — relaunch and we're done.
+                    Ok(ServiceState::Stopped) => { let _ = svc.start::<&str>(&[]); return true; }
+                    // Stop still pending (or a transient query error) — wait.
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    true
+}
+
 // Where the dispatcher hands control once SCM has connected.
 // Registers a control handler that trips [`SHUTDOWN`] on Stop /
 // Shutdown, reports Running, then runs the standard server loop.
@@ -438,14 +501,31 @@ fn service_main(_args: Vec<OsString>) {
         );
     }
 
-    // Choose the exit code that decides whether SCM relaunches us:
-    // · operator/SCM Stop  → 0  → SCM leaves the service Stopped.
-    // · anything else (the server loop returned for an app-initiated
-    //   restart, or it panicked/errored) → non-zero → SCM's recovery
-    //   action (configured in `install`) relaunches the service.
-    // This is the Windows half of the cross-platform "exit → relaunch"
-    // Restart contract.
-    let exit_code: u32 = if STOP_REQUESTED.load(Ordering::SeqCst) { 0 } else { 1 };
+    // Decide how this stop is treated by SCM. Three cases:
+    //
+    // · operator/SCM Stop (STOP_REQUESTED) → exit 0; SCM leaves us Stopped.
+    //
+    // · deliberate app restart — the server loop returned cleanly (`Ok(Ok(()))`)
+    //   for a web-UI Restart / self-update, NOT an SCM stop. We spawn a detached
+    //   relauncher and report a CLEAN exit 0, so SCM logs no "terminated
+    //   unexpectedly" crash event and applies no backoff. The relauncher starts
+    //   us again once we're Stopped. If the relauncher couldn't be spawned, we
+    //   fall back to exit 1 so SCM's recovery action still relaunches us — a
+    //   restart is never stranded.
+    //
+    // · crash / error / panic (`Err`/panic) → exit 1 → SCM recovery relaunch.
+    //
+    // This keeps the Windows event log clean for the common case (deliberate
+    // restarts) while preserving the "exit → relaunch" contract for crashes.
+    let stop_requested = STOP_REQUESTED.load(Ordering::SeqCst);
+    let clean_return   = matches!(&result, Ok(Ok(())));
+    let exit_code: u32 = if stop_requested {
+        0
+    } else if clean_return {
+        if spawn_restart_relauncher() { 0 } else { 1 }
+    } else {
+        1
+    };
 
     let _ = status_handle.set_service_status(ServiceStatus {
         service_type:      ServiceType::OWN_PROCESS,

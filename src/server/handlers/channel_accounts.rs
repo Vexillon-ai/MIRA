@@ -368,6 +368,10 @@ pub async fn create_account(
     Extension(store): Extension<Arc<ChannelAccountStore>>,
     Extension(auth):  Extension<Arc<LocalAuthService>>,
     Extension(live_cfg): Extension<Arc<LiveConfig>>,
+    // Optional: present only when the gateway wired the ChannelManager (absent
+    // in tests / minimal builds). Used to auto-start the new account's
+    // poller/daemon so a freshly added bot works without a service restart.
+    mgr: Option<Extension<ChannelManagerExt>>,
     Json(req): Json<CreateAccountRequest>,
 ) -> impl IntoResponse {
     let kind = match parse_kind(&req.channel) {
@@ -420,6 +424,23 @@ pub async fn create_account(
             // (the inbound handlers read the gate per-message).
             if acct.enabled {
                 ensure_channel_type_enabled(&live_cfg, kind).await;
+                // Spawn the live poller/daemon now, so a freshly added bot
+                // starts receiving messages immediately — no service restart
+                // and no separate "Start" click. Best-effort: a failure here
+                // does NOT fail the create (the account is saved; a restart or
+                // the per-account Start endpoint still picks it up). This is the
+                // fix for "added a Telegram bot under a second account but it
+                // never receives anything" — create used to only persist the
+                // row, and the poller wasn't started until the next start_all.
+                if let Some(Extension(cm)) = &mgr {
+                    let id = acct.id.clone();
+                    if let Err(e) = cm.0.write().await.start_account(&id).await {
+                        warn!("channel account {id}: saved but poller didn't auto-start ({e}); \
+                               a service restart or the per-account Start action will pick it up");
+                    } else {
+                        info!("channel account {id}: poller/daemon started on create");
+                    }
+                }
             }
             let resp = if kind == ChannelKind::External {
                 ChannelAccountResponse::from_row_unredacted(acct)
@@ -461,6 +482,10 @@ pub async fn update_account(
     AuthUser(caller): AuthUser,
     Extension(store): Extension<Arc<ChannelAccountStore>>,
     Extension(auth):  Extension<Arc<LocalAuthService>>,
+    // Optional (absent in tests/minimal builds) — reconcile the live
+    // poller/daemon with the updated row so token/mode edits and (re)enables
+    // take effect immediately, without a service restart.
+    mgr: Option<Extension<ChannelManagerExt>>,
     Path(id):         Path<String>,
     Json(req):        Json<UpdateAccountRequest>,
 ) -> impl IntoResponse {
@@ -513,10 +538,28 @@ pub async fn update_account(
     };
 
     match store.update(&id, upd) {
-        Ok(acct) => match ChannelAccountResponse::from_row(acct) {
-            Ok(r)  => axum::Json(r).into_response(),
-            Err(e) => err_resp(e),
-        },
+        Ok(acct) => {
+            // Reconcile the live poller/daemon: restart it on the new config
+            // when enabled (picks up a changed token/mode, or starts it on a
+            // re-enable), stop it when disabled. Best-effort — a failure just
+            // means the change applies on the next restart.
+            if let Some(Extension(cm)) = &mgr {
+                let mut guard = cm.0.write().await;
+                let res: Result<(), String> = if acct.enabled {
+                    guard.restart_account(&id).await
+                } else {
+                    guard.stop_account(&id).await.map(|_| ())
+                };
+                if let Err(e) = res {
+                    warn!("channel account {id}: updated but live reconcile failed ({e}); \
+                           a service restart will apply it");
+                }
+            }
+            match ChannelAccountResponse::from_row(acct) {
+                Ok(r)  => axum::Json(r).into_response(),
+                Err(e) => err_resp(e),
+            }
+        }
         Err(e) => err_resp(e),
     }
 }

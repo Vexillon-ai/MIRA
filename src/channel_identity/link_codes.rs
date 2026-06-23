@@ -170,22 +170,20 @@ impl LinkCodeStore {
 }
 
 fn generate_code() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // Cheap non-cryptographic source seeded by nanos — adequate for a
-    // 30^8 codespace with 10-minute TTL. If a determined attacker is
-    // brute-forcing a leaked code in <10 minutes they have far worse
-    // options.
-    let seed = SystemTime::now().duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64).unwrap_or(0);
-    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let mut next = || -> u8 {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        ALPHABET[(state >> 33) as usize % ALPHABET.len()]
-    };
+    // A link code is a bearer credential: redeeming it binds a Telegram/Discord
+    // chat to a MIRA account. It MUST be unpredictable. The previous generator
+    // was a time-seeded LCG (deterministic from `SystemTime` nanos) — an
+    // attacker who knew the approximate issue time could narrow the seed and
+    // predict the code, undermining the TTL + single-use guards. Use the OS
+    // CSPRNG (same source as our auth tokens / crypto nonces) with unbiased
+    // `gen_range` over the 30-symbol alphabet → 30^8 ≈ 6.6e11 unguessable codes.
+    use rand::Rng;
+    let mut rng = rand::rngs::OsRng;
     let mut buf = String::from("LINK-");
     for i in 0..8 {
         if i == 4 { buf.push('-'); }
-        buf.push(next() as char);
+        let idx = rng.gen_range(0..ALPHABET.len());
+        buf.push(ALPHABET[idx] as char);
     }
     buf
 }
