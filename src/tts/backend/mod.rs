@@ -10,8 +10,34 @@
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use std::path::PathBuf;
 
 use super::types::{AudioBuffer, AudioChunk, ProbeResult, SynthesiseRequest, TtsError, Voice};
+
+// ── Temp-file helpers for subprocess backends ──────────────────────────────
+//
+// CLI synthesisers (Piper, eSpeak) must render to a FILE, never stdout: on
+// Windows, writing a binary WAV to stdout corrupts it via text-mode `\n` →
+// `\r\n` translation, which shifts every sample and plays back as static. File
+// I/O is binary-safe on all platforms, so both backends route through these.
+
+/// Unique temp path for one render. Collision-safe across threads/processes via
+/// the pid + a monotonic counter; avoids a runtime dependency on `tempfile`.
+pub(crate) fn unique_tmp_wav_path() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n   = SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("mira-tts-{pid}-{n}.wav"))
+}
+
+/// Best-effort cleanup of the per-render temp WAV on drop (success or error).
+pub(crate) struct TmpFileGuard(pub PathBuf);
+impl Drop for TmpFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
 
 pub mod espeak;
 pub mod openai;

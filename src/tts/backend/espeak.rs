@@ -6,17 +6,18 @@
 //! Tiny, robotic, always-on. Used when the Piper auto-download fails so the
 //! user still hears *something* — Section 10 of the design doc covers the
 //! rationale. We shell out to the system `espeak-ng` (or the legacy
-//! `espeak`) and capture WAV bytes from stdout.
+//! `espeak`) and render WAV to a temp file (never stdout — see `synthesise`).
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Instant;
+use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::tts::backend::TtsBackend;
+use crate::tts::backend::{TtsBackend, TmpFileGuard, unique_tmp_wav_path};
 use crate::tts::types::{
     AudioBuffer, AudioChunk, AudioCodec, ProbeResult, SynthesiseRequest, TtsError, Voice,
 };
@@ -89,10 +90,17 @@ impl TtsBackend for EspeakBackend {
         // safe band so a slider that maps 0.5..=2.0 never produces nonsense.
         let wpm = (175.0_f32 * req.speed.clamp(0.25, 4.0)).clamp(80.0, 450.0).round() as u32;
 
+        // Render to a temp file (`-w`), not `--stdout`. On Windows, writing the
+        // binary WAV to stdout corrupts it via text-mode `\n` → `\r\n`
+        // translation (the same bug that turned Piper output into static). File
+        // I/O is binary-safe everywhere, so we use it on all platforms.
+        let out_path = unique_tmp_wav_path();
+        let _guard   = TmpFileGuard(out_path.clone());
+
         let mut child = Command::new(&bin)
             .arg("-v").arg(&voice_id)
             .arg("-s").arg(wpm.to_string())
-            .arg("--stdout")
+            .arg("-w").arg(&out_path)
             .stdin (Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -111,8 +119,14 @@ impl TtsBackend for EspeakBackend {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             return Err(TtsError::Upstream(format!("espeak exited with {}: {stderr}", out.status)));
         }
+        let bytes = fs::read(&out_path).await.map_err(|e| TtsError::Upstream(
+            format!("espeak produced no readable output at {}: {e}", out_path.display()),
+        ))?;
+        if bytes.is_empty() {
+            return Err(TtsError::Upstream("espeak produced an empty audio file".into()));
+        }
         Ok(AudioBuffer {
-            bytes: out.stdout,
+            bytes,
             codec: AudioCodec::Wav { sample_rate: 22_050, channels: 1 },
         })
     }

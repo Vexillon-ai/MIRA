@@ -425,7 +425,25 @@ pub async fn run_tool_loop_with_context(
     let mut final_opts = options.clone();
     final_opts.tools       = None;
     final_opts.tool_choice = None;
-    run_streaming_no_tools(provider, messages, &final_opts, tx).await
+
+    // Buffer this nudge instead of live-streaming it. With the tool list
+    // removed, a harmony model (gpt-oss) can emit a raw tool call into the
+    // text channel; streaming that verbatim leaks `<|channel|>…<|call|>`
+    // control tokens to the UI (it reads as the assistant parroting the user's
+    // own answers). Generate fully, sanitize, then replay the clean text.
+    let resp    = provider.generate(messages, &final_opts).await?;
+    if let Some(fb) = &resp.fallback {
+        let _ = tx.send(StreamEvent::Warning(fallback_warning_message(fb))).await;
+    }
+    let mut visible = strip_hermes_tool_calls(&resp.content);
+    if visible.is_empty() {
+        // The whole reply was leaked tool-call markup. Don't show a blank
+        // bubble — the post-turn extractor back-fills onboarding state, so a
+        // brief continuation keeps the conversation moving.
+        visible = "Got it — noted. What would you like to do next?".to_string();
+    }
+    replay_as_stream(&visible, tx).await;
+    Ok((visible, resp.usage))
 }
 
 // Single dispatch path for tool execution. Enforces three invariants:
@@ -947,7 +965,85 @@ pub fn strip_hermes_tool_calls(text: &str) -> String {
     // call (no XML wrapper), also strip that so the raw JSON doesn't leak
     // into the user-visible message.
     let cleaned = strip_bare_json_tool_calls(&out);
+    // gpt-oss "harmony" control tokens leak when tool parsing is off mid-turn.
+    let cleaned = strip_harmony_artifacts(&cleaned);
     cleaned.trim().to_string()
+}
+
+// Strip gpt-oss "harmony" control tokens and non-final channel blocks from
+// user-visible text.
+//
+// LM Studio / llama.cpp normally parse the harmony format and return clean
+// `content`. But when the tool list is removed mid-turn (e.g. our post-budget
+// "respond in prose" nudge), a harmony model can emit a raw tool call into the
+// text channel:
+//
+//   <|start|>assistant<|channel|>commentary to=functions.record_profile \
+//   <|constrain|>json<|message|>{"key":"hobbies","value":[…]}<|call|>
+//
+// Those control tokens leaked verbatim to the chat and read as the assistant
+// "regurgitating" the user's own answers wrapped in gibberish. A healthy
+// harmony parse never surfaces these tokens in `content`, so when they appear
+// the content is leaked control output and is safe to remove wholesale: drop
+// every non-`final` channel block (analysis / commentary / tool call) through
+// its terminator, then strip any residual standalone `<|…|>` tokens.
+pub fn strip_harmony_artifacts(text: &str) -> String {
+    if !text.contains("<|") {
+        return text.to_string();
+    }
+
+    // 1) Remove whole non-final channel blocks. A block runs from its
+    //    (optional) `<|start|>` role marker or its `<|channel|>` header through
+    //    the next terminator: `<|call|>` (tool call), `<|end|>`, or `<|return|>`.
+    let mut s = text.to_string();
+    loop {
+        let Some(ch) = s.find("<|channel|>") else { break };
+        let after = &s[ch + "<|channel|>".len()..];
+        let name_end = after.find("<|").unwrap_or(after.len());
+        // The final channel carries the user-facing answer — keep it (its
+        // tokens get reduced to plain text in step 2).
+        if after[..name_end].trim_start().starts_with("final") {
+            break;
+        }
+        let block_start = s[..ch].rfind("<|start|>").unwrap_or(ch);
+        let term = ["<|call|>", "<|end|>", "<|return|>"].iter()
+            .filter_map(|t| s[ch..].find(t).map(|i| ch + i + t.len()))
+            .min();
+        match term {
+            Some(end) => s.replace_range(block_start..end, ""),
+            None      => { s.truncate(block_start); break; }
+        }
+    }
+
+    // 2) Drop routing headers as a unit: `<|channel|>NAME<|message|>` carries
+    //    the channel name (e.g. "final") which is metadata, not prose. Removing
+    //    only the tokens would leave the bare word "final" glued to the answer.
+    while let Some(ch) = s.find("<|channel|>") {
+        match s[ch..].find("<|message|>") {
+            Some(rel) => {
+                let end = ch + rel + "<|message|>".len();
+                s.replace_range(ch..end, "");
+            }
+            None => break,
+        }
+    }
+
+    // 3) Strip any residual standalone control tokens (`<|message|>`,
+    //    `<|start|>`, `<|end|>`, `<|return|>`, `<|im_start|>`, …).
+    let mut out  = String::with_capacity(s.len());
+    let mut rest = s.as_str();
+    while let Some(open) = rest.find("<|") {
+        out.push_str(&rest[..open]);
+        match rest[open + 2..].find("|>") {
+            Some(c) => rest = &rest[open + 2 + c + 2..],
+            None    => { rest = ""; break; }
+        }
+    }
+    out.push_str(rest);
+
+    // A surviving final-channel block leaves a leading "assistant" role word
+    // (from `<|start|>assistant<|message|>`); drop it.
+    out.trim().trim_start_matches("assistant").trim().to_string()
 }
 
 fn strip_bare_json_tool_calls(text: &str) -> String {
@@ -1067,6 +1163,43 @@ Nice to meet you!
     #[test]
     fn parse_hermes_plain_text_returns_empty() {
         assert!(parse_hermes_tool_calls("Just a normal reply.").is_empty());
+    }
+
+    #[test]
+    fn harmony_plain_text_is_untouched() {
+        let s = "Sure — I'll keep an eye on the system and report at 9am.";
+        assert_eq!(strip_harmony_artifacts(s), s);
+    }
+
+    #[test]
+    fn harmony_strips_leaked_tool_call_block() {
+        // The exact shape that leaked into the chat as "regurgitation": a raw
+        // harmony tool call emitted into the text channel after tools were
+        // removed mid-turn.
+        let s = "<|start|>assistant<|channel|>commentary to=functions.record_profile \
+                 <|constrain|>json<|message|>{\"key\":\"hobbies\",\"value\":[\"tennis\"]}<|call|>";
+        assert_eq!(strip_harmony_artifacts(s), "");
+    }
+
+    #[test]
+    fn harmony_keeps_final_channel_prose() {
+        let s = "<|channel|>final<|message|>All set! I've logged everything.";
+        assert_eq!(strip_harmony_artifacts(s), "All set! I've logged everything.");
+    }
+
+    #[test]
+    fn harmony_drops_analysis_keeps_following_final() {
+        let s = "<|start|>assistant<|channel|>analysis<|message|>thinking…<|end|>\
+                 <|start|>assistant<|channel|>final<|message|>Hello there.";
+        assert_eq!(strip_harmony_artifacts(s), "Hello there.");
+    }
+
+    #[test]
+    fn strip_hermes_also_clears_harmony() {
+        // The central sanitizer (applied to the visible reply) must clear
+        // harmony control tokens too, not just Hermes XML.
+        let s = "<|channel|>commentary to=functions.foo<|message|>{}<|call|>";
+        assert_eq!(strip_hermes_tool_calls(s), "");
     }
 
     #[test]

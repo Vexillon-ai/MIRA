@@ -214,6 +214,107 @@ fn record_and_autoadvance(
     Ok(())
 }
 
+/// Resolve a model-supplied question `key` to a real schema key. Small local
+/// models routinely invent keys that don't exist (`decision_style`,
+/// `short_term_goal`, …) and then burn whole tool rounds on "unknown key"
+/// errors. We accept the exact key, a short alias table for the keys models
+/// reach for most, then a normalized fuzzy match (lowercase, alphanumerics
+/// only, equality-or-containment). Returns the canonical schema key.
+fn resolve_question_key(schema: &OnboardingSchema, key: &str) -> Option<String> {
+    if schema.question(key).is_some() {
+        return Some(key.to_string());
+    }
+    let norm = |s: &str| s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect::<String>();
+    let target = norm(key);
+    if target.is_empty() { return None; }
+
+    // Aliases observed in the wild (gpt-oss / qwen onboarding runs).
+    const ALIASES: &[(&str, &str)] = &[
+        ("decisionstyle",      "autonomy_preference"),
+        ("decisionmaking",     "autonomy_preference"),
+        ("autonomy",           "autonomy_preference"),
+        ("shorttermgoal",      "top_goals"),
+        ("shorttermgoals",     "top_goals"),
+        ("goal",               "top_goals"),
+        ("goals",              "top_goals"),
+        ("assistantname",      "agent_name"),
+        ("name",               "preferred_name"),
+        ("work",               "work_summary"),
+        ("job",                "work_summary"),
+        ("offlimits",          "off_limits_topics"),
+        ("privacy",            "off_limits_topics"),
+        ("communicationstyle", "verbosity"),
+    ];
+    for (alias, canon) in ALIASES {
+        if target == *alias && schema.question(canon).is_some() {
+            return Some((*canon).to_string());
+        }
+    }
+
+    // Fuzzy: a schema key whose normalized form equals or (for keys ≥4 chars)
+    // contains / is-contained-by the target.
+    let mut fuzzy: Option<String> = None;
+    for g in &schema.groups {
+        for q in &g.questions {
+            let nk = norm(&q.key);
+            if nk == target { return Some(q.key.clone()); }
+            if target.len() >= 4 && (nk.contains(&target) || target.contains(&nk)) {
+                fuzzy = Some(q.key.clone());
+            }
+        }
+    }
+    fuzzy
+}
+
+/// Comma-joined list of every real question key — appended to "unknown key"
+/// errors so the model can self-correct in one shot instead of guessing.
+fn valid_keys_hint(schema: &OnboardingSchema) -> String {
+    schema.groups.iter()
+        .flat_map(|g| g.questions.iter().map(|q| q.key.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Server-driven "what to ask next": the first **required** group with no
+/// activity yet (mirrors `finalize_onboarding`'s untouched-group guard).
+/// Returned as an imperative steer appended to onboarding tool results so the
+/// model keeps moving through the flow instead of declaring itself done early
+/// — the "went quiet before asking about goals" failure. `None` once every
+/// required group is covered.
+fn next_required_step(
+    auth:    &LocalAuthService,
+    schema:  &OnboardingSchema,
+    user_id: &str,
+) -> Option<String> {
+    let progress = auth.get_profile(user_id).ok().flatten()
+        .and_then(|p| p.onboarding_progress)
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    let obj = progress.as_object();
+    let answered: HashSet<String> = obj.map(|m| string_set(m, "answered_keys")).unwrap_or_default();
+    let skipped:  HashSet<String> = obj.map(|m| string_set(m, "skipped_keys")).unwrap_or_default();
+    let explicit: HashSet<String> = obj.map(|m| string_set(m, "explicitly_completed_groups")).unwrap_or_default();
+
+    for g in &schema.groups {
+        if g.optional || explicit.contains(&g.id) { continue; }
+        let has_activity = g.questions.iter()
+            .any(|q| answered.contains(&q.key) || skipped.contains(&q.key));
+        if has_activity { continue; }
+        let q = g.questions.first()?; // schema validation guarantees ≥1 question
+        let hint = q.prompt_hint.as_deref().unwrap_or("");
+        let tail = if hint.is_empty() { String::new() } else { format!(" — {hint}") };
+        return Some(format!(
+            "➡️ Next, ask the user about “{}” (question `{}`{}). Do not call \
+             complete_onboarding until every required group is covered.",
+            g.label, q.key, tail
+        ));
+    }
+    None
+}
+
 /// Reasons `finalize_onboarding` refuses to stamp the user as done. Carrying
 /// the list of untouched groups lets the caller render an actionable error
 /// (LLM path quotes them back to the model; HTTP path returns them in the
@@ -389,10 +490,41 @@ impl Tool for RecordProfileTool {
 
     async fn execute(&self, args: ToolArgs) -> Result<ToolResult, MiraError> {
         let user_id = require_user_id(&args)?;
-        let key = args.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+        let raw_key = args.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
             MiraError::ToolError("record_profile: missing `key`".to_string())
         })?.to_owned();
         let value = args.get("value").cloned().unwrap_or(Value::Null);
+
+        // Map invented/aliased keys onto a real schema key before validating,
+        // so the model doesn't lose a round to "unknown key".
+        let key = resolve_question_key(&self.services.schema, &raw_key).ok_or_else(|| {
+            MiraError::ToolError(format!(
+                "record_profile: unknown question key '{}'. Valid keys: {}",
+                raw_key, valid_keys_hint(&self.services.schema)
+            ))
+        })?;
+
+        // Profile picture is chosen in the web UI (preset grid + upload) and in
+        // Settings — never via chat. If the model tries to `record_profile` it
+        // with no real value (it can't supply one), don't error and loop: skip
+        // the topic and tell it the UI owns this. The `avatar` group is optional
+        // so this never blocks completion.
+        if key == "avatar" {
+            let has_value = value_to_string(&value).ok().flatten()
+                .map(|s| !s.trim().is_empty()).unwrap_or(false);
+            if !has_value {
+                record_and_autoadvance(&self.services.auth, &self.services.schema, &user_id, None, Some("avatar"))?;
+                try_auto_finalize(&self.services.auth, &self.services.schema, &user_id)?;
+                let mut msg = "Profile picture is handled by the web UI (preset grid or upload) \
+                    and can be changed later in Settings — it isn't set via chat. Skipping it here."
+                    .to_string();
+                if let Some(next) = next_required_step(&self.services.auth, &self.services.schema, &user_id) {
+                    msg.push('\n');
+                    msg.push_str(&next);
+                }
+                return Ok(ToolResult::success(msg));
+            }
+        }
 
         let (_group, question) = self.services.schema.question(&key).ok_or_else(|| {
             MiraError::ToolError(format!("record_profile: unknown question key '{}'", key))
@@ -467,7 +599,12 @@ impl Tool for RecordProfileTool {
 
         record_and_autoadvance(&svc.auth, &svc.schema, &user_id, Some(&key), None)?;
         try_auto_finalize(&svc.auth, &svc.schema, &user_id)?;
-        Ok(ToolResult::success(format!("recorded {}", key)))
+        let mut msg = format!("recorded {}", key);
+        if let Some(next) = next_required_step(&svc.auth, &svc.schema, &user_id) {
+            msg.push('\n');
+            msg.push_str(&next);
+        }
+        Ok(ToolResult::success(msg))
     }
 }
 
@@ -832,21 +969,28 @@ impl Tool for SkipTopicTool {
 
     async fn execute(&self, args: ToolArgs) -> Result<ToolResult, MiraError> {
         let user_id = require_user_id(&args)?;
-        let key = args.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+        let raw_key = args.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
             MiraError::ToolError("skip_topic: missing `key`".to_string())
         })?.to_owned();
 
-        // Validate that the key exists in the schema — prevents accidental
-        // typos from accumulating garbage in progress JSON.
-        if self.services.schema.question(&key).is_none() {
-            return Err(MiraError::ToolError(format!(
-                "skip_topic: unknown question key '{}'", key
-            )));
-        }
+        // Resolve aliases/invented keys to a real schema key — prevents typos
+        // accumulating garbage in progress JSON and stops the model losing a
+        // round to "unknown key".
+        let key = resolve_question_key(&self.services.schema, &raw_key).ok_or_else(|| {
+            MiraError::ToolError(format!(
+                "skip_topic: unknown question key '{}'. Valid keys: {}",
+                raw_key, valid_keys_hint(&self.services.schema)
+            ))
+        })?;
 
         record_and_autoadvance(&self.services.auth, &self.services.schema, &user_id, None, Some(&key))?;
         try_auto_finalize(&self.services.auth, &self.services.schema, &user_id)?;
-        Ok(ToolResult::success(format!("skipped {}", key)))
+        let mut msg = format!("skipped {}", key);
+        if let Some(next) = next_required_step(&self.services.auth, &self.services.schema, &user_id) {
+            msg.push('\n');
+            msg.push_str(&next);
+        }
+        Ok(ToolResult::success(msg))
     }
 }
 
@@ -904,7 +1048,12 @@ impl Tool for MarkGroupCompleteTool {
             }
         })?;
         try_auto_finalize(&self.services.auth, &schema, &user_id)?;
-        Ok(ToolResult::success(format!("completed group {}", group_id)))
+        let mut msg = format!("completed group {}", group_id);
+        if let Some(next) = next_required_step(&self.services.auth, &schema, &user_id) {
+            msg.push('\n');
+            msg.push_str(&next);
+        }
+        Ok(ToolResult::success(msg))
     }
 }
 
@@ -943,11 +1092,17 @@ impl Tool for CompleteOnboardingTool {
         match finalize_onboarding(&self.services.auth, &self.services.schema, &user_id, summary) {
             Ok(()) => Ok(ToolResult::success("onboarding complete")),
             Err(FinalizeError::UntouchedRequiredGroups(groups)) => {
-                Ok(ToolResult::failure(format!(
-                    "required groups not yet covered: {}. Ask at least one question \
-                     in each, or call mark_group_complete if you've handled it.",
+                let mut msg = format!(
+                    "Not done yet — these required groups aren't covered: {}. Ask at least \
+                     one question in each (or call mark_group_complete if you've handled it) \
+                     before finalizing.",
                     groups.join(", ")
-                )))
+                );
+                if let Some(next) = next_required_step(&self.services.auth, &self.services.schema, &user_id) {
+                    msg.push('\n');
+                    msg.push_str(&next);
+                }
+                Ok(ToolResult::failure(msg))
             }
             Err(FinalizeError::Storage(e)) => Err(e),
         }
@@ -1243,6 +1398,53 @@ mod tests {
             "value": "x",
         })).await.unwrap_err();
         assert!(err.to_string().contains("unknown question key"));
+        // The error now lists valid keys so the model can self-correct.
+        assert!(err.to_string().contains("preferred_name"), "should list valid keys");
+    }
+
+    #[test]
+    fn resolve_key_maps_invented_aliases_to_schema_keys() {
+        let schema = OnboardingSchema::bundled().unwrap();
+        // The exact invented keys gpt-oss reached for in the field.
+        assert_eq!(resolve_question_key(&schema, "decision_style").as_deref(), Some("autonomy_preference"));
+        assert_eq!(resolve_question_key(&schema, "short_term_goal").as_deref(), Some("top_goals"));
+        // Exact keys pass through untouched.
+        assert_eq!(resolve_question_key(&schema, "hobbies").as_deref(), Some("hobbies"));
+        // Genuinely unknown keys stay unresolved.
+        assert_eq!(resolve_question_key(&schema, "does_not_exist"), None);
+    }
+
+    #[tokio::test]
+    async fn record_profile_avatar_null_skips_instead_of_erroring() {
+        // The profile-picture loop: model calls record_profile(avatar, null)
+        // because it can't supply an image. That must NOT error — it should
+        // skip and tell the model the UI owns avatars.
+        let (_dir, uid, svc) = build_services().await;
+        let tool = RecordProfileTool::new(Arc::clone(&svc));
+        let res = tool.execute(json!({
+            "_user_id": uid,
+            "key": "avatar",
+            "value": Value::Null,
+        })).await.unwrap();
+        assert!(res.success, "avatar+null must be a soft success, got {:?}", res);
+        assert!(res.output.to_lowercase().contains("web ui") || res.output.to_lowercase().contains("settings"));
+    }
+
+    #[tokio::test]
+    async fn record_profile_steers_to_next_required_group() {
+        // After recording the very first answer, the success message should
+        // point the model at the next uncovered required group instead of
+        // letting it wander off / wrap up early.
+        let (_dir, uid, svc) = build_services().await;
+        let tool = RecordProfileTool::new(Arc::clone(&svc));
+        let res = tool.execute(json!({
+            "_user_id": uid,
+            "key": "preferred_name",
+            "value": "Tarek",
+        })).await.unwrap();
+        assert!(res.success);
+        assert!(res.output.contains("Next, ask the user about"),
+            "expected a server-driven next-question steer, got {:?}", res.output);
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use crate::tts::backend::TtsBackend;
+use crate::tts::backend::{TtsBackend, TmpFileGuard, unique_tmp_wav_path};
 use crate::tts::manifest::{
     self, ArchiveKind, DEFAULT_VOICE_ID, curated_voice, curated_voices,
 };
@@ -206,9 +206,19 @@ impl PiperBackend {
         // several concatenated headers.
         let single_line = text.replace(['\r', '\n'], " ");
 
+        // Render to a temp FILE, not stdout. On Windows, piper.exe writes its
+        // stdout in text mode, so every 0x0A byte of the *binary* WAV gets an
+        // 0x0D prepended (\n → \r\n) — corrupting the audio stream into static
+        // and inflating the file past its declared RIFF/data length. File I/O
+        // is binary-safe on every platform, so `--output_file <tmp.wav>` sidesteps
+        // the whole class of bug. (Unix was unaffected, but we use the temp file
+        // everywhere for one code path and to dodge large-stdout pipe buffering.)
+        let out_path = unique_tmp_wav_path();
+        let _guard = TmpFileGuard(out_path.clone());
+
         let mut child = Command::new(binary)
             .arg("--model").arg(voice)
-            .arg("--output_file").arg("-")
+            .arg("--output_file").arg(&out_path)
             .arg("--length_scale").arg(format!("{length_scale}"))
             .stdin (Stdio::piped())
             .stdout(Stdio::piped())
@@ -228,7 +238,14 @@ impl PiperBackend {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             return Err(TtsError::Upstream(format!("piper exited with {}: {stderr}", out.status)));
         }
-        Ok(out.stdout)
+
+        let bytes = fs::read(&out_path).await.map_err(|e| TtsError::Upstream(
+            format!("piper produced no readable output at {}: {e}", out_path.display()),
+        ))?;
+        if bytes.is_empty() {
+            return Err(TtsError::Upstream("piper produced an empty audio file".into()));
+        }
+        Ok(bytes)
     }
 }
 
