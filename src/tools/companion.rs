@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 
 use super::{Tier, Tool, ToolArgs, ToolResult};
 use crate::companion::{CompanionSettings, CompanionSystem, CompanionUpdate};
+use crate::companion::settings::{FrequencyMode, MessageMix, ToneAxes};
 use crate::MiraError;
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
@@ -362,13 +363,20 @@ impl Tool for CompanionConfigureTool {
     fn name(&self) -> &str { "companion_configure" }
 
     fn description(&self) -> &str {
-        "Update one or more companion-mode settings — quiet hours, \
-         preferred channels, safety contact, or check-in cadence \
-         (max_per_day, min_gap_minutes, max_unanswered_checkins). Only the \
-         fields you pass are changed; everything else is preserved. Use when \
-         the user adjusts their preferences mid-conversation (\"please don't \
-         message me before 10am\", \"prefer Signal\", \"check in at most twice \
-         a day\", \"stop if I haven't replied to 2\")."
+        "Update one or more companion-mode (Presence) settings. Only the fields \
+         you pass change; everything else is preserved. Use whenever the user \
+         tunes how I reach out or how I sound, e.g.:\n\
+         • \"message me less\" / \"more often\" → lower/raise the rhythm band \
+           (min_per_day + max_per_day).\n\
+         • \"only check in in the mornings\" → frequency_mode='scheduled' + \
+           scheduled_times like [\"08:00\"].\n\
+         • \"be funnier\" → raise tone.playfulness; \"keep it short\" → lower \
+           tone.verbosity; \"be warmer\" → raise tone.warmth (each 0..=100).\n\
+         • \"stop the jokes\" → message_mix.joke=false; \"don't tell me what \
+           you've been up to\" → share_agent_activity=false.\n\
+         • Plus the classics: quiet_hours, preferred_channels, safety_contact, \
+           and the cadence guards (max_per_day, min_gap_minutes, \
+           max_unanswered_checkins)."
     }
 
     fn tier(&self) -> Tier { Tier::Pure }
@@ -423,6 +431,62 @@ impl Tool for CompanionConfigureTool {
                         "Per-user override: pause check-ins after this many go \
                          unanswered in a row (resets when the user replies; \
                          0 = no cap)."
+                },
+                "frequency_mode": {
+                    "type": "string",
+                    "enum": ["fuzzy", "scheduled"],
+                    "description":
+                        "'fuzzy' = a daily band placed at varied times (the \
+                         default friend-not-alarm-clock rhythm); 'scheduled' = \
+                         fire at the specific local times in `scheduled_times`."
+                },
+                "min_per_day": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description":
+                        "Fuzzy-mode lower bound on proactive messages per local \
+                         day (the upper bound is `max_per_day`). Lower this for \
+                         'message me less', raise it for 'more often'."
+                },
+                "scheduled_times": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description":
+                        "Local 'HH:MM' times for scheduled mode, e.g. \
+                         [\"08:00\",\"18:30\"]. Used only when \
+                         frequency_mode='scheduled'."
+                },
+                "tone": {
+                    "type": "object",
+                    "properties": {
+                        "warmth":      { "type": "integer", "minimum": 0, "maximum": 100 },
+                        "playfulness": { "type": "integer", "minimum": 0, "maximum": 100 },
+                        "verbosity":   { "type": "integer", "minimum": 0, "maximum": 100 }
+                    },
+                    "description":
+                        "Personality sliders, each 0..=100 (50 = neutral). Raise \
+                         playfulness for 'be funnier', lower verbosity for 'keep \
+                         it short', raise warmth for 'be warmer'."
+                },
+                "message_mix": {
+                    "type": "object",
+                    "properties": {
+                        "check_in":      { "type": "boolean" },
+                        "joke":          { "type": "boolean" },
+                        "status_update": { "type": "boolean" },
+                        "follow_up":     { "type": "boolean" },
+                        "share":         { "type": "boolean" },
+                        "encouragement": { "type": "boolean" }
+                    },
+                    "description":
+                        "Which kinds of proactive message I may send. Set \
+                         joke=false for 'stop the jokes', etc."
+                },
+                "share_agent_activity": {
+                    "type": "boolean",
+                    "description":
+                        "Whether to include 'here's what I've been up to' \
+                         updates drawn from my autonomous agents / automations."
                 }
             }
         })
@@ -458,31 +522,207 @@ impl Tool for CompanionConfigureTool {
         let max_unanswered_checkins: Option<u32> = args.get("max_unanswered_checkins")
             .and_then(|v| v.as_u64()).map(|n| n as u32);
 
+        // ── Presence (rhythm + personality) fields ──
+        let frequency_mode: Option<FrequencyMode> = match args.get("frequency_mode")
+            .and_then(|v| v.as_str())
+        {
+            Some("fuzzy")     => Some(FrequencyMode::Fuzzy),
+            Some("scheduled") => Some(FrequencyMode::Scheduled),
+            Some(other)       => return Ok(ToolResult::failure(format!(
+                "companion_configure: frequency_mode must be 'fuzzy' or 'scheduled', got '{other}'"
+            ))),
+            None              => None,
+        };
+        let min_per_day: Option<u32> = args.get("min_per_day")
+            .and_then(|v| v.as_u64()).map(|n| n as u32);
+        let share_agent_activity: Option<bool> = args.get("share_agent_activity")
+            .and_then(|v| v.as_bool());
+
+        // scheduled_times — validate every entry is "HH:MM".
+        let scheduled_times: Option<Vec<String>> = match args.get("scheduled_times") {
+            None => None,
+            Some(v) => {
+                let Some(arr) = v.as_array() else {
+                    return Ok(ToolResult::failure(
+                        "companion_configure: scheduled_times must be an array of 'HH:MM' strings"
+                    ));
+                };
+                let mut out = Vec::with_capacity(arr.len());
+                for t in arr {
+                    let Some(s) = t.as_str() else {
+                        return Ok(ToolResult::failure(
+                            "companion_configure: scheduled_times entries must be strings"
+                        ));
+                    };
+                    if !valid_hhmm(s) {
+                        return Ok(ToolResult::failure(format!(
+                            "companion_configure: scheduled time '{s}' must be 'HH:MM' (24h)"
+                        )));
+                    }
+                    out.push(s.to_string());
+                }
+                Some(out)
+            }
+        };
+
+        // tone — object {warmth, playfulness, verbosity}, each 0..=100.
+        let tone: Option<ToneAxes> = match args.get("tone") {
+            None => None,
+            Some(v) => {
+                let Some(obj) = v.as_object() else {
+                    return Ok(ToolResult::failure(
+                        "companion_configure: tone must be an object {warmth, playfulness, verbosity}"
+                    ));
+                };
+                let axis = |k: &str| obj.get(k).and_then(|x| x.as_u64());
+                let warmth      = axis("warmth").unwrap_or(50);
+                let playfulness = axis("playfulness").unwrap_or(50);
+                let verbosity   = axis("verbosity").unwrap_or(50);
+                if warmth > 100 || playfulness > 100 || verbosity > 100 {
+                    return Ok(ToolResult::failure(
+                        "companion_configure: tone axes must each be 0..=100"
+                    ));
+                }
+                Some(ToneAxes {
+                    warmth: warmth as u8,
+                    playfulness: playfulness as u8,
+                    verbosity: verbosity as u8,
+                })
+            }
+        };
+
+        // message_mix — object of the six booleans. Missing keys keep the
+        // current value (read-modify-write below).
+        let message_mix_obj = args.get("message_mix")
+            .and_then(|v| v.as_object())
+            .cloned();
+        let message_mix_present = args.get("message_mix").is_some();
+        if message_mix_present && message_mix_obj.is_none() {
+            return Ok(ToolResult::failure(
+                "companion_configure: message_mix must be an object of booleans"
+            ));
+        }
+
+        let presence_touched = frequency_mode.is_some() || min_per_day.is_some()
+            || scheduled_times.is_some() || tone.is_some()
+            || message_mix_obj.is_some() || share_agent_activity.is_some();
+
         // Refuse a no-op call so the model gets useful feedback.
         if quiet_hours.is_none() && preferred_channels.is_none()
             && safety_contact_user_id.is_none() && max_per_day.is_none()
             && min_gap_minutes.is_none() && max_unanswered_checkins.is_none()
+            && !presence_touched
         {
             return Ok(ToolResult::failure(
                 "companion_configure: pass at least one of quiet_hours, \
                  preferred_channels, safety_contact_user_id, max_per_day, \
-                 min_gap_minutes, max_unanswered_checkins"
+                 min_gap_minutes, max_unanswered_checkins, frequency_mode, \
+                 min_per_day, scheduled_times, tone, message_mix, \
+                 share_agent_activity"
             ));
         }
 
-        let update = CompanionUpdate {
-            quiet_hours,
-            preferred_channels,
-            safety_contact_user_id,
-            max_per_day,
-            min_gap_minutes,
-            max_unanswered_checkins,
-        };
-        match self.system.configure(&user_id, update) {
-            Ok(s)  => Ok(ToolResult::success(settings_to_json(&s).to_string())),
-            Err(e) => Ok(map_err(self.name(), e)),
+        // Band sanity: an explicit min must not exceed an explicit max.
+        if let (Some(mn), Some(mx)) = (min_per_day, max_per_day) {
+            if mn > mx {
+                return Ok(ToolResult::failure(
+                    "companion_configure: min_per_day cannot exceed max_per_day"
+                ));
+            }
+        }
+
+        let legacy_touched = quiet_hours.is_some() || preferred_channels.is_some()
+            || safety_contact_user_id.is_some() || max_per_day.is_some()
+            || min_gap_minutes.is_some() || max_unanswered_checkins.is_some();
+
+        // Apply the legacy (quiet_hours / channels / safety / cadence) fields
+        // via the facade — it validates the safety contact and refuses on a
+        // never-enabled user, preserving the prior behaviour.
+        if legacy_touched {
+            let update = CompanionUpdate {
+                quiet_hours,
+                preferred_channels,
+                safety_contact_user_id,
+                max_per_day,
+                min_gap_minutes,
+                max_unanswered_checkins,
+            };
+            if let Err(e) = self.system.configure(&user_id, update) {
+                return Ok(map_err(self.name(), e));
+            }
+        }
+
+        // Apply the Presence fields with a read-modify-write on the store.
+        // Creates a fresh DISABLED row if the user has none yet (so the model
+        // can pre-tune before enabling), mirroring the HTTP PUT path.
+        if presence_touched {
+            let store = self.system.store();
+            let now = chrono::Utc::now();
+            let mut s = match store.get(&user_id) {
+                Ok(Some(s)) => s,
+                Ok(None) => CompanionSettings {
+                    user_id: user_id.clone(),
+                    enabled: false,
+                    paused_until: None,
+                    quiet_hours: vec![],
+                    preferred_channels: vec![],
+                    safety_contact_user_id: None,
+                    setup_completed_at: None,
+                    last_checkin_at: None,
+                    consecutive_missed_checkins: 0,
+                    daily_briefing_enabled: false,
+                    daily_briefing_hour: 7,
+                    last_briefing_at: None,
+                    cadence: Default::default(),
+                    presence: Default::default(),
+                    created_at: now,
+                    updated_at: now,
+                },
+                Err(e) => return Ok(ToolResult::failure(format!(
+                    "companion_configure: load failed: {e}"
+                ))),
+            };
+            if let Some(v) = frequency_mode       { s.presence.frequency_mode = v; }
+            if let Some(v) = min_per_day          { s.presence.min_per_day = v; }
+            if let Some(v) = scheduled_times      { s.presence.scheduled_times = v; }
+            if let Some(v) = tone                 { s.presence.tone = v; }
+            if let Some(v) = share_agent_activity { s.presence.share_agent_activity = v; }
+            if let Some(obj) = message_mix_obj {
+                let b = |k: &str, cur: bool| obj.get(k).and_then(|x| x.as_bool()).unwrap_or(cur);
+                let mix = MessageMix {
+                    check_in:      b("check_in",      s.presence.message_mix.check_in),
+                    joke:          b("joke",          s.presence.message_mix.joke),
+                    status_update: b("status_update", s.presence.message_mix.status_update),
+                    follow_up:     b("follow_up",     s.presence.message_mix.follow_up),
+                    share:         b("share",         s.presence.message_mix.share),
+                    encouragement: b("encouragement", s.presence.message_mix.encouragement),
+                };
+                s.presence.message_mix = mix;
+            }
+            s.updated_at = now;
+            if let Err(e) = store.upsert(&s) {
+                return Ok(ToolResult::failure(format!(
+                    "companion_configure: save failed: {e}"
+                )));
+            }
+        }
+
+        // Return the freshest settings snapshot.
+        match self.system.get(&user_id) {
+            Ok(Some(s)) => Ok(ToolResult::success(settings_to_json(&s).to_string())),
+            Ok(None)    => Ok(ToolResult::success(json!({
+                "enabled": false, "setup_completed": false
+            }).to_string())),
+            Err(e)      => Ok(map_err(self.name(), e)),
         }
     }
+}
+
+/// Minimal "HH:MM" (24h) validator for scheduled-mode times.
+fn valid_hhmm(s: &str) -> bool {
+    let (h, m) = match s.split_once(':') { Some(p) => p, None => return false };
+    matches!((h.parse::<u8>(), m.parse::<u8>()), (Ok(h), Ok(m)) if h <= 23 && m <= 59)
+        && h.len() == 2 && m.len() == 2
 }
 
 // ── companion_briefing_set ───────────────────────────────────────────────────
@@ -800,5 +1040,61 @@ mod tests {
         enable.execute(json!({"_user_id":"u","safety_contact_user_id":"c"})).await.unwrap();
         let r = pause.execute(json!({"_user_id":"u","hours":-1.0})).await.unwrap();
         assert!(!r.success);
+    }
+
+    #[tokio::test]
+    async fn configure_applies_presence_fields() {
+        let (_dir, sys) = fresh_system();
+        let configure = CompanionConfigureTool::new(Arc::clone(&sys));
+
+        // No prior row — presence-only configure creates a disabled row and
+        // applies the tuning ("be funnier" / "stop the jokes" / "mornings").
+        let r = configure.execute(json!({
+            "_user_id": "u",
+            "frequency_mode": "scheduled",
+            "min_per_day": 2,
+            "scheduled_times": ["08:00", "18:30"],
+            "tone": { "warmth": 70, "playfulness": 90, "verbosity": 20 },
+            "message_mix": { "joke": true, "status_update": false },
+            "share_agent_activity": false,
+        })).await.unwrap();
+        assert!(r.success, "{:?}", r.error);
+
+        let s = sys.get("u").unwrap().expect("row created");
+        assert!(!s.enabled, "presence-only configure must not enable companion");
+        assert_eq!(s.presence.frequency_mode, FrequencyMode::Scheduled);
+        assert_eq!(s.presence.min_per_day, 2);
+        assert_eq!(s.presence.scheduled_times, vec!["08:00".to_string(), "18:30".to_string()]);
+        assert_eq!(s.presence.tone.playfulness, 90);
+        assert_eq!(s.presence.tone.verbosity, 20);
+        assert!(s.presence.message_mix.joke);
+        assert!(!s.presence.message_mix.status_update);
+        // Untouched mix keys keep their defaults.
+        assert!(s.presence.message_mix.check_in);
+        assert!(!s.presence.share_agent_activity);
+    }
+
+    #[tokio::test]
+    async fn configure_rejects_bad_scheduled_time_and_tone() {
+        let (_dir, sys) = fresh_system();
+        let configure = CompanionConfigureTool::new(Arc::clone(&sys));
+
+        let r = configure.execute(json!({
+            "_user_id": "u", "scheduled_times": ["8:00"],  // not HH:MM
+        })).await.unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("HH:MM"));
+
+        let r = configure.execute(json!({
+            "_user_id": "u", "tone": { "warmth": 150 },
+        })).await.unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("0..=100"));
+
+        let r = configure.execute(json!({
+            "_user_id": "u", "frequency_mode": "weekly",
+        })).await.unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("fuzzy"));
     }
 }

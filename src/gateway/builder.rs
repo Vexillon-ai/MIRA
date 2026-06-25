@@ -1245,6 +1245,10 @@ impl GatewayBuilder {
                         Some(Arc::clone(&wiki_registry)),
                     )
                     .with_live_config(live_config.as_ref().map(Arc::clone))
+                    // Agent activity log — lets "status update" check-ins
+                    // narrate MIRA's recent autonomous work for the user.
+                    // Same store the supervisor records into (with_audit_store).
+                    .with_agent_audit(agent_audit.clone())
                     // TTS so proactive check-ins/briefings honour the
                     // owner's per-channel "voice: always" preference and
                     // go out as voice notes, matching normal replies.
@@ -2085,6 +2089,10 @@ fn build_tool_registry(
                 // wiki profile.md. Only wired when wiki is enabled —
                 // when disabled the bridge is a no-op anyway.
                 wiki:     if config.wiki.enabled { Some(Arc::clone(&wiki_registry)) } else { None },
+                // Wire the companion system so onboarding answers configure
+                // (and, for admins, enable) Presence check-ins. None when the
+                // companion DB failed to open — the bridge is a no-op then.
+                companion: companion_system.clone(),
             });
             registry.register(RecordProfileTool::new(Arc::clone(&services)));
             registry.register(SkipTopicTool::new(Arc::clone(&services)));

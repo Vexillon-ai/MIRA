@@ -2240,7 +2240,7 @@ mod tests {
         // Record a few clean rows.
         let aid = crate::agent::instance::AgentId::new();
         for r in 0..3 {
-            store.record(aid, crate::agent::audit::AuditEvent::Interrupted {
+            store.record(aid, None, crate::agent::audit::AuditEvent::Interrupted {
                 reason: format!("r{r}"),
             }).unwrap();
         }

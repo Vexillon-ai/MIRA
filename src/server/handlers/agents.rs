@@ -62,6 +62,9 @@ pub struct FleetAggregate {
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentDto {
     pub id:             String,
+    /// Initiating user (the agent's `user_id`). `None` = system-initiated.
+    /// Drives the per-user scoping + the "Owner" column in the UI.
+    pub user_id:        Option<String>,
     /// `None` for root agents.
     pub parent:         Option<String>,
     pub skill_id:       Option<String>,
@@ -108,6 +111,7 @@ impl AgentDto {
         let max_usd = if a.budget.max_usd.is_finite() { Some(a.budget.max_usd) } else { None };
         Self {
             id:             a.id.to_string(),
+            user_id:        a.user_id.clone(),
             parent:         a.parent.map(|p| p.to_string()),
             skill_id:       a.skill_id.clone(),
             status:         status_str(a.status),
@@ -139,16 +143,37 @@ fn status_str(s: AgentStatus) -> &'static str {
 
 // ─── Handlers ──────────────────────────────────────────────────────────
 
-pub async fn list_agents(
-    AuthUser(_user):              AuthUser,
-    Extension(registry):          Extension<Arc<AgentRegistry>>,
-) -> Json<AgentsResponse> {
-    Json(build_agents_response(&registry))
+/// Ownership gate: a caller may view/control an agent iff they're an admin
+/// or they initiated it. `owner` is the agent's `user_id` (`None` =
+/// system-initiated, admin-only).
+fn can_view_agent(owner: Option<&str>, caller_id: &str, is_admin: bool) -> bool {
+    is_admin || owner == Some(caller_id)
 }
 
-/// Build the full fleet snapshot (agents sorted by id + aggregate rollup).
+/// Look up an agent's owner (`user_id`) from the live registry. Returns
+/// `None` both when the agent is system-initiated AND when it's no longer in
+/// the registry — callers distinguish via the `present` flag.
+fn agent_owner(registry: &AgentRegistry, id: AgentId) -> (bool, Option<String>) {
+    match registry.get(id) {
+        Some(h) => (true, h.read().ok().and_then(|a| a.user_id.clone())),
+        None    => (false, None),
+    }
+}
+
+pub async fn list_agents(
+    AuthUser(user):               AuthUser,
+    Extension(registry):          Extension<Arc<AgentRegistry>>,
+) -> Json<AgentsResponse> {
+    let is_admin = user.role == crate::auth::models::Role::Admin;
+    Json(build_agents_response(&registry, &user.id, is_admin))
+}
+
+/// Build the full fleet snapshot (agents sorted by id + aggregate rollup),
+/// scoped to what `caller_id` is allowed to see. Non-admins get only the
+/// agents they initiated; the aggregate is computed over the visible set so a
+/// non-admin's totals reflect only their own agents.
 /// Shared by `list_agents` and the live `agents_stream`.
-fn build_agents_response(registry: &AgentRegistry) -> AgentsResponse {
+fn build_agents_response(registry: &AgentRegistry, caller_id: &str, is_admin: bool) -> AgentsResponse {
     // Snapshot then sort by id so the JSON is stable across calls.
     let mut handles = registry.list();
     handles.sort_by_key(|h| h.read().map(|a| a.id.0).unwrap_or_default());
@@ -157,6 +182,10 @@ fn build_agents_response(registry: &AgentRegistry) -> AgentsResponse {
     let mut agg = FleetAggregate::default();
     for h in &handles {
         let a = match h.read() { Ok(a) => a, Err(_) => continue };
+        // Per-user scoping: skip agents the caller can't see (fail-closed).
+        if !can_view_agent(a.user_id.as_deref(), caller_id, is_admin) {
+            continue;
+        }
         let child_ids: Vec<String> = registry.children_of(a.id).iter()
             .filter_map(|c| c.read().ok().map(|c| c.id.to_string()))
             .collect();
@@ -187,19 +216,21 @@ fn build_agents_response(registry: &AgentRegistry) -> AgentsResponse {
 /// or the agent set), so the dashboard is live without a client poll. First
 /// snapshot is sent immediately; the stream stays open until the client leaves.
 pub async fn agents_stream(
-    AuthUser(_user):     AuthUser,
+    AuthUser(user):      AuthUser,
     Extension(registry): Extension<Arc<AgentRegistry>>,
 ) -> axum::response::Response {
     use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
     use tokio_stream::wrappers::ReceiverStream;
 
+    let is_admin = user.role == crate::auth::models::Role::Admin;
+    let caller_id = user.id.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<SseEvent, std::convert::Infallible>>(8);
     tokio::spawn(async move {
         // Sentinel that no real signature equals, so the first iteration always
         // pushes an initial snapshot (even an empty fleet) to the client.
         let mut last_sig = "\u{0}init".to_string();
         loop {
-            let resp = build_agents_response(&registry);
+            let resp = build_agents_response(&registry, &caller_id, is_admin);
             // Cheap change signature: id:status:step:spent per agent.
             let sig: String = resp.agents.iter()
                 .map(|a| format!("{}:{}:{}:{:.4}:{:.3}",
@@ -244,7 +275,8 @@ pub struct InterruptResponse {
 }
 
 pub async fn interrupt_agent(
-    AuthUser(_user):       AuthUser,
+    AuthUser(user):        AuthUser,
+    Extension(registry):   Extension<Arc<AgentRegistry>>,
     Extension(supervisor): Extension<Arc<Supervisor>>,
     Path(agent_id):        Path<String>,
     Json(body):            Json<InterruptBody>,
@@ -253,6 +285,13 @@ pub async fn interrupt_agent(
         Ok(id) => id,
         Err(msg) => return (StatusCode::BAD_REQUEST, Json(error(&msg))).into_response(),
     };
+    // Ownership gate. For control endpoints, a missing agent (already gone)
+    // is a no-op as today; an agent the caller doesn't own is forbidden.
+    let is_admin = user.role == crate::auth::models::Role::Admin;
+    let (present, owner) = agent_owner(&registry, agent_id);
+    if present && !can_view_agent(owner.as_deref(), &user.id, is_admin) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let reason = parse_reason(body.reason.as_deref());
 
     let signalled = if body.propagate {
@@ -268,7 +307,8 @@ pub async fn interrupt_agent(
 }
 
 pub async fn pause_agent(
-    AuthUser(_user):       AuthUser,
+    AuthUser(user):        AuthUser,
+    Extension(registry):   Extension<Arc<AgentRegistry>>,
     Extension(supervisor): Extension<Arc<Supervisor>>,
     Path(agent_id):        Path<String>,
 ) -> impl IntoResponse {
@@ -276,6 +316,11 @@ pub async fn pause_agent(
         Ok(id) => id,
         Err(msg) => return (StatusCode::BAD_REQUEST, Json(error(&msg))).into_response(),
     };
+    let is_admin = user.role == crate::auth::models::Role::Admin;
+    let (present, owner) = agent_owner(&registry, agent_id);
+    if present && !can_view_agent(owner.as_deref(), &user.id, is_admin) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     match supervisor.pause(agent_id).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::CONFLICT, Json(error(&e.to_string()))).into_response(),
@@ -283,7 +328,8 @@ pub async fn pause_agent(
 }
 
 pub async fn resume_agent(
-    AuthUser(_user):       AuthUser,
+    AuthUser(user):        AuthUser,
+    Extension(registry):   Extension<Arc<AgentRegistry>>,
     Extension(supervisor): Extension<Arc<Supervisor>>,
     Path(agent_id):        Path<String>,
 ) -> impl IntoResponse {
@@ -291,6 +337,11 @@ pub async fn resume_agent(
         Ok(id) => id,
         Err(msg) => return (StatusCode::BAD_REQUEST, Json(error(&msg))).into_response(),
     };
+    let is_admin = user.role == crate::auth::models::Role::Admin;
+    let (present, owner) = agent_owner(&registry, agent_id);
+    if present && !can_view_agent(owner.as_deref(), &user.id, is_admin) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     match supervisor.resume(agent_id).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (StatusCode::CONFLICT, Json(error(&e.to_string()))).into_response(),
@@ -317,6 +368,8 @@ pub struct AuditRowDto {
     pub id:        i64,
     pub ts_ms:     i64,
     pub agent_id:  String,
+    /// Initiating user (`None` = system-initiated). Lets the UI show an owner.
+    pub user_id:   Option<String>,
     pub kind:      &'static str,
     pub event:     AuditEvent,
     pub prev_hmac: String,
@@ -329,6 +382,7 @@ impl From<AuditRecord> for AuditRowDto {
             id:        r.id,
             ts_ms:     r.ts_ms,
             agent_id:  r.agent_id.to_string(),
+            user_id:   r.user_id,
             kind:      r.event.kind(),
             event:     r.event,
             prev_hmac: r.prev_hmac,
@@ -347,10 +401,14 @@ pub struct AuditResponse {
 }
 
 pub async fn list_audit(
-    AuthUser(_user):       AuthUser,
+    // Per-user scope: admins see every agent's events (system-wide); a
+    // non-admin sees only rows for agents they initiated. Pre-migration rows
+    // have user_id = NULL and are therefore admin-only.
+    AuthUser(user):        AuthUser,
     Extension(supervisor): Extension<Arc<Supervisor>>,
     Query(q):              Query<AuditQuery>,
 ) -> impl IntoResponse {
+    let is_admin = user.role == crate::auth::models::Role::Admin;
     let store = match supervisor.audit_store() {
         Some(s) => s,
         None    => return (
@@ -380,6 +438,8 @@ pub async fn list_audit(
         since_ms: q.since_ms,
         until_ms: q.until_ms,
         limit:    q.limit,
+        // Non-admins are scoped to their own rows; admins get everything.
+        user_id:  if is_admin { None } else { Some(user.id.clone()) },
     };
     let rows = match store.query(&filter) {
         Ok(r)  => r,
@@ -475,7 +535,7 @@ pub struct ProgressEntry {
 }
 
 pub async fn agent_activity(
-    AuthUser(_user):       AuthUser,
+    AuthUser(user):        AuthUser,
     Extension(registry):   Extension<Arc<AgentRegistry>>,
     audit_store:           Option<Extension<Arc<crate::agent::AuditStore>>>,
     task_artifacts:        Option<Extension<Arc<crate::task_artifacts::TaskArtifactsStore>>>,
@@ -485,6 +545,14 @@ pub async fn agent_activity(
         Ok(id) => id,
         Err(msg) => return (StatusCode::BAD_REQUEST, Json(error(&msg))).into_response(),
     };
+
+    // Ownership gate (read endpoint — fail closed). If the agent has dropped
+    // from the registry we can't determine the owner; a non-admin is denied.
+    let is_admin = user.role == crate::auth::models::Role::Admin;
+    let (present, owner) = agent_owner(&registry, aid);
+    if !is_admin && (!present || !can_view_agent(owner.as_deref(), &user.id, is_admin)) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
 
     // Live agent (may be None for rewatch of completed tasks that
     // dropped from the registry).
@@ -556,7 +624,7 @@ pub struct StdoutResponse {
 }
 
 pub async fn agent_stdout(
-    AuthUser(_user):       AuthUser,
+    AuthUser(user):        AuthUser,
     Extension(registry):   Extension<Arc<AgentRegistry>>,
     task_artifacts:        Option<Extension<Arc<crate::task_artifacts::TaskArtifactsStore>>>,
     Path(agent_id):        Path<String>,
@@ -566,6 +634,12 @@ pub async fn agent_stdout(
         Ok(id) => id,
         Err(msg) => return (StatusCode::BAD_REQUEST, Json(error(&msg))).into_response(),
     };
+    // Ownership gate (read endpoint — fail closed when owner unknown).
+    let is_admin = user.role == crate::auth::models::Role::Admin;
+    let (present, owner) = agent_owner(&registry, aid);
+    if !is_admin && (!present || !can_view_agent(owner.as_deref(), &user.id, is_admin)) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let Some(Extension(arts)) = task_artifacts else {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(error("task artifacts not wired"))).into_response();
     };
@@ -616,7 +690,7 @@ pub async fn agent_stdout(
 /// the audit/progress counts change. Closes when the agent reaches a
 /// terminal state AND no new events arrive for ~3s.
 pub async fn agent_activity_stream(
-    AuthUser(_user):       AuthUser,
+    AuthUser(user):        AuthUser,
     Extension(registry):   Extension<Arc<AgentRegistry>>,
     audit_store:           Option<Extension<Arc<crate::agent::AuditStore>>>,
     task_artifacts:        Option<Extension<Arc<crate::task_artifacts::TaskArtifactsStore>>>,
@@ -628,6 +702,12 @@ pub async fn agent_activity_stream(
         Ok(id) => id,
         Err(msg) => return (StatusCode::BAD_REQUEST, Json(error(&msg))).into_response(),
     };
+    // Ownership gate (read endpoint — fail closed when owner unknown).
+    let is_admin = user.role == crate::auth::models::Role::Admin;
+    let (present, owner) = agent_owner(&registry, aid);
+    if !is_admin && (!present || !can_view_agent(owner.as_deref(), &user.id, is_admin)) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<SseEvent, std::convert::Infallible>>(8);
     let audit = audit_store.map(|Extension(s)| s);
     let arts = task_artifacts.map(|Extension(s)| s);
@@ -700,7 +780,7 @@ pub async fn agent_activity_stream(
 /// content as the log file grows. Closes when the agent reaches
 /// terminal AND no new bytes arrive for 3s.
 pub async fn agent_stdout_stream(
-    AuthUser(_user):       AuthUser,
+    AuthUser(user):        AuthUser,
     Extension(registry):   Extension<Arc<AgentRegistry>>,
     task_artifacts:        Option<Extension<Arc<crate::task_artifacts::TaskArtifactsStore>>>,
     Path(agent_id):        Path<String>,
@@ -712,6 +792,12 @@ pub async fn agent_stdout_stream(
         Ok(id) => id,
         Err(msg) => return (StatusCode::BAD_REQUEST, Json(error(&msg))).into_response(),
     };
+    // Ownership gate (read endpoint — fail closed when owner unknown).
+    let is_admin = user.role == crate::auth::models::Role::Admin;
+    let (present, owner) = agent_owner(&registry, aid);
+    if !is_admin && (!present || !can_view_agent(owner.as_deref(), &user.id, is_admin)) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let Some(Extension(arts)) = task_artifacts else {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(error("task artifacts not wired"))).into_response();
     };

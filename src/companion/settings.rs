@@ -36,6 +36,92 @@ pub struct CompanionCadence {
     pub min_gap_minutes: Option<i64>,
 }
 
+// ── Presence (rhythm + personality) tuning ─────────────────────────────────
+//
+// The "Presence" feature set: how MIRA reaches out (rhythm) and how it sounds
+// (personality). Stored as JSON in `presence_json` so new knobs need no schema
+// change (mirrors `cadence`). Pass 1 = friend/rhythm/tone; the care-net lands
+// in a later pass.
+
+/// How proactive sends are timed. `Fuzzy` = a daily band placed at varied,
+/// non-deterministic times (the "friend, not an alarm clock" model — the
+/// default). `Scheduled` = fire at specific local clock times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FrequencyMode {
+    #[default]
+    Fuzzy,
+    Scheduled,
+}
+
+/// Personality sliders, each `0..=100` (50 = neutral). The Presence page also
+/// offers preset buttons that just set these to fixed levels.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ToneAxes {
+    pub warmth:      u8,
+    pub playfulness: u8,
+    pub verbosity:   u8,
+}
+impl Default for ToneAxes {
+    fn default() -> Self { Self { warmth: 50, playfulness: 50, verbosity: 50 } }
+}
+
+/// Which kinds of proactive message MIRA may send. The dispatcher weights
+/// across the enabled set per send (and biases by context). Jokes default OFF
+/// (opt-in humour); the rest default on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct MessageMix {
+    pub check_in:      bool,
+    pub joke:          bool,
+    pub status_update: bool,
+    pub follow_up:     bool,
+    pub share:         bool,
+    pub encouragement: bool,
+}
+impl Default for MessageMix {
+    fn default() -> Self {
+        Self { check_in: true, joke: false, status_update: true,
+               follow_up: true, share: true, encouragement: true }
+    }
+}
+
+fn default_min_per_day() -> u32 { 1 }
+fn default_true() -> bool { true }
+
+/// Per-user Presence tuning. Empty JSON (`{}`) deserialises to all defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresenceTuning {
+    #[serde(default)]
+    pub frequency_mode: FrequencyMode,
+    /// Fuzzy-mode lower bound (messages per user-local day). The upper bound
+    /// is `cadence.max_per_day` (which falls back to the global cap when None).
+    #[serde(default = "default_min_per_day")]
+    pub min_per_day: u32,
+    /// `Scheduled`-mode local times, `"HH:MM"`. Ignored in `Fuzzy` mode.
+    #[serde(default)]
+    pub scheduled_times: Vec<String>,
+    #[serde(default)]
+    pub tone: ToneAxes,
+    #[serde(default)]
+    pub message_mix: MessageMix,
+    /// Include "here's what I've been up to" updates drawn from MIRA's
+    /// autonomous agents / automations.
+    #[serde(default = "default_true")]
+    pub share_agent_activity: bool,
+}
+impl Default for PresenceTuning {
+    fn default() -> Self {
+        Self {
+            frequency_mode:       FrequencyMode::default(),
+            min_per_day:          default_min_per_day(),
+            scheduled_times:      Vec::new(),
+            tone:                 ToneAxes::default(),
+            message_mix:          MessageMix::default(),
+            share_agent_activity: true,
+        }
+    }
+}
+
 // Per-user companion-mode state. JSON fields (`quiet_hours`,
 // `preferred_channels`) are stored as text and parsed on read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +175,9 @@ pub struct CompanionSettings {
     // `companion_configure`.
     #[serde(default)]
     pub cadence: CompanionCadence,
+    // Presence (rhythm + personality) tuning. Empty JSON = all defaults.
+    #[serde(default)]
+    pub presence: PresenceTuning,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -140,6 +229,7 @@ impl CompanionStore {
                 checkins_today_count          INTEGER NOT NULL DEFAULT 0,
                 checkins_today_day            TEXT,
                 cadence_json                  TEXT NOT NULL DEFAULT '{}',
+                presence_json                 TEXT NOT NULL DEFAULT '{}',
                 created_at                    INTEGER NOT NULL,
                 updated_at                    INTEGER NOT NULL
             );
@@ -180,6 +270,11 @@ impl CompanionStore {
         // max_per_day, min_gap_minutes). Empty '{}' = inherit global defaults.
         add("ALTER TABLE companion_settings \
              ADD COLUMN cadence_json TEXT NOT NULL DEFAULT '{}'")?;
+        // 0.276.0 — Presence tuning (JSON: frequency_mode, min_per_day,
+        // scheduled_times, tone axes, message_mix, share_agent_activity).
+        // Empty '{}' = all defaults.
+        add("ALTER TABLE companion_settings \
+             ADD COLUMN presence_json TEXT NOT NULL DEFAULT '{}'")?;
         Ok(())
     }
 
@@ -229,7 +324,7 @@ impl CompanionStore {
                     safety_contact_user_id, setup_completed_at,
                     last_checkin_at, consecutive_missed_checkins,
                     daily_briefing_enabled, daily_briefing_hour, last_briefing_at,
-                    created_at, updated_at, cadence_json
+                    created_at, updated_at, cadence_json, presence_json
              FROM companion_settings WHERE user_id = ?1",
             params![user_id],
             row_to_settings,
@@ -248,6 +343,7 @@ impl CompanionStore {
         let quiet_json = serde_json::to_string(&s.quiet_hours)?;
         let chan_json  = serde_json::to_string(&s.preferred_channels)?;
         let cadence_json = serde_json::to_string(&s.cadence)?;
+        let presence_json = serde_json::to_string(&s.presence)?;
         let conn = self.conn.lock().expect("companion store poisoned");
         conn.execute(
             "INSERT INTO companion_settings (
@@ -256,9 +352,9 @@ impl CompanionStore {
                 safety_contact_user_id, setup_completed_at,
                 last_checkin_at, consecutive_missed_checkins,
                 daily_briefing_enabled, daily_briefing_hour,
-                cadence_json,
+                cadence_json, presence_json,
                 created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(user_id) DO UPDATE SET
                 enabled                 = excluded.enabled,
                 paused_until            = excluded.paused_until,
@@ -269,6 +365,7 @@ impl CompanionStore {
                 daily_briefing_enabled  = excluded.daily_briefing_enabled,
                 daily_briefing_hour     = excluded.daily_briefing_hour,
                 cadence_json            = excluded.cadence_json,
+                presence_json           = excluded.presence_json,
                 updated_at              = excluded.updated_at",
             params![
                 s.user_id,
@@ -283,6 +380,7 @@ impl CompanionStore {
                 if s.daily_briefing_enabled { 1i64 } else { 0i64 },
                 s.daily_briefing_hour as i64,
                 cadence_json,
+                presence_json,
                 s.created_at.timestamp_millis(),
                 s.updated_at.timestamp_millis(),
             ],
@@ -369,7 +467,7 @@ impl CompanionStore {
                     safety_contact_user_id, setup_completed_at,
                     last_checkin_at, consecutive_missed_checkins,
                     daily_briefing_enabled, daily_briefing_hour, last_briefing_at,
-                    created_at, updated_at, cadence_json
+                    created_at, updated_at, cadence_json, presence_json
              FROM companion_settings
              WHERE enabled = 1
                AND setup_completed_at IS NOT NULL
@@ -411,10 +509,12 @@ fn row_to_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompanionSetting
     let created_ms:      i64         = row.get(12)?;
     let updated_ms:      i64         = row.get(13)?;
     let cadence_json:    String      = row.get(14)?;
+    let presence_json:   String      = row.get(15)?;
 
-    // A malformed cadence blob falls back to "inherit defaults" rather than
-    // failing the whole row read.
+    // A malformed cadence/presence blob falls back to "inherit defaults"
+    // rather than failing the whole row read.
     let cadence: CompanionCadence = serde_json::from_str(&cadence_json).unwrap_or_default();
+    let presence: PresenceTuning  = serde_json::from_str(&presence_json).unwrap_or_default();
 
     let quiet_hours: Vec<(String, String)> = serde_json::from_str(&quiet_json)
         .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
@@ -441,6 +541,7 @@ fn row_to_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompanionSetting
         daily_briefing_hour:    brief_hour_i.clamp(0, 23) as u8,
         last_briefing_at:       last_brief_ms.and_then(DateTime::from_timestamp_millis),
         cadence,
+        presence,
         created_at: DateTime::from_timestamp_millis(created_ms).unwrap_or_else(Utc::now),
         updated_at: DateTime::from_timestamp_millis(updated_ms).unwrap_or_else(Utc::now),
     })
@@ -473,6 +574,7 @@ mod tests {
             daily_briefing_hour: 7,
             last_briefing_at: None,
             cadence: CompanionCadence::default(),
+            presence: PresenceTuning::default(),
             created_at: now,
             updated_at: now,
         }
@@ -501,6 +603,38 @@ mod tests {
         assert_eq!(back.preferred_channels, vec!["signal".to_string(), "telegram".to_string()]);
         assert_eq!(back.safety_contact_user_id.as_deref(), Some("david"));
         assert!(back.setup_completed_at.is_some());
+    }
+
+    #[test]
+    fn presence_tuning_round_trips() {
+        let (_dir, store) = fresh_store();
+        let mut s = sample("alice");
+        s.presence.frequency_mode = FrequencyMode::Scheduled;
+        s.presence.min_per_day = 2;
+        s.presence.scheduled_times = vec!["09:00".into(), "18:30".into()];
+        s.presence.tone = ToneAxes { warmth: 80, playfulness: 70, verbosity: 30 };
+        s.presence.message_mix = MessageMix { joke: true, ..Default::default() };
+        s.presence.share_agent_activity = false;
+        store.upsert(&s).unwrap();
+
+        let back = store.get("alice").unwrap().unwrap().presence;
+        assert_eq!(back.frequency_mode, FrequencyMode::Scheduled);
+        assert_eq!(back.min_per_day, 2);
+        assert_eq!(back.scheduled_times, vec!["09:00".to_string(), "18:30".to_string()]);
+        assert_eq!(back.tone.warmth, 80);
+        assert_eq!(back.tone.verbosity, 30);
+        assert!(back.message_mix.joke);
+        assert!(!back.share_agent_activity);
+    }
+
+    #[test]
+    fn presence_defaults_when_column_empty() {
+        // Pre-migration rows / `{}` deserialise to sensible defaults, not an error.
+        let p: PresenceTuning = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.frequency_mode, FrequencyMode::Fuzzy);
+        assert_eq!(p.min_per_day, 1);
+        assert!(p.message_mix.check_in && !p.message_mix.joke);
+        assert!(p.share_agent_activity);
     }
 
     #[test]

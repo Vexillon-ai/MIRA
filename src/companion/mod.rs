@@ -305,6 +305,8 @@ impl CompanionSystem {
             last_briefing_at: prior.as_ref().and_then(|p| p.last_briefing_at),
             // Cadence overrides survive a disable/re-enable cycle.
             cadence: prior.as_ref().map(|p| p.cadence.clone()).unwrap_or_default(),
+            // Presence tuning likewise survives re-enable.
+            presence: prior.as_ref().map(|p| p.presence.clone()).unwrap_or_default(),
             created_at,
             updated_at: now,
         };

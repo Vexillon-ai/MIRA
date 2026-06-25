@@ -26,6 +26,9 @@ use crate::auth::{AdminUser, AuthUser};
 use crate::companion::groups::{
     CompanionGroupStore, GroupCompanionMember, GroupCompanionPolicy, SignalKind,
 };
+use crate::companion::settings::{
+    CompanionSettings, FrequencyMode, MessageMix, PresenceTuning, ToneAxes,
+};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -445,6 +448,168 @@ pub async fn enable_companion(
         "safety_contact_user_id": s.safety_contact_user_id,
         "max_per_day":            s.cadence.max_per_day,
     })))
+}
+
+// ── GET/PUT /api/me/companion — Presence settings (rhythm + personality) ──────
+//
+// The Presence page reads/writes the caller's OWN companion settings here.
+// Enabling/disabling stays on the dedicated enable/disable endpoints (the
+// safety-contact gate + persona seeding live there); this is pure tuning.
+
+/// Curated JSON for the Presence page. Flattens the per-user `CompanionSettings`
+/// into the rhythm + tone + mix fields the UI binds to.
+fn settings_to_dto(s: &CompanionSettings) -> serde_json::Value {
+    serde_json::json!({
+        "enabled":                s.enabled,
+        "active":                 s.is_active(Utc::now()),
+        "setup_completed":        s.setup_completed_at.is_some(),
+        "paused_until_ms":        s.paused_until.map(|d| d.timestamp_millis()),
+        "safety_contact_user_id": s.safety_contact_user_id,
+        "quiet_hours":            s.quiet_hours,
+        "preferred_channels":     s.preferred_channels,
+        "daily_briefing_enabled": s.daily_briefing_enabled,
+        "daily_briefing_hour":    s.daily_briefing_hour,
+        "last_checkin_at_ms":     s.last_checkin_at.map(|d| d.timestamp_millis()),
+        // Rhythm band: min from presence, max + gap from cadence overrides
+        // (null = inherit the instance default).
+        "min_per_day":            s.presence.min_per_day,
+        "max_per_day":            s.cadence.max_per_day,
+        "min_gap_minutes":        s.cadence.min_gap_minutes,
+        "max_unanswered_checkins": s.cadence.max_unanswered_checkins,
+        "frequency_mode":         s.presence.frequency_mode,
+        "scheduled_times":        s.presence.scheduled_times,
+        "tone":                   s.presence.tone,
+        "message_mix":            s.presence.message_mix,
+        "share_agent_activity":   s.presence.share_agent_activity,
+    })
+}
+
+/// GET /api/me/companion — the caller's Presence settings (defaults when the
+/// user has never enabled companion, so the page renders before first enable).
+pub async fn get_my_companion(
+    AuthUser(me):     AuthUser,
+    Extension(agent): Extension<Arc<AgentCore>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let sys = agent.companion().ok_or_else(|| err(
+        StatusCode::SERVICE_UNAVAILABLE, "companion feature not enabled on this server"))?;
+    let s = sys.store().get(&me.id)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("load: {e}")))?;
+    Ok(Json(match s {
+        Some(s) => settings_to_dto(&s),
+        // No row yet → report a disabled default so the page has something to bind.
+        None => serde_json::json!({
+            "enabled": false, "active": false, "setup_completed": false,
+            "quiet_hours": [], "preferred_channels": [],
+            "daily_briefing_enabled": false, "daily_briefing_hour": 7,
+            "min_per_day": PresenceTuning::default().min_per_day,
+            "max_per_day": serde_json::Value::Null,
+            "min_gap_minutes": serde_json::Value::Null,
+            "frequency_mode": FrequencyMode::default(),
+            "scheduled_times": [],
+            "tone": ToneAxes::default(),
+            "message_mix": MessageMix::default(),
+            "share_agent_activity": true,
+        }),
+    }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct UpdateCompanionRequest {
+    pub frequency_mode:        Option<FrequencyMode>,
+    pub min_per_day:           Option<u32>,
+    pub max_per_day:           Option<u32>,        // → cadence.max_per_day
+    pub min_gap_minutes:       Option<i64>,        // → cadence.min_gap_minutes
+    pub scheduled_times:       Option<Vec<String>>,
+    pub tone:                  Option<ToneAxes>,
+    pub message_mix:           Option<MessageMix>,
+    pub share_agent_activity:  Option<bool>,
+    pub quiet_hours:           Option<Vec<(String, String)>>,
+    pub preferred_channels:    Option<Vec<String>>,
+    pub daily_briefing_enabled: Option<bool>,
+    pub daily_briefing_hour:   Option<u8>,
+}
+
+/// PUT /api/me/companion — partial update of the caller's Presence tuning. Does
+/// NOT enable/disable companion (use the enable/disable endpoints); it tunes
+/// rhythm, tone, message mix, quiet hours, and the briefing. Creates a
+/// disabled row if none exists, so the page can pre-configure before enabling.
+pub async fn update_my_companion(
+    AuthUser(me):     AuthUser,
+    Extension(agent): Extension<Arc<AgentCore>>,
+    Json(body):       Json<UpdateCompanionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let sys = agent.companion().ok_or_else(|| err(
+        StatusCode::SERVICE_UNAVAILABLE, "companion feature not enabled on this server"))?;
+
+    // ── validate ──
+    if let Some(h) = body.daily_briefing_hour {
+        if h > 23 { return Err(err(StatusCode::BAD_REQUEST, "daily_briefing_hour must be 0..=23")); }
+    }
+    for axes in body.tone.iter() {
+        if axes.warmth > 100 || axes.playfulness > 100 || axes.verbosity > 100 {
+            return Err(err(StatusCode::BAD_REQUEST, "tone axes must be 0..=100"));
+        }
+    }
+    if let Some(times) = body.scheduled_times.as_ref() {
+        for t in times {
+            if !valid_hhmm(t) {
+                return Err(err(StatusCode::BAD_REQUEST, format!("scheduled time '{t}' must be HH:MM")));
+            }
+        }
+    }
+    // Band sanity: min must not exceed an explicit max.
+    if let (Some(mn), Some(mx)) = (body.min_per_day, body.max_per_day) {
+        if mn > mx { return Err(err(StatusCode::BAD_REQUEST, "min_per_day cannot exceed max_per_day")); }
+    }
+
+    let now = Utc::now();
+    // Start from existing settings, or a fresh disabled row.
+    let mut s = sys.store().get(&me.id)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("load: {e}")))?
+        .unwrap_or_else(|| CompanionSettings {
+            user_id: me.id.clone(),
+            enabled: false,
+            paused_until: None,
+            quiet_hours: vec![],
+            preferred_channels: vec![],
+            safety_contact_user_id: None,
+            setup_completed_at: None,
+            last_checkin_at: None,
+            consecutive_missed_checkins: 0,
+            daily_briefing_enabled: false,
+            daily_briefing_hour: 7,
+            last_briefing_at: None,
+            cadence: Default::default(),
+            presence: Default::default(),
+            created_at: now,
+            updated_at: now,
+        });
+
+    // ── apply provided fields ──
+    if let Some(v) = body.frequency_mode       { s.presence.frequency_mode = v; }
+    if let Some(v) = body.min_per_day          { s.presence.min_per_day = v; }
+    if let Some(v) = body.scheduled_times      { s.presence.scheduled_times = v; }
+    if let Some(v) = body.tone                 { s.presence.tone = v; }
+    if let Some(v) = body.message_mix          { s.presence.message_mix = v; }
+    if let Some(v) = body.share_agent_activity { s.presence.share_agent_activity = v; }
+    if let Some(v) = body.max_per_day          { s.cadence.max_per_day = Some(v); }
+    if let Some(v) = body.min_gap_minutes      { s.cadence.min_gap_minutes = Some(v); }
+    if let Some(v) = body.quiet_hours          { s.quiet_hours = v; }
+    if let Some(v) = body.preferred_channels   { s.preferred_channels = v; }
+    if let Some(v) = body.daily_briefing_enabled { s.daily_briefing_enabled = v; }
+    if let Some(v) = body.daily_briefing_hour  { s.daily_briefing_hour = v; }
+    s.updated_at = now;
+
+    sys.store().upsert(&s)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}")))?;
+    Ok(Json(settings_to_dto(&s)))
+}
+
+/// Minimal "HH:MM" (24h) validator for scheduled-mode times.
+fn valid_hhmm(s: &str) -> bool {
+    let (h, m) = match s.split_once(':') { Some(p) => p, None => return false };
+    matches!((h.parse::<u8>(), m.parse::<u8>()), (Ok(h), Ok(m)) if h <= 23 && m <= 59)
+        && h.len() == 2 && m.len() == 2
 }
 
 #[cfg(test)]

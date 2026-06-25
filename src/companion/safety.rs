@@ -537,6 +537,7 @@ mod tests {
             daily_briefing_hour: 7,
             last_briefing_at: None,
             cadence: Default::default(),
+            presence: Default::default(),
             created_at: now,
             updated_at: now,
         };
@@ -587,6 +588,7 @@ mod tests {
             daily_briefing_hour: 7,
             last_briefing_at: None,
             cadence: Default::default(),
+            presence: Default::default(),
             created_at: now,
             updated_at: now,
         }).unwrap();

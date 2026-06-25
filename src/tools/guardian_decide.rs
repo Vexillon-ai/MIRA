@@ -50,7 +50,7 @@ impl GuardianDecideTool {
 
     fn record(&self, id: &str, kind: &str, decision: &str, detail: String) {
         if let Some(a) = &self.audit {
-            let _ = a.record(guardian_agent_id(), AuditEvent::GuardianAction {
+            let _ = a.record(guardian_agent_id(), None, AuditEvent::GuardianAction {
                 action_id: id.to_string(), action_kind: kind.to_string(),
                 decision: decision.to_string(), detail: Some(detail),
             });

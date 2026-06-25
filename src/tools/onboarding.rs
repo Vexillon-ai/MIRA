@@ -44,7 +44,7 @@ use crate::onboarding::{write_profile_section, OnboardingSchema, WriteTarget};
 use crate::tools::{Tier, Tool, ToolArgs, ToolResult, ToolVisibility};
 use crate::wiki::{Provenance, WikiOp, WikiPath, WikiRegistry};
 use crate::MiraError;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 // ── Shared services ──────────────────────────────────────────────────────────
 
@@ -62,6 +62,13 @@ pub struct OnboardingServices {
     /// without a wiki registry; the bridge is best-effort and never
     /// fails the underlying onboarding write.
     pub wiki:     Option<Arc<WikiRegistry>>,
+    /// Optional companion system — when wired, onboarding answers
+    /// configure (and, for admins, enable) Presence check-ins:
+    /// `check_in_cadence` maps to the rhythm band, and a completed
+    /// onboarding auto-enables companion mode for admin users. `None`
+    /// in test/minimal builds; every companion write is best-effort and
+    /// never fails the underlying onboarding write.
+    pub companion: Option<Arc<crate::companion::CompanionSystem>>,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -597,6 +604,18 @@ impl Tool for RecordProfileTool {
         // the source of truth; wiki is a readable reflection.
         sync_onboarding_to_wiki(svc, &user_id, target, &value).await;
 
+        // Presence bridge: the `check_in_cadence` answer pre-configures the
+        // user's companion rhythm band (min_per_day from presence, max_per_day
+        // from cadence). Best-effort — a companion error must never fail the
+        // record (the profile write above is the source of truth).
+        if key == "check_in_cadence" {
+            if let (Some(companion), Some(v)) =
+                (svc.companion.as_ref(), value_to_string(&value).ok().flatten())
+            {
+                apply_cadence_to_presence(companion, &user_id, &v);
+            }
+        }
+
         record_and_autoadvance(&svc.auth, &svc.schema, &user_id, Some(&key), None)?;
         try_auto_finalize(&svc.auth, &svc.schema, &user_id)?;
         let mut msg = format!("recorded {}", key);
@@ -926,6 +945,109 @@ fn parse_contact_hours(v: &Value) -> Result<(i64, i64), MiraError> {
     }
 }
 
+/// Map the onboarding `check_in_cadence` answer onto a Presence rhythm band
+/// `(min_per_day, max_per_day)`. The option strings come from
+/// `prompts/onboarding.yaml` (`rarely` / `when_needed` / `daily`); anything
+/// else returns `None` so the caller leaves the band untouched.
+fn cadence_to_band(value: &str) -> Option<(u32, u32)> {
+    match value.trim().to_lowercase().as_str() {
+        "rarely"      => Some((0, 1)),
+        "when_needed" => Some((1, 3)),
+        "daily"       => Some((3, 6)),
+        _             => None,
+    }
+}
+
+/// Best-effort: pre-configure the user's Presence rhythm band from their
+/// onboarding `check_in_cadence` answer. Reads the existing companion row (or
+/// synthesises a fresh DISABLED one), writes `presence.min_per_day` +
+/// `cadence.max_per_day`, and upserts. Never enables companion mode (that's the
+/// admin-only `complete_onboarding` path) and never propagates errors — a
+/// companion failure logs a warning and the onboarding record still succeeds.
+fn apply_cadence_to_presence(
+    companion: &crate::companion::CompanionSystem,
+    user_id:   &str,
+    value:     &str,
+) {
+    let Some((min, max)) = cadence_to_band(value) else {
+        debug!("onboarding->presence: unknown cadence '{value}', leaving band untouched");
+        return;
+    };
+    let now = chrono::Utc::now();
+    let store = companion.store();
+    let mut settings = match store.get(user_id) {
+        Ok(Some(s)) => s,
+        Ok(None) => crate::companion::CompanionSettings {
+            user_id: user_id.to_string(),
+            enabled: false,
+            paused_until: None,
+            quiet_hours: vec![],
+            preferred_channels: vec![],
+            safety_contact_user_id: None,
+            setup_completed_at: None,
+            last_checkin_at: None,
+            consecutive_missed_checkins: 0,
+            daily_briefing_enabled: false,
+            daily_briefing_hour: 7,
+            last_briefing_at: None,
+            cadence: Default::default(),
+            presence: Default::default(),
+            created_at: now,
+            updated_at: now,
+        },
+        Err(e) => {
+            warn!("onboarding->presence: get('{user_id}') failed: {e}");
+            return;
+        }
+    };
+    settings.presence.min_per_day = min;
+    settings.cadence.max_per_day = Some(max);
+    settings.updated_at = now;
+    if let Err(e) = store.upsert(&settings) {
+        warn!("onboarding->presence: upsert('{user_id}') failed: {e}");
+    } else {
+        info!(
+            "onboarding->presence: set rhythm band {min}..{max}/day for '{user_id}' \
+             from check_in_cadence='{value}'"
+        );
+    }
+}
+
+/// Best-effort: on onboarding completion, auto-enable companion check-ins for
+/// ADMIN users (the safety-contact gate is relaxed for admins, mirroring the
+/// `companion_enable` tool / HTTP endpoint). Non-admins are left
+/// pre-configured-but-disabled — they enable later via the wizard / chat with a
+/// safety contact. Never propagates errors; a companion failure logs a warning
+/// and onboarding still completes. No-op when the companion system isn't wired.
+fn maybe_enable_companion_on_complete(svc: &OnboardingServices, user_id: &str) {
+    let Some(companion) = svc.companion.as_ref() else { return; };
+
+    let role = match svc.auth.get_user(user_id) {
+        Ok(Some(u)) => u.role,
+        Ok(None) => {
+            warn!("onboarding->companion: user '{user_id}' not found, skipping auto-enable");
+            return;
+        }
+        Err(e) => {
+            warn!("onboarding->companion: get_user('{user_id}') failed: {e}");
+            return;
+        }
+    };
+
+    if role != crate::auth::Role::Admin {
+        debug!("onboarding->companion: '{user_id}' is non-admin, leaving companion disabled");
+        return;
+    }
+
+    // Admins enable with no safety contact — the system fn accepts `None`
+    // (the contact-for-non-admins rule lives in the caller layer). The safety
+    // floor still audit-logs distress; it just won't deliver outbound notices.
+    match companion.enable(user_id, None) {
+        Ok(_) => info!("onboarding->companion: auto-enabled check-ins for admin '{user_id}'"),
+        Err(e) => warn!("onboarding->companion: enable('{user_id}') failed: {e}"),
+    }
+}
+
 /// Map memory-seed question keys to memory categories. Falls back to `Fact`
 /// so an unmapped `memory.seed` question still stores *something* sensible.
 fn seed_category_for(key: &str) -> Category {
@@ -1090,7 +1212,20 @@ impl Tool for CompleteOnboardingTool {
         let summary = args.get("summary").and_then(|v| v.as_str());
 
         match finalize_onboarding(&self.services.auth, &self.services.schema, &user_id, summary) {
-            Ok(()) => Ok(ToolResult::success("onboarding complete")),
+            Ok(()) => {
+                // Presence bridge: auto-enable companion check-ins for ADMIN
+                // users once onboarding finalizes. Non-admins are left
+                // pre-configured-but-disabled — the safety-contact gate still
+                // stands for them (enable goes through the wizard / chat with a
+                // contact). Best-effort: a companion error never fails
+                // completion.
+                maybe_enable_companion_on_complete(&self.services, &user_id);
+                Ok(ToolResult::success(
+                    "onboarding complete\n(Companion check-ins are set up from your answers — \
+                     you can enable/disable/pause or fine-tune them anytime on the Presence \
+                     page, or just ask me, e.g. 'message me less' or 'be funnier'.)"
+                ))
+            }
             Err(FinalizeError::UntouchedRequiredGroups(groups)) => {
                 let mut msg = format!(
                     "Not done yet — these required groups aren't covered: {}. Ask at least \
@@ -1276,6 +1411,7 @@ mod tests {
         let services = Arc::new(OnboardingServices {
             auth, history, memory, schema, data_dir,
             wiki: None,
+            companion: None,
         });
         (dir, user.id, services)
     }
@@ -1293,6 +1429,7 @@ mod tests {
             schema:   Arc::clone(&services.schema),
             data_dir: services.data_dir.clone(),
             wiki:     Some(wiki_reg),
+            companion: services.companion.clone(),
         });
         (dir, uid, services)
     }
@@ -1997,5 +2134,119 @@ mod tests {
         let wiki_dir = svc.data_dir.join("wikis").join("users").join(&uid);
         assert!(!wiki_dir.exists(),
             "wiki dir should not be created when bridge isn't wired");
+    }
+
+    // ── Presence bridge ──────────────────────────────────────────────────────
+
+    /// Rebuild the shared services with a companion system wired in (opened in
+    /// the same temp `data_dir` as the auth/memory/history stores) and the auth
+    /// service installed so the companion role check resolves.
+    fn with_companion(
+        svc: &Arc<OnboardingServices>,
+    ) -> (Arc<crate::companion::CompanionSystem>, Arc<OnboardingServices>) {
+        let companion = Arc::new(
+            crate::companion::CompanionSystem::open(&svc.data_dir).unwrap()
+                .with_auth(Arc::clone(&svc.auth)),
+        );
+        let services = Arc::new(OnboardingServices {
+            auth:      Arc::clone(&svc.auth),
+            history:   Arc::clone(&svc.history),
+            memory:    Arc::clone(&svc.memory),
+            schema:    Arc::clone(&svc.schema),
+            data_dir:  svc.data_dir.clone(),
+            wiki:      svc.wiki.clone(),
+            companion: Some(Arc::clone(&companion)),
+        });
+        (companion, services)
+    }
+
+    #[test]
+    fn cadence_to_band_maps_known_options() {
+        assert_eq!(cadence_to_band("rarely"),      Some((0, 1)));
+        assert_eq!(cadence_to_band("when_needed"), Some((1, 3)));
+        assert_eq!(cadence_to_band("daily"),       Some((3, 6)));
+        // Case / whitespace tolerant.
+        assert_eq!(cadence_to_band("  Daily "),    Some((3, 6)));
+        // Unknown → no band.
+        assert_eq!(cadence_to_band("sometimes"),   None);
+    }
+
+    #[tokio::test]
+    async fn record_check_in_cadence_writes_presence_band() {
+        let (_dir, uid, base) = build_services().await;
+        let (companion, svc) = with_companion(&base);
+        let tool = RecordProfileTool::new(Arc::clone(&svc));
+
+        let out = tool.execute(json!({
+            "_user_id": uid,
+            "key": "check_in_cadence",
+            "value": "daily",
+        })).await.unwrap();
+        assert!(out.success, "{:?}", out);
+
+        // Band written: presence.min_per_day = 3, cadence.max_per_day = 6.
+        let s = companion.get(&uid).unwrap().expect("companion row created");
+        assert_eq!(s.presence.min_per_day, 3);
+        assert_eq!(s.cadence.max_per_day, Some(6));
+        // Pre-configured but NOT enabled — record never enables.
+        assert!(!s.enabled, "record_profile must not enable companion mode");
+    }
+
+    #[tokio::test]
+    async fn record_check_in_cadence_unknown_value_is_noop() {
+        let (_dir, uid, base) = build_services().await;
+        let (companion, svc) = with_companion(&base);
+        let tool = RecordProfileTool::new(Arc::clone(&svc));
+
+        // `check_in_cadence` writes to profile_md, so an arbitrary string is a
+        // valid record; only the band mapping rejects it (leaving no row).
+        tool.execute(json!({
+            "_user_id": uid,
+            "key": "check_in_cadence",
+            "value": "whenever you feel like it",
+        })).await.unwrap();
+
+        assert!(companion.get(&uid).unwrap().is_none(),
+            "unknown cadence must not create a companion row");
+    }
+
+    #[tokio::test]
+    async fn complete_onboarding_auto_enables_for_admin_only() {
+        use crate::auth::models::{NewUser, Role};
+
+        let (_dir, _uid, base) = build_services().await;
+        let (companion, svc) = with_companion(&base);
+
+        // Create an admin + a plain user.
+        let admin = svc.auth.create_user(NewUser {
+            username: "admin1".into(), display_name: None, email: None,
+            password: "test-password-1234".into(), role: Role::Admin,
+        }).unwrap();
+        let user = svc.auth.create_user(NewUser {
+            username: "plainuser".into(), display_name: None, email: None,
+            password: "test-password-1234".into(), role: Role::User,
+        }).unwrap();
+
+        // Both are already stamped onboarded so finalize is a clean success
+        // regardless of the required-group guard.
+        svc.auth.mark_onboarded(&admin.id).unwrap();
+        svc.auth.mark_onboarded(&user.id).unwrap();
+
+        let complete = CompleteOnboardingTool::new(Arc::clone(&svc));
+
+        let r = complete.execute(json!({ "_user_id": admin.id })).await.unwrap();
+        assert!(r.success, "{:?}", r);
+        assert!(r.output.contains("Presence page"),
+            "closing note should mention the Presence page, got: {}", r.output);
+        let admin_s = companion.get(&admin.id).unwrap().expect("admin companion row");
+        assert!(admin_s.enabled, "admin onboarding should auto-enable companion");
+
+        let r = complete.execute(json!({ "_user_id": user.id })).await.unwrap();
+        assert!(r.success, "{:?}", r);
+        // Non-admin: no row created (or, if one existed, not enabled).
+        match companion.get(&user.id).unwrap() {
+            None => {}
+            Some(s) => assert!(!s.enabled, "non-admin must not be auto-enabled"),
+        }
     }
 }

@@ -342,7 +342,7 @@ pub fn spawn_watch_loop(
                             crate::companion::dispatcher::DeliveryOutcome::Delivered(ch) => {
                                 info!("MIRA-Guardian reconciled isolation action [id={aid}] via '{ch}'");
                                 if let Some(au) = audit.as_ref() {
-                                    let _ = au.record(crate::agent::audit::guardian_agent_id(),
+                                    let _ = au.record(crate::agent::audit::guardian_agent_id(), None,
                                         crate::agent::audit::AuditEvent::GuardianAction {
                                             action_id: aid.clone(), action_kind: "reconcile".into(),
                                             decision: "reconciled".into(), detail: Some(msg.clone()) });
@@ -463,7 +463,7 @@ pub fn spawn_watch_loop(
                                         "ISOLATED (channel '{ch}' down): would autonomously {} {} — {} [dry_run=true]",
                                         kind_s, a.target.as_deref().unwrap_or(""), a.reason);
                                     warn!("MIRA-Guardian isolation autonomy (dry-run): {detail}");
-                                    let _ = au.record(guardian_agent_id(), AuditEvent::GuardianAction {
+                                    let _ = au.record(guardian_agent_id(), None, AuditEvent::GuardianAction {
                                         action_id: a.id.clone(), action_kind: kind_s,
                                         decision: "autonomous_dry_run".into(), detail: Some(detail) });
                                     continue;
@@ -478,7 +478,7 @@ pub fn spawn_watch_loop(
                                 // Grace window — a web decision during grace wins.
                                 info!("MIRA-Guardian: ISOLATED — {}s grace before autonomous '{kind_s}' [id={}]",
                                       config.guardian.isolation_grace_secs, a.id);
-                                let _ = au.record(guardian_agent_id(), AuditEvent::GuardianAction {
+                                let _ = au.record(guardian_agent_id(), None, AuditEvent::GuardianAction {
                                     action_id: a.id.clone(), action_kind: kind_s.clone(),
                                     decision: "autonomous_grace".into(),
                                     detail: Some(format!("{}s grace; channel '{ch}' down", config.guardian.isolation_grace_secs)) });
@@ -496,7 +496,7 @@ pub fn spawn_watch_loop(
                                     Ok(msg) => {
                                         let _ = store.decide(&a.id, GuardianActionStatus::Executed,
                                             &format!("AUTONOMOUS (isolated): {msg}"));
-                                        let _ = au.record(guardian_agent_id(), AuditEvent::GuardianAction {
+                                        let _ = au.record(guardian_agent_id(), None, AuditEvent::GuardianAction {
                                             action_id: a.id.clone(), action_kind: kind_s.clone(),
                                             decision: "auto_executed".into(), detail: Some(msg.clone()) });
                                         warn!("MIRA-Guardian AUTONOMOUS execution [id={}]: {msg}", a.id);
@@ -507,7 +507,7 @@ pub fn spawn_watch_loop(
                                     Err(e) => {
                                         let _ = store.decide(&a.id, GuardianActionStatus::Failed,
                                             &format!("AUTONOMOUS failed: {e}"));
-                                        let _ = au.record(guardian_agent_id(), AuditEvent::GuardianAction {
+                                        let _ = au.record(guardian_agent_id(), None, AuditEvent::GuardianAction {
                                             action_id: a.id.clone(), action_kind: kind_s.clone(),
                                             decision: "auto_failed".into(), detail: Some(e.clone()) });
                                         warn!("MIRA-Guardian AUTONOMOUS execution FAILED [id={}]: {e}", a.id);

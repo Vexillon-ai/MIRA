@@ -25,7 +25,7 @@ import {
 import { api } from '@/api/client'
 import { ttsApi } from '@/api/tts'
 import { channelAccountsApi, type ChannelKind } from '@/api/channelAccounts'
-import { companionApi } from '@/api/companion'
+import { companionApi, getPresence } from '@/api/companion'
 import type { User } from '@/api/types'
 import { useAuthStore } from '@/store/authStore'
 import { useUiStore } from '@/store/uiStore'
@@ -110,6 +110,25 @@ export default function SetupWizard() {
     staleTime: 60_000,
   })
   const contacts = users.filter((u) => u.id !== me?.id)
+
+  // Pre-seed the check-ins step from the user's onboarding cadence: their
+  // `check_in_cadence` answer wrote a Presence rhythm band whose upper bound is
+  // `max_per_day`. Reflect it here instead of the hardcoded default so the
+  // wizard shows what onboarding configured. Falls back to 3 when null/unset.
+  const { data: presence } = useQuery({
+    queryKey: ['companion', 'presence'],
+    queryFn: () => getPresence(),
+    enabled: show && step === 'checkins',
+    staleTime: 60_000,
+  })
+  // Seed once from the fetched value; the user can still edit the field after.
+  const [maxPerDaySeeded, setMaxPerDaySeeded] = useState(false)
+  useEffect(() => {
+    if (presence && !maxPerDaySeeded) {
+      setMaxPerDay(presence.max_per_day ?? 3)
+      setMaxPerDaySeeded(true)
+    }
+  }, [presence, maxPerDaySeeded])
 
   const advance = () => { setEngaged(true); setIdx((i) => Math.min(i + 1, STEP_ORDER.length - 1)) }
   const back = () => setIdx((i) => Math.max(i - 1, 0))

@@ -48,8 +48,8 @@ export default function StatusPage() {
           <div className={styles.grid}>
             <StatCard icon={<Server size={20} />} label="Version" value={`v${status.version}`} accent />
             <StatCard icon={<Clock size={20} />} label="Uptime" value={formatUptime(status.uptime_secs)} />
-            <StatCard icon={<Activity size={20} />} label="Provider" value={status.provider_name} />
-            <StatCard icon={<Wifi size={20} />} label="Active Sessions" value={String(status.active_sessions)} />
+            <StatCard icon={<Activity size={20} />} label="Provider" value={status.provider_name ?? '—'} />
+            <StatCard icon={<Wifi size={20} />} label="Active Sessions" value={status.active_sessions != null ? String(status.active_sessions) : '—'} />
           </div>
 
           {/* Database stats */}

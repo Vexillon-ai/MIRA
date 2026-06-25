@@ -701,6 +701,12 @@ pub fn build_router(
             // one shot — the HTTP equivalent of the chat `companion_enable` flow.
             .route("/api/me/companion/enable",
                    post(crate::server::handlers::companion::enable_companion))
+            // Presence settings (rhythm + personality) for the caller — read +
+            // partial-update. The Presence page binds to these; enabling stays
+            // on /enable (safety-contact gate + persona seeding).
+            .route("/api/me/companion",
+                   get(crate::server::handlers::companion::get_my_companion)
+                   .put(crate::server::handlers::companion::update_my_companion))
             // On-demand check-in trigger — fire a companion check-in to the
             // caller right now (bypassing scheduler policy) and return the
             // delivery outcome. Makes proactive delivery testable. (The

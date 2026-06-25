@@ -138,6 +138,10 @@ pub struct AuditRecord {
     pub ts_ms:     i64,
     pub agent_id:  AgentId,
     pub event:     AuditEvent,
+    /// Initiating user (the agent's `user_id`). `None` for system-initiated
+    /// agents (and pre-migration rows). Used as a per-user visibility filter
+    /// only — deliberately NOT part of the HMAC chain (see `record`).
+    pub user_id:   Option<String>,
     pub prev_hmac: String, // hex
     pub hmac:      String, // hex
 }
@@ -151,6 +155,10 @@ pub struct AuditFilter {
     pub since_ms:  Option<i64>,
     pub until_ms:  Option<i64>,
     pub limit:     Option<usize>,
+    /// Restrict to rows owned by this user_id. When set, system-initiated
+    /// rows (`user_id IS NULL`) are excluded — non-admins only see their own
+    /// agents' events. `None` = no user filter (admin / unfiltered view).
+    pub user_id:   Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -192,6 +200,7 @@ impl AuditStore {
                 agent_id    TEXT NOT NULL,
                 event_kind  TEXT NOT NULL,
                 event_json  TEXT NOT NULL,
+                user_id     TEXT,
                 prev_hmac   TEXT NOT NULL,
                 hmac        TEXT NOT NULL
             );
@@ -205,6 +214,18 @@ impl AuditStore {
             );
             "#,
         ).map_err(|e| MiraError::DatabaseError(e.to_string()))?;
+
+        // Idempotent migration for DBs created before the per-user column
+        // existed. SQLite has no "ADD COLUMN IF NOT EXISTS", so we add it and
+        // swallow the duplicate-column error if it already ran (e.g. a fresh DB
+        // that got `user_id` from the CREATE above). Pre-migration rows keep
+        // `user_id = NULL` (admin-only visibility).
+        if let Err(e) = conn.execute("ALTER TABLE agent_audit ADD COLUMN user_id TEXT", []) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(MiraError::DatabaseError(format!("add user_id column: {msg}")));
+            }
+        }
 
         let hmac_key = load_or_init_hmac_key(&conn)?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)), hmac_key })
@@ -223,6 +244,7 @@ impl AuditStore {
                 agent_id    TEXT NOT NULL,
                 event_kind  TEXT NOT NULL,
                 event_json  TEXT NOT NULL,
+                user_id     TEXT,
                 prev_hmac   TEXT NOT NULL,
                 hmac        TEXT NOT NULL
             );
@@ -238,7 +260,19 @@ impl AuditStore {
     /// Append one row. Computes the HMAC against the most recent row's
     /// HMAC (or `GENESIS_HMAC` for the first ever row). Returns the
     /// new row id.
-    pub fn record(&self, agent_id: AgentId, event: AuditEvent) -> Result<i64, AuditError> {
+    ///
+    /// `user_id` is the initiating user (the agent's `user_id`); `None` for
+    /// system-initiated agents. It is stored for per-user visibility filtering
+    /// only and is deliberately **NOT** part of the HMAC chain — the chain
+    /// inputs (`prev_hmac || ts_ms || agent_id | kind | event_json`) are
+    /// unchanged so existing chains keep verifying. `user_id` is a
+    /// non-tamper-protected filter field.
+    pub fn record(
+        &self,
+        agent_id: AgentId,
+        user_id:  Option<&str>,
+        event:    AuditEvent,
+    ) -> Result<i64, AuditError> {
         let event_json = serde_json::to_string(&event)
             .map_err(|e| AuditError::Db(format!("serialise event: {e}")))?;
         let kind = event.kind();
@@ -254,6 +288,8 @@ impl AuditStore {
         let prev_hmac_bytes = hex::decode(&prev_hmac_hex)
             .map_err(|e| AuditError::Db(format!("decode prev_hmac: {e}")))?;
 
+        // NB: user_id is intentionally excluded from the HMAC inputs (it is a
+        // filter field, not tamper-protected content).
         let hmac_hex = compute_chain_hmac(
             &self.hmac_key, &prev_hmac_bytes,
             ts_ms, &agent_id, kind, &event_json,
@@ -261,9 +297,9 @@ impl AuditStore {
 
         conn.execute(
             "INSERT INTO agent_audit
-               (ts_ms, agent_id, event_kind, event_json, prev_hmac, hmac)
-             VALUES (?, ?, ?, ?, ?, ?)",
-            params![ts_ms, agent_id.to_string(), kind, event_json, prev_hmac_hex, hmac_hex],
+               (ts_ms, agent_id, event_kind, event_json, user_id, prev_hmac, hmac)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![ts_ms, agent_id.to_string(), kind, event_json, user_id, prev_hmac_hex, hmac_hex],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -272,13 +308,19 @@ impl AuditStore {
     /// UI shows the latest activity at the top.
     pub fn query(&self, filter: &AuditFilter) -> Result<Vec<AuditRecord>, AuditError> {
         let mut sql = String::from(
-            "SELECT id, ts_ms, agent_id, event_kind, event_json, prev_hmac, hmac \
+            "SELECT id, ts_ms, agent_id, event_kind, event_json, user_id, prev_hmac, hmac \
              FROM agent_audit WHERE 1=1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(id) = filter.agent_id {
             sql.push_str(" AND agent_id = ?");
             args.push(Box::new(id.to_string()));
+        }
+        // Per-user scope: when set, only this user's rows (system rows with
+        // NULL user_id are excluded — admins query without this filter).
+        if let Some(uid) = &filter.user_id {
+            sql.push_str(" AND user_id = ?");
+            args.push(Box::new(uid.clone()));
         }
         if !filter.kinds.is_empty() {
             let qs = filter.kinds.iter().map(|_| "?").collect::<Vec<_>>().join(",");
@@ -305,14 +347,15 @@ impl AuditStore {
             let agent_id_str: String = r.get(2)?;
             let _kind:        String = r.get(3)?;
             let event_json:   String = r.get(4)?;
-            let prev_hmac:    String = r.get(5)?;
-            let hmac:         String = r.get(6)?;
-            Ok((id, ts_ms, agent_id_str, event_json, prev_hmac, hmac))
+            let user_id:      Option<String> = r.get(5)?;
+            let prev_hmac:    String = r.get(6)?;
+            let hmac:         String = r.get(7)?;
+            Ok((id, ts_ms, agent_id_str, event_json, user_id, prev_hmac, hmac))
         })?;
 
         let mut out = Vec::new();
         for row in rows {
-            let (id, ts_ms, agent_id_str, event_json, prev_hmac, hmac) = row?;
+            let (id, ts_ms, agent_id_str, event_json, user_id, prev_hmac, hmac) = row?;
             let agent_uuid = uuid::Uuid::parse_str(&agent_id_str)
                 .map_err(|e| AuditError::Db(format!("bad agent_id: {e}")))?;
             let event: AuditEvent = serde_json::from_str(&event_json)
@@ -320,7 +363,7 @@ impl AuditStore {
             out.push(AuditRecord {
                 id, ts_ms,
                 agent_id: AgentId(agent_uuid),
-                event, prev_hmac, hmac,
+                event, user_id, prev_hmac, hmac,
             });
         }
         Ok(out)
@@ -426,10 +469,10 @@ mod tests {
     fn record_and_query_round_trip() {
         let store = AuditStore::open_in_memory();
         let a = id();
-        store.record(a, AuditEvent::SpawnRequested {
+        store.record(a, None, AuditEvent::SpawnRequested {
             skill_id: "com.example.x".into(), budget_usd: 1.0,
         }).unwrap();
-        store.record(a, AuditEvent::StatusChange {
+        store.record(a, None, AuditEvent::StatusChange {
             from: "pending".into(), to: "running".into(),
         }).unwrap();
 
@@ -443,7 +486,7 @@ mod tests {
     #[test]
     fn first_row_chains_to_genesis() {
         let store = AuditStore::open_in_memory();
-        store.record(id(), AuditEvent::Interrupted { reason: "user".into() }).unwrap();
+        store.record(id(), None, AuditEvent::Interrupted { reason: "user".into() }).unwrap();
         let rows = store.query(&AuditFilter::default()).unwrap();
         assert_eq!(rows[0].prev_hmac, hex::encode([0u8; 32]));
     }
@@ -451,9 +494,9 @@ mod tests {
     #[test]
     fn each_subsequent_row_chains_to_prior_hmac() {
         let store = AuditStore::open_in_memory();
-        store.record(id(), AuditEvent::Interrupted { reason: "a".into() }).unwrap();
-        store.record(id(), AuditEvent::Interrupted { reason: "b".into() }).unwrap();
-        store.record(id(), AuditEvent::Interrupted { reason: "c".into() }).unwrap();
+        store.record(id(), None, AuditEvent::Interrupted { reason: "a".into() }).unwrap();
+        store.record(id(), None, AuditEvent::Interrupted { reason: "b".into() }).unwrap();
+        store.record(id(), None, AuditEvent::Interrupted { reason: "c".into() }).unwrap();
 
         let rows = store.query(&AuditFilter::default()).unwrap();
         // Sort oldest-first so we can compare row[i].prev_hmac == row[i-1].hmac.
@@ -466,7 +509,7 @@ mod tests {
     fn verify_chain_passes_on_clean_log() {
         let store = AuditStore::open_in_memory();
         for i in 0..5 {
-            store.record(id(), AuditEvent::Interrupted { reason: format!("r{i}") }).unwrap();
+            store.record(id(), None, AuditEvent::Interrupted { reason: format!("r{i}") }).unwrap();
         }
         store.verify_chain().expect("clean chain verifies");
     }
@@ -474,8 +517,8 @@ mod tests {
     #[test]
     fn verify_chain_detects_tampering() {
         let store = AuditStore::open_in_memory();
-        store.record(id(), AuditEvent::Interrupted { reason: "a".into() }).unwrap();
-        store.record(id(), AuditEvent::Interrupted { reason: "b".into() }).unwrap();
+        store.record(id(), None, AuditEvent::Interrupted { reason: "a".into() }).unwrap();
+        store.record(id(), None, AuditEvent::Interrupted { reason: "b".into() }).unwrap();
         // Corrupt row 1 in place.
         {
             let conn = store.conn.lock().unwrap();
@@ -491,9 +534,9 @@ mod tests {
     #[test]
     fn verify_chain_detects_deletion() {
         let store = AuditStore::open_in_memory();
-        store.record(id(), AuditEvent::Interrupted { reason: "a".into() }).unwrap();
-        store.record(id(), AuditEvent::Interrupted { reason: "b".into() }).unwrap();
-        store.record(id(), AuditEvent::Interrupted { reason: "c".into() }).unwrap();
+        store.record(id(), None, AuditEvent::Interrupted { reason: "a".into() }).unwrap();
+        store.record(id(), None, AuditEvent::Interrupted { reason: "b".into() }).unwrap();
+        store.record(id(), None, AuditEvent::Interrupted { reason: "c".into() }).unwrap();
         // Remove row 2 — row 3's prev_hmac no longer matches the row
         // before it (row 1's hmac).
         {
@@ -509,9 +552,9 @@ mod tests {
         let store = AuditStore::open_in_memory();
         let a = id();
         let b = id();
-        store.record(a, AuditEvent::Interrupted { reason: "x".into() }).unwrap();
-        store.record(b, AuditEvent::Interrupted { reason: "y".into() }).unwrap();
-        store.record(a, AuditEvent::Interrupted { reason: "z".into() }).unwrap();
+        store.record(a, None, AuditEvent::Interrupted { reason: "x".into() }).unwrap();
+        store.record(b, None, AuditEvent::Interrupted { reason: "y".into() }).unwrap();
+        store.record(a, None, AuditEvent::Interrupted { reason: "z".into() }).unwrap();
 
         let only_a = store.query(&AuditFilter { agent_id: Some(a), ..Default::default() }).unwrap();
         assert_eq!(only_a.len(), 2);
@@ -522,9 +565,9 @@ mod tests {
     fn filter_by_kind() {
         let store = AuditStore::open_in_memory();
         let a = id();
-        store.record(a, AuditEvent::Interrupted { reason: "x".into() }).unwrap();
-        store.record(a, AuditEvent::StatusChange { from: "running".into(), to: "completed".into() }).unwrap();
-        store.record(a, AuditEvent::Interrupted { reason: "y".into() }).unwrap();
+        store.record(a, None, AuditEvent::Interrupted { reason: "x".into() }).unwrap();
+        store.record(a, None, AuditEvent::StatusChange { from: "running".into(), to: "completed".into() }).unwrap();
+        store.record(a, None, AuditEvent::Interrupted { reason: "y".into() }).unwrap();
 
         let only_status = store.query(&AuditFilter {
             kinds: vec!["status_change"], ..Default::default()

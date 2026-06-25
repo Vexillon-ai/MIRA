@@ -16,7 +16,7 @@
 //! Variance comes from the `jitter` and "windows shouldn't be on the
 //! dot" semantics applied here.
 
-use chrono::{DateTime, Datelike, Duration, NaiveTime, TimeZone, Utc, Weekday};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -87,6 +87,14 @@ pub struct PolicyInputs {
     // time, capped at half this value so we can't drift past the
     // next tick.
     pub tick_interval_secs: u64,
+    // True when the fuzzy/scheduled rhythm engine says a planned slot
+    // is due *right now* (computed by the scheduler from
+    // `plan_day_slots` in Fuzzy mode, or the configured `scheduled_times`
+    // in Scheduled mode). The gates above (recent activity, min_gap,
+    // daily cap, unanswered, quiet hours) remain guards layered on top
+    // of this timing signal: even a due slot is suppressed if e.g. the
+    // user just messaged. `false` short-circuits to a `not_due` skip.
+    pub due_now: bool,
 }
 
 // Configurable bounds. Defaults match `design-docs/companion/design-proposal.md`.
@@ -193,6 +201,17 @@ pub fn evaluate(inputs: &PolicyInputs) -> Decision {
         }
     }
 
+    // 4b. Rhythm gate — even when every frequency guard above is
+    //  satisfied, only fire when the rhythm engine says a planned
+    //  slot is actually due now. This is what turns the previously
+    //  greedy "fire whenever allowed" behaviour into the friend-like
+    //  band of varied sends. The scheduler computes `due_now`
+    //  (Fuzzy: from `plan_day_slots`; Scheduled: from configured
+    //  times) so `evaluate` stays pure.
+    if !inputs.due_now {
+        return Decision::Skip { reason: "not_due" };
+    }
+
     // 5. Clear to fire. If this is the user's first-ever check-in
     //  note that in the reason so the log is informative.
     let reason = if inputs.last_checkin_at.is_none() { "first_run" } else { "window" };
@@ -267,6 +286,250 @@ pub fn local_weekday(now: DateTime<Utc>, tz_name: Option<&str>) -> Weekday {
     tz.from_utc_datetime(&now.naive_utc()).weekday()
 }
 
+// Resolve `now` (UTC) into the user's local calendar date + clock
+// time, given an IANA tz name (UTC fallback). The scheduler uses
+// this to ask "is one of today's planned slots due as of the local
+// clock?" — kept here next to `parse_tz` so the tz-resolution rule
+// (unknown/missing → UTC) is identical to `evaluate`'s.
+pub fn local_now_parts(now: DateTime<Utc>, tz_name: Option<&str>) -> (NaiveDate, NaiveTime) {
+    let tz = parse_tz(tz_name);
+    let local = tz.from_utc_datetime(&now.naive_utc());
+    (local.date_naive(), local.time())
+}
+
+// ── Fuzzy rhythm: day-slot planner ────────────────────────────────
+
+// Stable FNV-1a 64-bit hash over an arbitrary byte slice. Same
+// algorithm/constants as `jitter_for` so the variance "feel" is
+// consistent; pulled out here so the planner can seed multiple
+// derived values off one base hash. Pure + reproducible across
+// builds (no rand, no clock).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+// Derive a further 64-bit pseudo-random value from a base hash and a
+// counter (slot index). Mixing in the counter via the same FNV step
+// gives each slot its own well-distributed offset while staying a
+// pure function of (base, idx).
+fn mix(base: u64, idx: u64) -> u64 {
+    let mut h = base ^ idx;
+    h = h.wrapping_mul(0x100000001b3);
+    h ^= h >> 29; // a cheap final avalanche so low bits aren't sticky
+    h
+}
+
+// Minutes-since-local-midnight for a `NaiveTime`.
+fn mins_of(t: NaiveTime) -> i64 {
+    (t.hour() * 60 + t.minute()) as i64
+}
+
+// Build a `NaiveTime` from minutes-since-midnight, clamped to the
+// valid 0..=1439 range so arithmetic can never panic.
+fn time_from_mins(m: i64) -> NaiveTime {
+    let m = m.clamp(0, 24 * 60 - 1);
+    NaiveTime::from_hms_opt((m / 60) as u32, (m % 60) as u32, 0)
+        .unwrap_or(NaiveTime::MIN)
+}
+
+// Fallback contactable window when quiet hours can't be parsed or
+// would leave essentially no daytime gap. A sane "awake" span.
+const FALLBACK_CONTACTABLE: (i64, i64) = (8 * 60, 22 * 60); // 08:00–22:00
+
+// Compute the single contiguous contactable window (start,end) in
+// minutes-since-midnight as a NON-wrapping span (start < end), given
+// the user's quiet hours.
+//
+// v1 simplification: we model ONE contiguous contactable window. The
+// quiet window is the complement; for a normal midnight-wrapping
+// quiet span (e.g. 22:00–07:00) the complement is the natural daytime
+// block (07:00–22:00). For a non-wrapping quiet span (e.g. 13:00–
+// 15:00) the complement is two pieces — we keep only the LARGER one
+// (here 15:00–13:00-next-day collapses to the bigger of 00:00–13:00
+// vs 15:00–24:00). Multiple quiet windows are likewise reduced to the
+// largest single contactable gap. If quiet covers ~all day, or can't
+// be parsed, fall back to 08:00–22:00.
+fn contactable_window(
+    quiet_windows: &[(String, String)],
+    default_quiet: (&str, &str),
+) -> (i64, i64) {
+    // Resolve the effective quiet windows: user's, else the default.
+    let raw: Vec<(String, String)> = if quiet_windows.is_empty() {
+        vec![(default_quiet.0.to_string(), default_quiet.1.to_string())]
+    } else {
+        quiet_windows.to_vec()
+    };
+    let parsed = parse_windows(&raw);
+    if parsed.is_empty() {
+        return FALLBACK_CONTACTABLE;
+    }
+
+    // Mark every minute of the day as quiet (true) or free (false),
+    // honouring midnight-wrap. O(1440) — trivially cheap and dodges
+    // all the fiddly interval-complement edge cases.
+    let mut quiet = [false; 24 * 60];
+    for (s, e) in &parsed {
+        for (m, slot) in quiet.iter_mut().enumerate() {
+            if in_window(time_from_mins(m as i64), *s, *e) {
+                *slot = true;
+            }
+        }
+    }
+
+    // Find the largest contiguous run of free (non-quiet) minutes.
+    // We treat the day as linear 00:00..24:00 (no wrap for the free
+    // run) — the largest daytime block is what we want in practice,
+    // and wrapping the free side would put a send across midnight,
+    // which the quiet-hours gate would mostly reject anyway.
+    let mut best_start = 0i64;
+    let mut best_len = 0i64;
+    let mut cur_start = 0i64;
+    let mut cur_len = 0i64;
+    for (m, &is_quiet) in quiet.iter().enumerate() {
+        if is_quiet {
+            cur_len = 0;
+            cur_start = m as i64 + 1;
+        } else {
+            if cur_len == 0 {
+                cur_start = m as i64;
+            }
+            cur_len += 1;
+            if cur_len > best_len {
+                best_len = cur_len;
+                best_start = cur_start;
+            }
+        }
+    }
+
+    // If the day is (nearly) all quiet — less than min_gap's worth of
+    // free time, here a conservative 60 minutes — fall back so we
+    // never produce an empty or absurd window.
+    if best_len < 60 {
+        return FALLBACK_CONTACTABLE;
+    }
+    (best_start, best_start + best_len)
+}
+
+// Pure planner: place this user's proactive sends for `local_date`
+// across their contactable window at varied, deterministic-but-
+// non-descript times.
+//
+// Determinism: every random choice (target count + per-slot offset)
+// is seeded off a stable FNV-1a hash of `(seed_user_id, local_date)`,
+// mirroring `jitter_for`'s hashing style. No `rand`, no clock — the
+// same (user, day) always yields the same plan, but it varies across
+// users and across days.
+//
+// Returns SORTED local `NaiveTime`s, all inside the contactable
+// window, spaced ≥ `min_gap_minutes` apart, with a count inside the
+// `[min_per_day, max_per_day]` band (reduced only when the window is
+// too narrow to hold the band at the required spacing).
+pub fn plan_day_slots(
+    seed_user_id: &str,
+    local_date: NaiveDate,
+    quiet_windows: &[(String, String)],
+    default_quiet: (&str, &str),
+    min_per_day: u32,
+    max_per_day: u32,
+    min_gap_minutes: i64,
+) -> Vec<NaiveTime> {
+    // Contactable span [start,end) in minutes-since-midnight.
+    let (win_start, win_end) = contactable_window(quiet_windows, default_quiet);
+    let win_minutes = (win_end - win_start).max(0);
+    if win_minutes <= 0 {
+        return Vec::new();
+    }
+
+    // Stable base hash over (user, date). The date string gives a
+    // distinct seed per day; the user id distinguishes users.
+    let mut seed = String::with_capacity(seed_user_id.len() + 12);
+    seed.push_str(seed_user_id);
+    seed.push('|');
+    seed.push_str(&local_date.to_string());
+    let base = fnv1a(seed.as_bytes());
+
+    // Target count inside the band. `lo`/`hi` are normalised so a
+    // mis-ordered (min > max) pair can't underflow.
+    let lo = min_per_day.min(max_per_day);
+    let hi = min_per_day.max(max_per_day);
+    let span = (hi - lo + 1) as u64; // ≥ 1
+    let mut target = lo + (base % span) as u32;
+
+    // Fit to min_gap: the window must hold `target` sends each
+    // ≥ min_gap apart. Picks are clamped to `[win_start, win_end-1]`,
+    // so the usable span is `win_minutes - 1`; with N sends the
+    // tightest packing spans (N-1)*gap, giving capacity
+    // `(win_minutes-1)/gap + 1`. (Using `win_minutes` here would
+    // over-count by one at the exact boundary and squeeze the last
+    // gap below `min_gap`.)
+    if min_gap_minutes > 0 {
+        let usable = (win_minutes - 1).max(0);
+        let capacity = (usable / min_gap_minutes + 1) as u32;
+        if target > capacity {
+            target = capacity;
+        }
+    }
+    // Never drop below 1 when the window is non-empty and the user
+    // asked for at least one send a day.
+    if target == 0 && min_per_day >= 1 && win_minutes > 0 {
+        target = 1;
+    }
+    if target == 0 {
+        return Vec::new();
+    }
+
+    // Place `target` times: split the window into equal segments and
+    // pick a pseudo-random offset inside each so times look organic
+    // (not on the hour/half-hour). Then sweep left→right enforcing
+    // ≥ min_gap spacing, pushing a too-close pick later (clamped to
+    // the window end). Equal segmentation keeps them spread out
+    // across the whole day rather than clustering.
+    let seg = win_minutes / target as i64; // ≥ 0; segment width
+    let mut picks: Vec<i64> = Vec::with_capacity(target as usize);
+    for i in 0..target as i64 {
+        let seg_start = win_start + i * seg;
+        // Last segment absorbs the remainder so we use the full span.
+        let seg_end = if i == target as i64 - 1 {
+            win_end
+        } else {
+            seg_start + seg
+        };
+        let seg_width = (seg_end - seg_start).max(1);
+        let r = mix(base, i as u64) % seg_width as u64;
+        picks.push(seg_start + r as i64);
+    }
+    picks.sort_unstable();
+
+    // Enforce spacing + window bounds in a single forward sweep.
+    let mut out: Vec<i64> = Vec::with_capacity(picks.len());
+    let mut prev: Option<i64> = None;
+    for p in picks {
+        let mut m = p.clamp(win_start, win_end - 1);
+        if let Some(pv) = prev {
+            if m - pv < min_gap_minutes {
+                m = (pv + min_gap_minutes).min(win_end - 1);
+            }
+        }
+        // If pushing forward collided with the window end and would
+        // duplicate the previous pick, drop it rather than stack two
+        // sends on the same minute.
+        if let Some(pv) = prev {
+            if m <= pv {
+                continue;
+            }
+        }
+        prev = Some(m);
+        out.push(m);
+    }
+
+    out.into_iter().map(time_from_mins).collect()
+}
+
 // ── Cadence adjustment ────────────────────────────────────────────
 
 // Bounds for the adjusted min_gap. Floors at the baseline so a
@@ -335,6 +598,7 @@ mod tests {
             checkins_today: 0,
             consecutive_missed_checkins: 0,
             tick_interval_secs: 60,
+            due_now: true, // all existing tests assume a slot is due
         }
     }
 
@@ -610,5 +874,182 @@ mod tests {
             let j = jitter_for(u, now, 60);
             assert!(j.num_seconds() <= 60, "user '{u}' jitter {:?} > 60s", j);
         }
+    }
+
+    // ── due_now rhythm gate ───────────────────────────────────────
+
+    #[test]
+    fn not_due_skips_even_when_all_gates_pass() {
+        let mut i = inputs_default();
+        i.due_now = false;
+        let d = evaluate(&i);
+        assert!(!d.is_fire());
+        assert_eq!(d.reason(), "not_due");
+    }
+
+    #[test]
+    fn due_now_default_still_fires() {
+        // inputs_default sets due_now: true — the unchanged baseline.
+        let d = evaluate(&inputs_default());
+        assert!(d.is_fire());
+    }
+
+    // ── Fuzzy rhythm: plan_day_slots ──────────────────────────────
+
+    const DEFAULT_QUIET: (&str, &str) = ("22:00", "07:00");
+
+    // Helper: the contactable window in minutes for the default quiet
+    // hours, used to assert membership. Default quiet 22:00–07:00 →
+    // contactable 07:00–22:00 (420..1320).
+    fn in_default_contactable(t: NaiveTime) -> bool {
+        let m = mins_of(t);
+        (7 * 60..22 * 60).contains(&m)
+    }
+
+    #[test]
+    fn plan_count_within_band() {
+        let date = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        // Band [2,5], generous window, small gap → no capacity trim.
+        for u in &["alice", "bob", "carol", "dave", "erin"] {
+            let slots = plan_day_slots(u, date, &[], DEFAULT_QUIET, 2, 5, 30);
+            assert!(
+                (2..=5).contains(&(slots.len() as u32)),
+                "user '{u}': count {} outside [2,5]", slots.len()
+            );
+        }
+    }
+
+    #[test]
+    fn plan_respects_min_gap() {
+        let date = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        let slots = plan_day_slots("alice", date, &[], DEFAULT_QUIET, 4, 6, 90);
+        for w in slots.windows(2) {
+            let gap = mins_of(w[1]) - mins_of(w[0]);
+            assert!(gap >= 90, "gap {gap} < 90 between {:?} and {:?}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn plan_all_inside_contactable_and_outside_quiet() {
+        let date = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        let slots = plan_day_slots("alice", date, &[], DEFAULT_QUIET, 3, 5, 30);
+        for t in &slots {
+            assert!(in_default_contactable(*t), "slot {:?} outside 07:00–22:00", t);
+        }
+        // And explicitly: none fall in the quiet window 22:00–07:00.
+        let q_start = NaiveTime::from_hms_opt(22, 0, 0).unwrap();
+        let q_end = NaiveTime::from_hms_opt(7, 0, 0).unwrap();
+        for t in &slots {
+            assert!(!in_window(*t, q_start, q_end), "slot {:?} inside quiet", t);
+        }
+    }
+
+    #[test]
+    fn plan_is_deterministic_for_same_user_and_date() {
+        let date = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        let a = plan_day_slots("alice", date, &[], DEFAULT_QUIET, 2, 5, 60);
+        let b = plan_day_slots("alice", date, &[], DEFAULT_QUIET, 2, 5, 60);
+        assert_eq!(a, b, "same (user,date) must be reproducible");
+    }
+
+    #[test]
+    fn plan_varies_across_dates_and_users() {
+        // Probabilistic: we assert the *plans* aren't all identical
+        // across a handful of days/users — vanishingly unlikely to
+        // collide for a correct seed mix, and we only assert bounds.
+        let d1 = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2026, 6, 25).unwrap();
+        let d3 = NaiveDate::from_ymd_opt(2026, 6, 26).unwrap();
+        let plans: Vec<Vec<NaiveTime>> = [d1, d2, d3]
+            .iter()
+            .map(|d| plan_day_slots("alice", *d, &[], DEFAULT_QUIET, 3, 3, 30))
+            .collect();
+        assert!(
+            !(plans[0] == plans[1] && plans[1] == plans[2]),
+            "plans identical across three days — seed not varying by date"
+        );
+        // Across users on one day.
+        let pa = plan_day_slots("alice", d1, &[], DEFAULT_QUIET, 3, 3, 30);
+        let pb = plan_day_slots("zelda", d1, &[], DEFAULT_QUIET, 3, 3, 30);
+        let pc = plan_day_slots("mira-user-42", d1, &[], DEFAULT_QUIET, 3, 3, 30);
+        assert!(
+            !(pa == pb && pb == pc),
+            "plans identical across three users — seed not varying by user"
+        );
+    }
+
+    #[test]
+    fn plan_capacity_trims_target_to_fit_gap() {
+        // Window 07:00–22:00 = 900 min; gap 300 → capacity = 900/300+1
+        // = 4. Asking for [8,8] must trim to ≤ 4.
+        let date = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        let slots = plan_day_slots("alice", date, &[], DEFAULT_QUIET, 8, 8, 300);
+        assert!(slots.len() <= 4, "expected ≤4 with 300m gap, got {}", slots.len());
+        assert!(!slots.is_empty(), "should still place at least one");
+        for w in slots.windows(2) {
+            assert!(mins_of(w[1]) - mins_of(w[0]) >= 300);
+        }
+    }
+
+    #[test]
+    fn plan_never_below_one_when_min_at_least_one() {
+        // Extreme gap larger than the whole window: capacity formula
+        // still yields ≥1, and min_per_day=1 keeps us from dropping
+        // to zero.
+        let date = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        let slots = plan_day_slots("alice", date, &[], DEFAULT_QUIET, 1, 4, 100_000);
+        assert_eq!(slots.len(), 1, "min_per_day=1 must place exactly one");
+    }
+
+    #[test]
+    fn plan_handles_empty_quiet_uses_default() {
+        // Empty quiet → default applied → still produces a plan.
+        let date = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        let slots = plan_day_slots("alice", date, &[], DEFAULT_QUIET, 2, 4, 60);
+        assert!(!slots.is_empty());
+        for t in &slots {
+            assert!(in_default_contactable(*t));
+        }
+    }
+
+    #[test]
+    fn plan_handles_odd_quiet_without_panic() {
+        let date = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        // Malformed windows → fall back to 08:00–22:00, never panic.
+        let bogus = vec![("nope".to_string(), "also-nope".to_string())];
+        let slots = plan_day_slots("alice", date, &bogus, DEFAULT_QUIET, 2, 4, 60);
+        assert!(!slots.is_empty());
+        for t in &slots {
+            let m = mins_of(*t);
+            assert!((8 * 60..22 * 60).contains(&m), "slot {:?} outside fallback", t);
+        }
+
+        // Quiet covering ~all day → fall back, still no panic.
+        let allday = vec![("00:00".to_string(), "23:59".to_string())];
+        let slots = plan_day_slots("alice", date, &allday, DEFAULT_QUIET, 2, 4, 60);
+        assert!(!slots.is_empty(), "all-day quiet should fall back, not empty");
+
+        // Non-wrapping mid-day quiet (13:00–15:00) → largest gap kept,
+        // no slot inside the quiet block.
+        let midday = vec![("13:00".to_string(), "15:00".to_string())];
+        let slots = plan_day_slots("alice", date, &midday, DEFAULT_QUIET, 3, 5, 30);
+        let q_start = NaiveTime::from_hms_opt(13, 0, 0).unwrap();
+        let q_end = NaiveTime::from_hms_opt(15, 0, 0).unwrap();
+        for t in &slots {
+            assert!(!in_window(*t, q_start, q_end), "slot {:?} inside 13–15 quiet", t);
+        }
+    }
+
+    #[test]
+    fn local_now_parts_resolves_tz() {
+        // 14:00 UTC → 00:00 (next-day boundary) in Sydney summer; just
+        // assert it doesn't panic and the time is plausible.
+        let now = Utc.with_ymd_and_hms(2026, 6, 24, 14, 0, 0).unwrap();
+        let (date_utc, time_utc) = local_now_parts(now, Some("UTC"));
+        assert_eq!(time_utc, NaiveTime::from_hms_opt(14, 0, 0).unwrap());
+        assert_eq!(date_utc, NaiveDate::from_ymd_opt(2026, 6, 24).unwrap());
+        // Unknown tz → UTC fallback, same result.
+        let (_d, t) = local_now_parts(now, Some("Not/A/Zone"));
+        assert_eq!(t, NaiveTime::from_hms_opt(14, 0, 0).unwrap());
     }
 }

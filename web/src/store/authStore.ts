@@ -3,7 +3,19 @@
 import { create } from 'zustand'
 import { setAccessToken } from '@/api/client'
 import { authApi } from '@/api/auth'
+import { useChatStore } from '@/store/chatStore'
+import { queryClient } from '@/api/queryClient'
 import type { User } from '@/api/types'
+
+// Wipe all per-user client state on a user switch. React Query keys aren't
+// user-scoped and the chat store is in-memory, so without this the previous
+// account's conversations / open chat / cached data can surface to the next
+// user in the same browser (the "new user saw the previous user's last chat"
+// isolation bug). Synchronous so no stale frame renders before the new user.
+function clearPerUserState() {
+  useChatStore.getState().reset()
+  queryClient.clear()
+}
 
 interface AuthState {
   user: User | null
@@ -25,6 +37,9 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   login: async (username, password) => {
     const data = await authApi.login({ username, password })
+    // Drop any prior account's cached/in-memory state BEFORE we flip to the new
+    // user, so the chat view never renders the previous user's conversation.
+    clearPerUserState()
     setAccessToken(data.access_token)
     set({ user: data.user, isAuthenticated: true, isLoading: false })
   },
@@ -32,6 +47,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   logout: async () => {
     try { await authApi.logout() } catch { /* ignore */ }
     setAccessToken(null)
+    clearPerUserState()
     set({ user: null, isAuthenticated: false, isLoading: false })
   },
 

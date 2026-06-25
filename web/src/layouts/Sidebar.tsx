@@ -9,6 +9,7 @@ import {
   MessagesSquare, Brain, BookOpen, Server, Wifi, Search,
   Activity, FileText, Radio, Users2, Calendar, Bot, Boxes, Network,
   ScrollText, ShieldCheck, HeartPulse, Plug, Mail, Package, BotMessageSquare, Workflow,
+  Sparkles,
 } from 'lucide-react'
 import { conversationsApi } from '@/api/conversations'
 import { useAuthStore } from '@/store/authStore'
@@ -192,19 +193,25 @@ export default function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         <NavItem to="/automations"   icon={<Bot size={15} />}             label="Automations" collapsed={sidebarCollapsed} />
         <NavItem to="/skills"        icon={<Boxes size={15} />}           label="Skills"    collapsed={sidebarCollapsed} />
         <NavItem to="/agents"        icon={<Network size={15} />}         label="Agents"    collapsed={sidebarCollapsed} />
+        {/* Audit is per-user now (non-admins see only their own agents' events;
+            admins see system-wide), so it lives in the public block. */}
         <NavItem to="/audit"         icon={<ScrollText size={15} />}      label="Audit"     collapsed={sidebarCollapsed} />
         <NavItem to="/memory"        icon={<Brain size={15} />}           label="Memory"    collapsed={sidebarCollapsed} />
         <NavItem to="/wiki"          icon={<BookOpen size={15} />}        label="Wiki"      collapsed={sidebarCollapsed} />
         <NavItem to="/providers"     icon={<Server size={15} />}          label="Providers" collapsed={sidebarCollapsed} />
-        <NavItem to="/sessions"      icon={<Wifi size={15} />}            label="Sessions"  collapsed={sidebarCollapsed} />
         <NavItem to="/status"        icon={<Activity size={15} />}        label="Status"    collapsed={sidebarCollapsed} />
-        <NavItem to="/logs"          icon={<FileText size={15} />}        label="Logs"      collapsed={sidebarCollapsed} />
         <NavItem to="/channel-accounts" icon={<Radio size={15} />}        label="Channels"  collapsed={sidebarCollapsed} />
         <NavItem to="/mcp"           icon={<Plug size={15} />}            label="MCP"       collapsed={sidebarCollapsed} />
         <NavItem to="/email"         icon={<Mail size={15} />}            label="Email"     collapsed={sidebarCollapsed} />
+        <NavItem to="/presence"      icon={<Sparkles size={15} />}        label="Presence"  collapsed={sidebarCollapsed} />
 
         {user?.role === 'admin' && (
           <>
+            {/* Admin-only because each exposes cross-user / system data:
+                Logs (every user's messages + internals), Sessions (all users'
+                live sessions + evict). */}
+            <NavItem to="/logs"     icon={<FileText size={15} />}     label="Logs"     collapsed={sidebarCollapsed} />
+            <NavItem to="/sessions" icon={<Wifi size={15} />}         label="Sessions" collapsed={sidebarCollapsed} />
             <NavItem to="/users"    icon={<Users size={15} />}        label="Users"    collapsed={sidebarCollapsed} />
             <NavItem to="/groups"   icon={<Users2 size={15} />}       label="Groups"   collapsed={sidebarCollapsed} />
             <NavItem to="/plugins"  icon={<Package size={15} />}      label="Plugins"  collapsed={sidebarCollapsed} />

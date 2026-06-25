@@ -97,6 +97,21 @@
   color: var(--text-muted);
 }
 
+.ownerBadge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-base);
+}
+
 .statusBadge {
   display: inline-flex;
   align-items: center;

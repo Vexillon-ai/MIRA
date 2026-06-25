@@ -734,6 +734,7 @@ mod tests {
             schema,
             data_dir,
             wiki:     None,
+            companion: None,
         });
         let mut registry = ToolRegistry::new();
         registry.register(RecordProfileTool::new(Arc::clone(&services)));

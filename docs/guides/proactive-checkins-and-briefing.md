@@ -14,7 +14,12 @@ channel so MIRA has somewhere to reach you. If you haven't set one up yet, do
 that first: see **[Connect a channel](connect-a-channel.md)**. Telegram is the
 quickest to start with.
 
-Everything below lives under **Settings → Notifications**.
+You **tune** companion behaviour on the **Settings → Presence** page (rhythm,
+personality, what MIRA sends) — or just by asking MIRA in chat. **Enabling**
+check-ins and the test buttons live under **Settings → Notifications**. (When
+you finish onboarding, MIRA already configures Presence from your answers —
+admins are switched on automatically; others enable once a safety contact is
+set.)
 
 ## Turn on companion check-ins
 
@@ -40,23 +45,40 @@ out based on whether you tend to engage.
 > yourself. Either way it's strictly per-user: people without it enabled get
 > normal MIRA behaviour.
 
-### Tune how often MIRA checks in
+### Tune the rhythm (Settings → Presence)
 
-Beyond quiet hours, you can shape the *frequency* of check-ins. There are three
-controls, and you can just ask MIRA in chat to change them for you:
+MIRA's timing is a **fuzzy band**, not a fixed schedule:
 
-- **Maximum per day** — a hard ceiling on check-ins in a single day (default 6).
-  *"Only check in a couple of times a day."*
-- **Minimum gap** — the least time between two check-ins (default 90 minutes).
-  *"Leave at least three hours between check-ins."*
-- **Pause after unanswered** — MIRA stops checking in after this many go
-  unanswered in a row, and **resumes automatically the moment you reply**
-  (default 3). *"Stop if I haven't answered two in a row."* This is what keeps
-  MIRA from talking into the void when you're away.
+- **Messages per day** — a range like "1–4 a day". MIRA picks a count in that
+  band each day and scatters them at **varied, non-round times** inside your
+  contactable hours (each at least a minimum gap apart). *"Message me once or
+  twice a day."*
+- **Minimum gap** — the least time between two reach-outs (default 90 minutes).
+- It **leans in** when you're engaging and **backs off** when you're brief or
+  not replying — and **pauses after a few unanswered**, resuming the moment you
+  reply, so MIRA never talks into the void.
 
-Each person's settings override the instance-wide defaults, which an admin sets
-in the `companion` configuration block. The daily briefing is separate and
-isn't affected by these check-in limits.
+Prefer predictable times instead? Switch the rhythm to **Scheduled** and give it
+fixed times (e.g. 09:00 and 18:00). Everything is also adjustable in chat —
+*"only check in in the mornings"*, *"leave more time between messages"*.
+
+### Give MIRA personality (what it sends, and how)
+
+On the Presence page you also shape *what* a reach-out is and *how it sounds*:
+
+- **Message types** — toggle which kinds MIRA may send: a **check-in**, a
+  **joke**, **"what I've been up to"** (it'll genuinely mention what its
+  background agents did for you), a **follow-up** on something you recently
+  discussed, a **share**, or a bit of **encouragement**. MIRA picks one per
+  reach-out, biased by context.
+- **Tone** — three sliders (warmth / playfulness / verbosity) with quick presets
+  ("Warm & chatty", "Calm & concise", "Playful", "Professional"); for deeper
+  voice, edit MIRA's **persona** wiki page.
+- Or just say it: *"be funnier"*, *"stop the jokes"*, *"keep it short"*.
+
+Each person's settings override the instance-wide defaults an admin sets in the
+`companion` config block. The daily briefing is separate and isn't affected by
+these limits.
 
 ### Set a safety contact
 
@@ -107,8 +129,9 @@ relying on the schedule.
 
 - **Nothing arrives.** Confirm you have a [connected channel](connect-a-channel.md)
   and that it's set as your preferred channel for notifications. On Telegram,
-  MIRA can only message you proactively after you've sent the bot at least one
-  message — that's how it learns your chat id.
+  MIRA can only message you proactively after you've **linked your chat**
+  (Settings → My channels → Link Telegram, then send the `LINK-XXXX-XXXX` code to
+  the bot) — that's how it captures your chat id.
 - **A check-in never came.** Check-ins and briefings only fire while MIRA is
   **running** at the scheduled moment. If the host was asleep or restarting,
   that window can be missed — the briefing catches up later the same day, but

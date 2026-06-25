@@ -21,9 +21,11 @@ Two independent settings on a Telegram account:
 
 > Recommended for a household: a single **Shared** bot. Use **Personal** for a solo bot; **Guest-OK** only when you want it open to anyone.
 
-## Turn on proactive check-ins / daily briefing
-- Enable companion mode and pick a preferred channel + quiet hours.
-- Enable the daily briefing and set the hour. Test instantly with "Send a check-in now" / "Send a briefing now" in Settings → Notifications.
+## Turn on & tune proactive check-ins (Presence)
+- **Enable:** finish onboarding (admins are auto-enabled; others enable once a safety contact is set), or use the setup wizard's Check-ins step, or ask MIRA in chat. Enabling needs a safety contact for non-admins.
+- **Tune on the Presence page** (Settings → Presence): rhythm — Fuzzy band (1–N times/day at varied times) or Scheduled fixed times; tone sliders (warmth/playfulness/verbosity) + presets; which message types MIRA may send (check-in / joke / "what I've been up to" / follow-up / share / encouragement); whether it may mention what its agents did for you; daily briefing on/off + hour.
+- **Or just tell MIRA in chat:** "message me less", "be funnier", "stop the jokes", "only check in in the mornings", "pause till Monday" — it updates the same settings.
+- Test instantly with "Send a check-in now" / "Send a briefing now" in Settings → Notifications.
 
 ## Get replies as voice
 - Set your per-channel voice preference to **always** (Telegram/Signal). MIRA will send a voice note alongside text. Web plays TTS in the browser.

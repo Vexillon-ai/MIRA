@@ -447,7 +447,12 @@ impl Supervisor {
     /// crash the runtime.
     fn audit(&self, agent_id: AgentId, event: AuditEvent) {
         if let Some(store) = &self.audit_store {
-            if let Err(e) = store.record(agent_id, event) {
+            // Stamp the initiating user so the audit log can be scoped
+            // per-user (non-admins see only their own agents' events).
+            // None when the agent isn't in the registry or is system-initiated.
+            let user_id = self.registry.get(agent_id)
+                .and_then(|h| h.read().ok().and_then(|a| a.user_id.clone()));
+            if let Err(e) = store.record(agent_id, user_id.as_deref(), event) {
                 warn!("audit record failed: {e}");
             }
         }

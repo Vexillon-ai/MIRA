@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "mira"
-version = "0.274.0"
+version = "0.276.0"
 dependencies = [
  "aes-gcm",
  "ammonia",

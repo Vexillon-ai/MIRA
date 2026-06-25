@@ -85,7 +85,7 @@ impl Tool for GuardianProposeTool {
 
         let id = self.store.create_pending(kind, target.as_deref(), &reason)?;
         if let Some(audit) = &self.audit {
-            let _ = audit.record(guardian_agent_id(), AuditEvent::GuardianAction {
+            let _ = audit.record(guardian_agent_id(), None, AuditEvent::GuardianAction {
                 action_id:   id.clone(),
                 action_kind: kind.as_str().to_string(),
                 decision:    "proposed".to_string(),

@@ -12,6 +12,7 @@ use axum::{Extension, extract::Query, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentCore;
+use crate::auth::AuthUser;
 use crate::providers::openrouter::{Catalog, OpenRouterProvider};
 use crate::server::handlers::onboarding::DataDir;
 use crate::web::LiveConfig;
@@ -41,6 +42,10 @@ pub struct ModelInfo {
 // ── GET /api/providers/health ─────────────────────────────────────────────────
 
 pub async fn providers_health(
+    // Require login (was fully open). Any authenticated user may see provider
+    // health/model availability — they need it for the model picker — but it
+    // shouldn't be world-readable. No secrets are returned either way.
+    _user:               AuthUser,
     Extension(_agent):   Extension<Arc<AgentCore>>,
     Extension(live_cfg): Extension<Arc<LiveConfig>>,
 ) -> impl IntoResponse {
@@ -264,6 +269,7 @@ pub async fn providers_health(
 // same predicate `build_provider_chain` uses.
 
 pub async fn providers_models(
+    _user:               AuthUser,
     Extension(live_cfg): Extension<Arc<LiveConfig>>,
 ) -> impl IntoResponse {
     let cfg = live_cfg.get().await;

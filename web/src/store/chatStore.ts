@@ -44,6 +44,10 @@ interface ChatState {
   setStreamingThinking: (entries: ThinkingEntry[]) => void
   setSelectedModel: (model: SelectedModel | null) => void
   setLastTurnCost: (info: LastTurnCost | null) => void
+  /// Wipe all per-user chat state. MUST be called on login/logout so one
+  /// account's conversations + open chat never bleed into the next user in a
+  /// shared browser (in-memory store; not cleared by a token swap otherwise).
+  reset: () => void
 }
 
 export const useChatStore = create<ChatState>((set) => ({
@@ -100,4 +104,15 @@ export const useChatStore = create<ChatState>((set) => ({
   setSelectedModel: (model) => set({ selectedModel: model }),
 
   setLastTurnCost: (info) => set({ lastTurnCost: info }),
+
+  reset: () => set({
+    conversations: [],
+    activeConversationId: null,
+    messages: [],
+    isStreaming: false,
+    streamingContent: '',
+    streamingThinking: [],
+    selectedModel: null,
+    lastTurnCost: null,
+  }),
 }))

@@ -24,6 +24,13 @@ use crate::web::LiveConfig;
 /// Sends the last ~100 lines of the log file as individual SSE events, then
 /// continuously polls for new content every 500 ms until the client disconnects.
 pub async fn logs_stream(
+    // ADMIN ONLY. The log file contains every user's messages (incl. Telegram
+    // chats) in plaintext plus system internals, so a non-admin must never read
+    // it. This endpoint previously had no auth extractor at all — it ignored the
+    // `?token=` the client sent and was effectively open. `AdminUser` supports
+    // the SSE query-token (middleware extract_bearer_token), so EventSource auth
+    // still works; non-admins now get 403.
+    _admin: AdminUser,
     Extension(live_cfg): Extension<Arc<LiveConfig>>,
 ) -> axum::response::Response {
     let config   = live_cfg.get().await;

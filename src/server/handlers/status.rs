@@ -10,6 +10,7 @@ use axum::{Extension, response::IntoResponse};
 use serde::Serialize;
 
 use crate::agent::AgentCore;
+use crate::auth::AuthUser;
 use crate::history::HistoryStore;
 
 static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -23,11 +24,13 @@ pub struct StatusResponse {
     pub version:          &'static str,
     pub uptime_secs:      u64,
     pub now_utc:          i64,
-    pub active_sessions:  usize,
+    /// System-wide aggregate counts + provider name are admin-only — `None`
+    /// for non-admin callers (operational fields below stay populated).
+    pub active_sessions:  Option<usize>,
     pub memory_count:     Option<usize>,
     pub conversation_count: Option<usize>,
     pub message_count:    Option<usize>,
-    pub provider_name:    String,
+    pub provider_name:    Option<String>,
     /// True when MIRA is running under a supervisor that will relaunch it
     /// after a clean exit. The web UI uses this to label the Restart button
     /// honestly: when false, exiting the process leaves nothing to bring it
@@ -39,9 +42,16 @@ pub struct StatusResponse {
 }
 
 pub async fn status_handler(
+    // Require login (was fully open). Operational fields (version, uptime,
+    // supervisor) are returned to every authenticated user; system-wide
+    // aggregate counts + the provider name are admin-only (trimmed to None
+    // for non-admins) since they leak fleet-wide posture.
+    AuthUser(user):     AuthUser,
     Extension(agent):   Extension<Arc<AgentCore>>,
     Extension(history): Extension<Arc<HistoryStore>>,
 ) -> impl IntoResponse {
+    let is_admin = user.role == crate::auth::models::Role::Admin;
+
     let uptime = START_TIME.get()
         .map(|t| t.elapsed().as_secs())
         .unwrap_or(0);
@@ -51,10 +61,17 @@ pub async fn status_handler(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let active_sessions  = agent.sessions.len().await;
-    let memory_count: Option<usize> = agent.memory.count().ok().map(|n| n as usize);
-    let (conv_count, msg_count) = history.stats().unwrap_or((None, None));
     let supervisor = detect_supervisor();
+
+    // Compute the system-wide counts only for admins; non-admins get None.
+    let (active_sessions, memory_count, conv_count, msg_count, provider_name) = if is_admin {
+        let active_sessions  = Some(agent.sessions.len().await);
+        let memory_count: Option<usize> = agent.memory.count().ok().map(|n| n as usize);
+        let (conv_count, msg_count) = history.stats().unwrap_or((None, None));
+        (active_sessions, memory_count, conv_count, msg_count, Some(agent.provider.name().to_owned()))
+    } else {
+        (None, None, None, None, None)
+    };
 
     axum::Json(StatusResponse {
         version:            env!("CARGO_PKG_VERSION"),
@@ -64,7 +81,7 @@ pub async fn status_handler(
         memory_count,
         conversation_count: conv_count,
         message_count:      msg_count,
-        provider_name:      agent.provider.name().to_owned(),
+        provider_name,
         supervised:         supervisor.is_some(),
         supervisor,
     })

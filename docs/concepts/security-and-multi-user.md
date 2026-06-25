@@ -58,11 +58,19 @@ Each person on a MIRA instance gets their **own** of everything that's personal:
   mailbox, and so on, under their own settings.
 - **Settings** — voice preferences, companion/check-in configuration, connected
   MCP servers, and profile all belong to the individual.
+- **Agents & audit** — the **Agents** dashboard and the **Audit** log are scoped
+  to *you*: you see (and can interrupt/pause/resume) only the agents you started
+  and their sub-agents, and only your own agents' audit entries. Admins see the
+  whole fleet, including system-initiated agents, and the full audit log.
 
-A user cannot read another user's conversations, memory, channels, or settings.
-Operator/global settings (providers, security, server-wide channels) are
-admin-only. This separation is the default and needs no configuration — adding a
-user gives them a clean, private workspace.
+A user cannot read another user's conversations, memory, channels, agents, or
+settings. **Operator/system views are admin-only:** the **Logs** stream (which
+contains every user's messages and system internals), the **Sessions** list (and
+session eviction), and the system-wide counts on the **Status** page are
+restricted to admins; non-admins see only operational status (version, uptime,
+supervisor). Operator/global settings (providers config, security, server-wide
+channels) are admin-only too. This separation is the default and needs no
+configuration — adding a user gives them a clean, private workspace.
 
 ## Governance: what you're allowed to do
 

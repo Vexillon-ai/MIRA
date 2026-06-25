@@ -1255,18 +1255,35 @@ function MyChannelLinks() {
               padding: '6px 0', borderTop: '1px solid var(--border, #2a2a2a)',
             }}>
               <span style={{ fontSize: 13, minWidth: 80, textTransform: 'capitalize' }}>{l.channel}</span>
-              <code style={{ fontSize: 12, opacity: 0.8, flex: 1 }}>{l.external_id}</code>
+              {/* Size to content (not flex:1) so the id field doesn't stretch
+                  across the whole row; truncate very long ids gracefully. */}
+              <code style={{
+                fontSize: 12, opacity: 0.8,
+                maxWidth: 240, overflow: 'hidden',
+                textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{l.external_id}</code>
+              {/* Visible labelled danger button (was an icon-only button that
+                  rendered invisibly here — users were clicking it blind). */}
               <button
-                className={`${styles.iconBtn} ${styles.danger}`}
-                title="Remove link"
+                type="button"
+                title="Remove this link"
                 disabled={removeMut.isPending}
                 onClick={() => {
                   if (confirm(`Unlink your ${l.channel} account (${l.external_id})?`)) {
                     removeMut.mutate(l.id)
                   }
                 }}
+                style={{
+                  marginLeft: 'auto',
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  padding: '4px 10px', fontSize: 12, fontWeight: 500,
+                  color: 'var(--danger, #f87171)',
+                  background: 'transparent',
+                  border: '1px solid var(--danger, #f87171)',
+                  borderRadius: 6, cursor: 'pointer',
+                }}
               >
-                <Trash2 size={14} />
+                <Trash2 size={13} /> Unlink
               </button>
             </div>
           ))}

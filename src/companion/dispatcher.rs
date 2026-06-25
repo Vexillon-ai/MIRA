@@ -16,13 +16,14 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::agent::{AgentCore, StreamEvent, TurnContext};
+use crate::agent::{AgentCore, AuditFilter, AuditStore, StreamEvent, TurnContext};
 use crate::auth::LocalAuthService;
 use crate::automations::store::AutomationsStore;
+use crate::companion::settings::{MessageMix, ToneAxes};
 use crate::calendar::CalendarStore;
 use crate::channel::telegram_channel::TelegramChannel;
 use crate::channel_accounts::ChannelAccountStore;
@@ -120,6 +121,11 @@ pub struct CompanionDispatcher {
     // (the prior behaviour). Mirrors the normal reply path so a user with
     // "voice: always" on a channel gets spoken check-ins too.
     tts: Option<crate::tts::TtsService>,
+    // Agent activity log. When present, status-update check-ins draw a short
+    // natural-language digest of MIRA's recent autonomous work for this user
+    // from here. `None` → status updates fall back to having no activity to
+    // mention (so the message-type selector won't pick StatusUpdate).
+    agent_audit: Option<Arc<AuditStore>>,
 }
 
 impl CompanionDispatcher {
@@ -142,7 +148,16 @@ impl CompanionDispatcher {
             wiki: None,
             live_config: None,
             tts: None,
+            agent_audit: None,
         }
+    }
+
+    // Wire the agent activity log so status-update check-ins can mention what
+    // MIRA's autonomous agents recently did on the user's behalf. `None` keeps
+    // the dispatcher from ever surfacing a status update (nothing to report).
+    pub fn with_agent_audit(mut self, audit: Option<Arc<AuditStore>>) -> Self {
+        self.agent_audit = audit;
+        self
     }
 
     // Wire the TTS service so proactive messages can be delivered as voice
@@ -260,14 +275,48 @@ impl CompanionDispatcher {
             ..TurnContext::default()
         };
 
-        // Fold the user's recent real conversations into the cue so the opener
-        // can reference what was recently discussed — and so the memory recall
-        // (which searches with this input) surfaces recent-topic memories
-        // instead of the same generic top-N every time.
-        let cue = match recent_conversation_digest(&self.history, user_id, &conv_id) {
-            Some(digest) => format!("{CHECKIN_CUE}\n\n{digest}"),
-            None         => CHECKIN_CUE.to_string(),
-        };
+        // Message variety: pick a message *type* from the user's enabled mix,
+        // biased by what context is actually available (a recent conversation
+        // to follow up on; recent autonomous work to report). The opener stays
+        // LLM-composed — we only steer the cue, never hardcode the visible text.
+        let now = Utc::now();
+        let follow_up_digest = recent_conversation_digest(&self.history, user_id, &conv_id);
+        let status_digest    = self.recent_agent_activity_digest(user_id, now);
+        // Seed off (user_id + current UTC minute), mirroring policy::jitter_for's
+        // FNV style so selection is deterministic within a minute (testable) yet
+        // varies across fires. No rand/SystemTime in the pure selector.
+        let seed = selection_seed(user_id, now);
+        let msg_type = select_message_type(
+            &settings.presence.message_mix,
+            follow_up_digest.is_some(),
+            status_digest.is_some() && settings.presence.share_agent_activity,
+            seed,
+        );
+
+        // Compose the cue: base guardrails + per-type steer + tone steer. The
+        // recent-conversation digest still folds in (for the FollowUp type's
+        // context AND for memory-recall quality — recall searches with this
+        // input) but isn't double-added as a separate FollowUp instruction.
+        let type_instruction = type_instruction(
+            msg_type,
+            follow_up_digest.as_deref(),
+            status_digest.as_deref(),
+        );
+        let tone = tone_instruction(&settings.presence.tone);
+        let mut cue = format!("{CHECKIN_CUE}\n\n{type_instruction}");
+        if !tone.is_empty() {
+            cue.push_str("\n\n");
+            cue.push_str(&tone);
+        }
+        // Fold recent real conversations into the cue (see above) — for the
+        // opener's context and recall quality. FollowUp already embeds this
+        // digest in its instruction, so only append it for the other types.
+        if msg_type != MsgType::FollowUp {
+            if let Some(digest) = &follow_up_digest {
+                cue.push_str("\n\n");
+                cue.push_str(digest);
+            }
+        }
 
         let mut rx = match self.agent
             .process_with_context(&conv_id, user_id, &channel, &cue, None, turn_ctx)
@@ -1114,6 +1163,57 @@ impl CompanionDispatcher {
         }
     }
 
+    // Build a short, natural-language digest of MIRA's recent autonomous work
+    // *for this user* — the signal a "status update" check-in narrates ("ran
+    // your morning brief; drafted a reply to the Acme thread"). Drawn from the
+    // agent audit log (last 48h), keeping only NOTABLE, user-meaningful events
+    // (completed runs / actions) and skipping lifecycle noise. Returns `None`
+    // when there's nothing worth mentioning — which keeps the message-type
+    // selector from ever choosing StatusUpdate on a quiet day.
+    fn recent_agent_activity_digest(&self, user_id: &str, now: DateTime<Utc>) -> Option<String> {
+        const LOOKBACK_HOURS: i64 = 48;
+        const MAX_ITEMS:      usize = 4;
+        const MAX_ITEM_CHARS: usize = 80;
+
+        let audit = self.agent_audit.as_ref()?;
+        let since_ms = (now - chrono::Duration::hours(LOOKBACK_HOURS)).timestamp_millis();
+        let filter = AuditFilter {
+            user_id:  Some(user_id.to_string()),
+            since_ms: Some(since_ms),
+            limit:    Some(20),
+            ..AuditFilter::default()
+        };
+        let records = audit.query(&filter).ok()?;
+
+        // Map the notable event kinds to a friendly phrase. We deliberately skip
+        // status_change / spawn_requested / *_budget_exceeded / interrupted /
+        // policy_decision — those are runtime noise, not "work I did for you".
+        let mut items: Vec<String> = Vec::new();
+        for rec in &records {
+            if items.len() >= MAX_ITEMS { break; }
+            let phrase = match &rec.event {
+                crate::agent::AuditEvent::SpawnApproved { skill_id, .. } => {
+                    Some(format!("ran a {} task", skill_friendly(skill_id)))
+                }
+                crate::agent::AuditEvent::GuardianAction { action_kind, decision, .. }
+                    if decision == "executed" =>
+                {
+                    Some(format!("handled {}", action_kind.replace('_', " ")))
+                }
+                _ => None,
+            };
+            if let Some(mut p) = phrase {
+                if p.chars().count() > MAX_ITEM_CHARS {
+                    p = p.chars().take(MAX_ITEM_CHARS).collect::<String>() + "…";
+                }
+                items.push(p);
+            }
+        }
+
+        if items.is_empty() { return None; }
+        Some(items.join("; "))
+    }
+
     // The user's most-recent conversation channel that is a real messaging
     // channel (not web/cli/tui), if any. Scans recent conversations newest-first.
     fn last_messaging_channel(&self, user_id: &str) -> Option<String> {
@@ -1243,6 +1343,152 @@ fn recent_conversation_digest(
     ))
 }
 
+// ── Message variety: type selection + cue steering ───────────────────────────
+
+// The kind of proactive opener a single fire composes. Distinct from the
+// `MessageMix` config flags so the selector can fall back to `CheckIn` when
+// nothing is enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MsgType {
+    CheckIn,
+    Joke,
+    StatusUpdate,
+    FollowUp,
+    Share,
+    Encouragement,
+}
+
+// Stable FNV-1a 64-bit seed from (user_id + current UTC minute). Mirrors
+// `policy::jitter_for`'s hashing style so selection is deterministic within a
+// minute (testable, and a retry in the same minute won't flip type) yet varies
+// across fires. Pure — no rand, no clock read inside the selector itself.
+fn selection_seed(user_id: &str, now: DateTime<Utc>) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in user_id.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    let bucket = (now.timestamp() / 60) as u64; // minute bucket
+    h ^= bucket;
+    h.wrapping_mul(0x100000001b3)
+}
+
+// Pick a message type from the user's enabled mix, biased by available
+// context. Pure + deterministic in `seed` so it's unit-testable.
+//
+// Rules:
+//   - No type enabled → CheckIn (the always-safe default).
+//   - follow_up enabled && a recent conversation exists → FollowUp ~50% of
+//     the time (high weight: it's the most relevant when there's something to
+//     follow up on), else fall through.
+//   - status_update enabled && recent autonomous work exists → StatusUpdate
+//     ~40% of the time, else fall through.
+//   - Otherwise weighted-random (uniform here) among the remaining enabled
+//     "free" types: check_in / joke / share / encouragement.
+fn select_message_type(
+    mix:                &MessageMix,
+    follow_up_available: bool,
+    status_available:    bool,
+    seed:                u64,
+) -> MsgType {
+    // Bias gate uses the low byte; the residual picks among free types so the
+    // two draws are independent-ish off one seed.
+    let gate = (seed % 100) as u8;
+    let pick = seed >> 8;
+
+    if mix.follow_up && follow_up_available && gate < 50 {
+        return MsgType::FollowUp;
+    }
+    if mix.status_update && status_available && (50..90).contains(&gate) {
+        // Fixed 50..90 band → ~40% whether or not FollowUp was eligible for
+        // 0..50. The 0..50 band that FollowUp didn't claim falls through to the
+        // free-type pick below (so a status-only mix doesn't crowd out check-ins).
+        return MsgType::StatusUpdate;
+    }
+
+    // Weighted-random among the remaining enabled "free" types.
+    let mut free: Vec<MsgType> = Vec::new();
+    if mix.check_in      { free.push(MsgType::CheckIn); }
+    if mix.joke          { free.push(MsgType::Joke); }
+    if mix.share         { free.push(MsgType::Share); }
+    if mix.encouragement { free.push(MsgType::Encouragement); }
+
+    // If nothing in the free set is enabled, fall back to the biased types when
+    // they're enabled+available, else CheckIn — so a mix of only
+    // {follow_up, status_update} still produces a sensible opener.
+    if free.is_empty() {
+        if mix.follow_up && follow_up_available { return MsgType::FollowUp; }
+        if mix.status_update && status_available { return MsgType::StatusUpdate; }
+        return MsgType::CheckIn;
+    }
+    free[(pick as usize) % free.len()]
+}
+
+// Per-type cue fragment. Steers *how* the opener reads; the model still writes
+// the user-visible text. `follow_up`/`status` digests are folded in for the
+// types that use them.
+fn type_instruction(
+    ty:        MsgType,
+    follow_up: Option<&str>,
+    status:    Option<&str>,
+) -> String {
+    match ty {
+        MsgType::CheckIn => "Open with a warm, brief hello or a gentle question \
+            — share something small or check in lightly.".to_string(),
+        MsgType::Joke => "Open with a short, genuinely light and tasteful joke \
+            or playful quip, then a brief hello.".to_string(),
+        MsgType::StatusUpdate => {
+            let what = status.unwrap_or("something small you took care of");
+            format!(
+                "Mention naturally and briefly something you've been up to on \
+                 their behalf — like a friend saying what they did: {what}. \
+                 Don't list it mechanically."
+            )
+        }
+        MsgType::FollowUp => {
+            match follow_up {
+                Some(digest) => format!(
+                    "Follow up naturally on something recent.\n\n{digest}"
+                ),
+                None => "Follow up naturally on something the two of you \
+                    discussed recently.".to_string(),
+            }
+        }
+        MsgType::Share => "Share one small, interesting or relevant thought or \
+            tidbit (not a task) — something a thoughtful friend might pass \
+            along.".to_string(),
+        MsgType::Encouragement => "Offer a brief, sincere bit of warmth or \
+            encouragement.".to_string(),
+    }
+}
+
+// Map the salient tone axes (each 0..=100, 50=neutral) to short directives,
+// concatenated. Mid values (33..=66) add nothing — only clearly-set sliders
+// steer, so a default-neutral persona gets no extra noise.
+fn tone_instruction(tone: &ToneAxes) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if tone.playfulness > 66 {
+        parts.push("Be playful and witty.");
+    } else if tone.playfulness < 33 {
+        parts.push("Keep it sincere, not jokey.");
+    }
+    if tone.warmth > 66 {
+        parts.push("Be especially warm and caring.");
+    }
+    if tone.verbosity < 33 {
+        parts.push("Keep it to one short sentence.");
+    } else if tone.verbosity > 66 {
+        parts.push("A couple of sentences is fine.");
+    }
+    parts.join(" ")
+}
+
+// Best-effort prettify of a skill id ("com.mira.research" → "research") for the
+// activity digest. Keeps the last dotted segment; falls back to the whole id.
+fn skill_friendly(skill_id: &str) -> String {
+    skill_id.rsplit('.').next().unwrap_or(skill_id).replace('_', " ")
+}
+
 async fn drain_to_text(
     rx: &mut mpsc::Receiver<StreamEvent>,
 ) -> std::result::Result<String, MiraError> {
@@ -1366,5 +1612,147 @@ mod tests {
     #[test]
     fn snippet_leaves_short_input_alone() {
         assert_eq!(snippet("hi"), "hi");
+    }
+
+    // ── Message-variety selection ─────────────────────────────────────────
+
+    // All free types off, follow_up/status off → CheckIn always.
+    fn mix_only(f: impl Fn(&mut MessageMix)) -> MessageMix {
+        let mut m = MessageMix {
+            check_in: false, joke: false, status_update: false,
+            follow_up: false, share: false, encouragement: false,
+        };
+        f(&mut m);
+        m
+    }
+
+    #[test]
+    fn select_none_enabled_is_check_in() {
+        let m = mix_only(|_| {});
+        for seed in 0u64..200 {
+            assert_eq!(select_message_type(&m, true, true, seed), MsgType::CheckIn);
+        }
+    }
+
+    #[test]
+    fn select_never_picks_a_disabled_type() {
+        // Only check_in + share enabled; status/follow-up "available" but OFF.
+        let m = mix_only(|m| { m.check_in = true; m.share = true; });
+        for seed in 0u64..500 {
+            let t = select_message_type(&m, true, true, seed);
+            assert!(
+                matches!(t, MsgType::CheckIn | MsgType::Share),
+                "seed {seed} produced disabled type {t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn select_follow_up_bias_fires_when_available() {
+        let m = mix_only(|m| { m.check_in = true; m.follow_up = true; });
+        let n = (0u64..1000).filter(|&s|
+            select_message_type(&m, true, false, s) == MsgType::FollowUp
+        ).count();
+        // ~50% expected; assert it's a substantial share (bias actually fires).
+        assert!(n > 300 && n < 700, "follow-up count {n} not ~half");
+    }
+
+    #[test]
+    fn select_follow_up_not_chosen_when_unavailable() {
+        let m = mix_only(|m| { m.check_in = true; m.follow_up = true; });
+        for seed in 0u64..500 {
+            // follow_up enabled but NOT available → never FollowUp.
+            assert_ne!(select_message_type(&m, false, false, seed), MsgType::FollowUp);
+        }
+    }
+
+    #[test]
+    fn select_status_bias_fires_when_available_and_no_follow_up() {
+        let m = mix_only(|m| { m.check_in = true; m.status_update = true; });
+        let n = (0u64..1000).filter(|&s|
+            select_message_type(&m, false, true, s) == MsgType::StatusUpdate
+        ).count();
+        // ~40% band (gate 50..90); assert it fires meaningfully.
+        assert!(n > 200 && n < 600, "status count {n} not ~40%");
+    }
+
+    #[test]
+    fn select_status_not_chosen_when_unavailable() {
+        let m = mix_only(|m| { m.check_in = true; m.status_update = true; });
+        for seed in 0u64..500 {
+            assert_ne!(select_message_type(&m, false, false, seed), MsgType::StatusUpdate);
+        }
+    }
+
+    #[test]
+    fn select_is_deterministic_for_fixed_seed() {
+        let m = MessageMix::default();
+        let a = select_message_type(&m, true, true, 123456);
+        let b = select_message_type(&m, true, true, 123456);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn select_only_biased_types_enabled_still_resolves() {
+        // No free types at all; only follow_up + status enabled.
+        let m = mix_only(|m| { m.follow_up = true; m.status_update = true; });
+        // Both available → biased path picks one of them (never a free type).
+        for seed in 0u64..200 {
+            let t = select_message_type(&m, true, true, seed);
+            assert!(matches!(t, MsgType::FollowUp | MsgType::StatusUpdate), "{t:?}");
+        }
+        // Neither available → CheckIn fallback.
+        assert_eq!(select_message_type(&m, false, false, 7), MsgType::CheckIn);
+    }
+
+    // ── Cue steering ──────────────────────────────────────────────────────
+
+    #[test]
+    fn type_instruction_embeds_status_digest() {
+        let s = type_instruction(MsgType::StatusUpdate, None, Some("ran your morning brief"));
+        assert!(s.contains("ran your morning brief"));
+    }
+
+    #[test]
+    fn type_instruction_follow_up_embeds_digest() {
+        let s = type_instruction(MsgType::FollowUp, Some("[Recent context …]"), None);
+        assert!(s.contains("[Recent context …]"));
+    }
+
+    #[test]
+    fn tone_instruction_neutral_is_empty() {
+        assert_eq!(tone_instruction(&ToneAxes::default()), "");
+    }
+
+    #[test]
+    fn tone_instruction_picks_up_set_axes() {
+        let t = ToneAxes { warmth: 90, playfulness: 90, verbosity: 10 };
+        let s = tone_instruction(&t);
+        assert!(s.contains("playful"));
+        assert!(s.contains("warm"));
+        assert!(s.contains("one short sentence"));
+    }
+
+    #[test]
+    fn tone_instruction_low_playfulness_is_sincere() {
+        let t = ToneAxes { warmth: 50, playfulness: 10, verbosity: 80 };
+        let s = tone_instruction(&t);
+        assert!(s.contains("sincere"));
+        assert!(s.contains("couple of sentences"));
+    }
+
+    #[test]
+    fn selection_seed_is_stable_within_a_minute() {
+        let t0 = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let t1 = DateTime::from_timestamp(1_700_000_030, 0).unwrap(); // +30s, same minute
+        assert_eq!(selection_seed("alice", t0), selection_seed("alice", t1));
+        let t2 = DateTime::from_timestamp(1_700_000_060, 0).unwrap(); // +60s, next minute
+        assert_ne!(selection_seed("alice", t0), selection_seed("alice", t2));
+    }
+
+    #[test]
+    fn skill_friendly_keeps_last_segment() {
+        assert_eq!(skill_friendly("com.mira.research"), "research");
+        assert_eq!(skill_friendly("morning_brief"), "morning brief");
     }
 }

@@ -18,11 +18,12 @@ export interface ModelInfo {
 export interface StatusInfo {
   version: string
   uptime_secs: number
-  active_sessions: number
-  memory_count: number
-  conversation_count: number
-  message_count: number
-  provider_name: string
+  /** System-wide counts + provider name are admin-only — null for non-admins. */
+  active_sessions: number | null
+  memory_count: number | null
+  conversation_count: number | null
+  message_count: number | null
+  provider_name: string | null
   /** True when a supervisor (systemd, Docker, launchd) will relaunch MIRA
    *  after a clean exit. False when running under `cargo run` or a bare
    *  manual launch — the Restart button degrades to "Stop" in that case. */

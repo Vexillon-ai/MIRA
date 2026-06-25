@@ -10,6 +10,7 @@ use axum::{Extension, Json};
 use serde::Serialize;
 
 use crate::agent::AgentCore;
+use crate::auth::AdminUser;
 
 #[derive(Debug, Serialize)]
 pub struct SessionResponse {
@@ -21,8 +22,11 @@ pub struct SessionResponse {
     pub message_count: usize,
 }
 
-/// GET /api/sessions — list all active in-memory sessions
+/// GET /api/sessions — list all active in-memory sessions.
+/// ADMIN ONLY: this lists EVERY user's sessions (user_id, channel, activity),
+/// so a non-admin must not see it.
 pub async fn list_sessions(
+    _admin: AdminUser,
     Extension(agent): Extension<Arc<AgentCore>>,
 ) -> Json<Vec<SessionResponse>> {
     let mut sessions: Vec<SessionResponse> = agent.sessions.list_all().await
@@ -41,8 +45,10 @@ pub async fn list_sessions(
     Json(sessions)
 }
 
-/// DELETE /api/sessions/{id} — evict a session (admin)
+/// DELETE /api/sessions/{id} — evict a session. ADMIN ONLY (was ungated — a
+/// non-admin could evict any user's live session).
 pub async fn evict_session(
+    _admin: AdminUser,
     Extension(agent): Extension<Arc<AgentCore>>,
     Path(id): Path<String>,
 ) -> StatusCode {

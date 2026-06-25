@@ -19,6 +19,8 @@ export interface LlmChoiceDto {
 
 export interface AgentDto {
   id:             string
+  /** Initiating user; null = system-initiated. Drives the "Owner" column. */
+  user_id:        string | null
   parent:         string | null
   skill_id:       string | null
   status:         AgentStatus
@@ -84,6 +86,8 @@ export interface AuditRow {
   id:        number
   ts_ms:     number
   agent_id:  string
+  /** Initiating user; null = system-initiated (or a pre-migration row). */
+  user_id:   string | null
   kind:      AuditKind
   /** Variant-specific payload — same shape as AuditEvent in Rust. */
   event:     Record<string, unknown> & { kind: AuditKind }

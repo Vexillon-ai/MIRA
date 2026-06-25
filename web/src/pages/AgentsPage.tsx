@@ -7,6 +7,7 @@ import { Network, Play, Pause as PauseIcon, Square, ExternalLink, Radio } from '
 import { useNavigate } from 'react-router-dom'
 import { agentsApi, type AgentDto, type AgentStatus, type AgentsResponse } from '@/api/agents'
 import { getAccessToken } from '@/api/client'
+import { useAuthStore } from '@/store/authStore'
 import { formatDistanceToNow } from 'date-fns'
 import styles from './AgentsPage.module.css'
 
@@ -121,7 +122,14 @@ function orderForTree(flat: AgentDto[]): AgentDto[] {
 function AgentCard({ agent }: { agent: AgentDto }) {
   const qc = useQueryClient()
   const navigate = useNavigate()
+  const { user } = useAuthStore()
   const isTerminal = TERMINAL_STATUSES.includes(agent.status)
+
+  // Owner label: system-initiated → "System"; mine → "You"; otherwise the id
+  // (admins can see other users' agents).
+  const ownerLabel = agent.user_id == null
+    ? 'System'
+    : (user && agent.user_id === user.id ? 'You' : agent.user_id)
 
   const interruptMut = useMutation({
     mutationFn: () => agentsApi.interrupt(agent.id, { propagate: true }),
@@ -154,6 +162,9 @@ function AgentCard({ agent }: { agent: AgentDto }) {
             {agent.skill_id ?? '(root agent)'}
           </span>
           <span className={styles.id}>{agent.id.slice(0, 8)}…</span>
+          <span className={styles.ownerBadge} title={`Initiated by: ${ownerLabel}`}>
+            {ownerLabel}
+          </span>
           <span className={styles.statusBadge} data-status={agent.status}>
             {agent.status}
           </span>

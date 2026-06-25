@@ -49,7 +49,7 @@ fn audit_decision(
     action_id: &str, action_kind: &str, decision: &str, detail: Option<String>,
 ) {
     if let Some(Extension(store)) = audit {
-        let _ = store.record(guardian_agent_id(), AuditEvent::GuardianAction {
+        let _ = store.record(guardian_agent_id(), None, AuditEvent::GuardianAction {
             action_id:   action_id.to_string(),
             action_kind: action_kind.to_string(),
             decision:    decision.to_string(),
