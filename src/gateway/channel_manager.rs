@@ -526,12 +526,17 @@ impl ChannelManager {
             );
         }
 
+        // Prefer a MIRA-managed signal-cli + JRE under ~/.mira/deps (auto-
+        // installed when the channel is enabled) over a system install, so a
+        // fresh box needs no manual Java/signal-cli setup. Falls back to the
+        // configured `cli_binary` + system Java when no managed install exists.
+        let (binary, java_home) = crate::install::deps::resolve_signal_cli(&cfg.cli_binary);
         let mut daemon = SignalCliDaemon::new(
-            cfg.cli_binary.clone(),
+            binary,
             cfg.phone_number.clone(),
             port,
             data_dir.clone(),
-        );
+        ).with_java_home(java_home);
         daemon.start(15).await.map_err(|e| format!("daemon start: {}", e))?;
         info!(
             "Signal daemon up on :{} for {} (user={})",

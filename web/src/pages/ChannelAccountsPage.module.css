@@ -17,6 +17,15 @@
 .header h1 { font-size: 20px; margin-bottom: 4px; }
 .header p  { font-size: 13px; color: var(--text-muted); }
 
+/* Inline help under a channel form (e.g. Signal setup notes). */
+.formHint {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  margin: 2px 0 0;
+  max-width: 60ch;
+}
+
 .headerActions {
   display: flex;
   gap: 8px;

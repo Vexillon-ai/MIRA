@@ -789,6 +789,15 @@ function SignalForm({
         value={cfg.data_dir ?? ''}
         onChange={(e) => onChange({ ...cfg, data_dir: e.target.value || undefined })}
       />
+      <p className={styles.formHint}>
+        First time you add a Signal number, MIRA downloads a verified copy of
+        signal-cli (and a bundled Java runtime where needed, ~100–150&nbsp;MB) and
+        starts the daemon — the channel shows connected once it's ready, so the
+        first start can take a minute. You only need to <strong>register the
+        number</strong> with signal-cli yourself first (it requires a
+        verification code). Leave the binary field blank to use the managed copy,
+        or set it to your own signal-cli path.
+      </p>
     </div>
   )
 }

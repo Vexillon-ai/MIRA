@@ -46,8 +46,10 @@ MIRA ships with a broad built-in set, plus an extension point for anything else:
   attachments, and in-browser voice playback.
 - **Telegram** — a bot token; the easiest channel to start with. Two-way text
   and voice notes.
-- **Signal** — end-to-end encrypted, via `signal-cli`. Two-way text and voice
-  notes.
+- **Signal** — end-to-end encrypted, via `signal-cli` (which MIRA launches and
+  drives over a local HTTP daemon). Two-way text and voice notes. MIRA
+  auto-installs signal-cli + a bundled JRE on first use; you only register the
+  number. Works on Linux, macOS, and Windows.
 - **Email** — a first-class channel: inbound mail from allowed senders becomes a
   conversation, and MIRA can email you (handy for daily briefings).
 - **Discord** — a per-user (or shared) bot routed to your Discord channels.

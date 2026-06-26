@@ -289,32 +289,38 @@ pub async fn process_message_for_account(
                        cannot verify sender; running as owner (INSECURE fallback)", account);
                 break 'personal ctx.owner_user_id.clone();
             };
-            match idstore.lookup("telegram", &tg_user) {
-                // The owner's own verified chat — the only one served.
+            // Personal-bot ownership is tracked PER BOT, in a namespaced
+            // identity scope (`telegram:personal:<account>`) — NOT the global
+            // `telegram` map that Shared bots use. This decouples a personal bot
+            // from a person's "main" MIRA identity, so one phone can be a
+            // different MIRA user on each bot (e.g. `admin` on the shared family
+            // bot, `Tarek` on a private bot) without one link stealing the
+            // other. Only this bot's owner can register the chat, by sending a
+            // fresh LINK code; the scope key is hidden from the My Channels UI.
+            let scope = format!("telegram:personal:{}", account);
+            match idstore.lookup(&scope, &tg_user) {
+                // The owner's verified chat for THIS bot — the only one served.
                 Ok(Some(uid)) if uid == ctx.owner_user_id => uid,
-                // A chat linked to a different MIRA user: this is a *personal*
-                // bot, not a shared one. Refuse rather than leak the owner.
-                Ok(Some(_)) => {
-                    send_telegram_message(&state.http_client, &ctx.bot_token, chat_id,
-                        "This is a personal bot and isn't linked to your account.").await;
-                    return;
-                }
-                Ok(None) => {
-                    // Unknown chat. Accept a link code ONLY if it belongs to the
-                    // owner — a personal bot binds the owner's chat, nobody
-                    // else's.
+                // Not verified for this bot yet (`None`), or a stale/non-owner
+                // row. The owner (re)claims it with a fresh LINK code; anyone
+                // without a valid owner code is refused, so a stranger is never
+                // served as the owner.
+                Ok(_) => {
                     if let Some(code) = looks_like_link_code(&effective_text) {
                         match state.link_codes.as_ref()
                             .and_then(|cs| cs.consume(code, "telegram").ok().flatten())
                         {
                             Some(uid) if uid == ctx.owner_user_id => {
-                                if let Err(e) = idstore.link(&uid, "telegram", &tg_user) {
+                                // relink (upsert) registers this chat as the
+                                // bot's owner under the per-bot scope.
+                                if let Err(e) = idstore.relink(&uid, &scope, &tg_user) {
                                     warn!("Telegram owner-link persist failed: {}", e);
                                     send_telegram_message(&state.http_client, &ctx.bot_token, chat_id,
                                         "Link accepted but couldn't be saved — try again.").await;
                                     return;
                                 }
-                                info!("Telegram personal bot bound to owner chat: user={} tg_user={}", uid, tg_user);
+                                info!("Telegram personal bot {} bound to owner chat: user={} tg_user={}",
+                                    account, uid, tg_user);
                                 send_telegram_message(&state.http_client, &ctx.bot_token, chat_id,
                                     "✅ This bot is now secured to your account — go ahead and talk to me.").await;
                                 return;
@@ -331,8 +337,6 @@ pub async fn process_message_for_account(
                             }
                         }
                     }
-                    // No code from an unknown sender → prompt the owner to
-                    // secure the bot; anyone else is simply ignored.
                     send_telegram_message(&state.http_client, &ctx.bot_token, chat_id,
                         "🔒 This bot isn't linked yet. If you're the owner, open MIRA → Settings → My Channels → Link Telegram and send me the LINK-XXXX-XXXX code.").await;
                     return;

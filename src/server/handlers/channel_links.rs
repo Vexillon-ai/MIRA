@@ -101,7 +101,14 @@ pub async fn list_my_links(
 ) -> impl IntoResponse {
     match store.list_for_user(&caller.id) {
         Ok(links) => {
-            let out: Vec<LinkResponse> = links.into_iter().map(Into::into).collect();
+            // Hide internal per-bot ownership rows (channels like
+            // `telegram:personal:<account>`) — those are how a Personal bot
+            // verifies its owner's chat, not user-facing linked accounts. Real
+            // channel names never contain ':'.
+            let out: Vec<LinkResponse> = links.into_iter()
+                .filter(|l| !l.channel.contains(':'))
+                .map(Into::into)
+                .collect();
             axum::Json(out).into_response()
         }
         Err(e) => err_resp(e),

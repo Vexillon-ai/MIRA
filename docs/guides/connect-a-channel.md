@@ -77,13 +77,31 @@ when you deliberately want the bot open to anyone.
 
 ## Signal
 
-Signal is end-to-end encrypted and great for a private, phone-native MIRA, but
-it needs a phone number registered with `signal-cli` (an operator/admin step).
+Signal is end-to-end encrypted and great for a private, phone-native MIRA. It
+runs on [`signal-cli`](https://github.com/AsamK/signal-cli), which MIRA drives
+itself — it starts the `signal-cli ... daemon --http` process and talks to it
+over a local HTTP API. It works on **Linux, macOS, and Windows**. It is **not**
+a global on/off switch: you add a Signal *account* (a phone number), exactly
+like adding a Telegram bot, and MIRA launches the daemon for that account.
 
-1. **Register a number** with `signal-cli` on the server (the admin does this
-   once). A dedicated number works best.
+**MIRA installs the runtime for you.** signal-cli is a Java application, but you
+don't have to install Java or signal-cli by hand. The first time you add a
+Signal account, MIRA fetches a pinned, checksum-verified copy of **signal-cli**
+and (on platforms that need it) a **bundled Temurin JRE** into `~/.mira/deps/`,
+then starts the daemon. On Linux x86_64 it uses signal-cli's self-contained
+native build, so no JRE is downloaded. (This is a ~100 MB one-time download; on
+Windows it includes the JRE, ~150 MB. Available since 0.277.0.)
+
+The one thing MIRA can't do for you is **register the phone number** with Signal
+— that's an interactive step (Signal sends a verification code / CAPTCHA):
+
+1. **Register a number** with signal-cli on the host (the admin does this once,
+   from a terminal). A dedicated number works best. *(If you'd rather use your
+   own signal-cli install, point `channels.signal.cli_binary` at it — MIRA
+   prefers an explicit path over the managed copy.)*
 2. **Add your Signal account** under **Settings → Channels**, pointing at that
-   number.
+   number. MIRA installs the runtime if needed and starts the daemon — no
+   restart. (Watch the channel status; the first start waits on the download.)
 3. Message MIRA from your phone to confirm the link.
 
 > Signal's setup is heavier than Telegram's because of the number registration.

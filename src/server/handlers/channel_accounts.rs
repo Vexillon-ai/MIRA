@@ -437,6 +437,37 @@ pub async fn create_account(
                     if let Err(e) = cm.0.write().await.start_account(&id).await {
                         warn!("channel account {id}: saved but poller didn't auto-start ({e}); \
                                a service restart or the per-account Start action will pick it up");
+                        // Signal on a fresh box: the daemon can't start because
+                        // signal-cli (and, off Linux-x86_64, a JRE) isn't
+                        // installed yet. Auto-install the MIRA-managed runtime
+                        // in the background — a ~100 MB download — then start
+                        // the account once it's ready. The user doesn't have to
+                        // install Java or signal-cli by hand. Idempotent and
+                        // best-effort; gated so we don't download when signal-cli
+                        // is already available (the start failed for another
+                        // reason, e.g. the number isn't registered).
+                        if kind == ChannelKind::Signal
+                            && !crate::install::deps::signal_cli_present("signal-cli")
+                        {
+                            let cm2 = Arc::clone(&cm.0);
+                            tokio::spawn(async move {
+                                info!("signal account {id}: installing managed signal-cli + JRE in background…");
+                                match tokio::task::spawn_blocking(
+                                    || crate::install::deps::ensure_signal_runtime(false)
+                                        .map_err(|e| e.to_string())
+                                ).await {
+                                    Ok(Ok(summary)) => {
+                                        info!("signal account {id}: runtime ready ({summary}); starting daemon");
+                                        if let Err(e) = cm2.write().await.start_account(&id).await {
+                                            warn!("signal account {id}: runtime installed but daemon start failed \
+                                                   ({e}); check the number is registered, then use Start");
+                                        }
+                                    }
+                                    Ok(Err(e)) => warn!("signal account {id}: managed runtime install failed: {e}"),
+                                    Err(e)     => warn!("signal account {id}: runtime install task panicked: {e}"),
+                                }
+                            });
+                        }
                     } else {
                         info!("channel account {id}: poller/daemon started on create");
                     }

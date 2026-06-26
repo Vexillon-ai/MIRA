@@ -123,6 +123,34 @@ impl IdentityStore {
         })
     }
 
+    /// Bind `(channel, external_id)` to `user_id`, **overwriting** any
+    /// existing owner of that identity. Unlike [`link`], which refuses a
+    /// re-bind via the UNIQUE constraint, this upserts — the caller must
+    /// have already authorised the re-bind (e.g. a Personal Telegram bot
+    /// owner who proved ownership with a fresh, single-use LINK code). A
+    /// physical channel identity maps to exactly one MIRA user, so taking
+    /// it over on proof of ownership is correct; it also self-heals a
+    /// stale mapping left over from earlier testing.
+    pub fn relink(&self, user_id: &str, channel: &str, external_id: &str) -> Result<ChannelLink, MiraError> {
+        let id  = Uuid::new_v4().to_string();
+        let now = Self::now_ms();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO user_channel_links
+               (id, user_id, channel, external_id, created_at, verified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(channel, external_id) DO UPDATE SET
+               user_id     = excluded.user_id,
+               verified_at = excluded.verified_at",
+            params![id, user_id, channel, external_id, now],
+        )
+        .map_err(|e| MiraError::DatabaseError(format!("relink: {}", e)))?;
+        Ok(ChannelLink {
+            id, user_id: user_id.to_owned(), channel: channel.to_owned(),
+            external_id: external_id.to_owned(), created_at: now, verified_at: now,
+        })
+    }
+
     /// Drop a link by id. The caller is expected to enforce that the
     /// link's owner matches the caller's user_id (or that the caller is
     /// admin) — this method just removes the row.
@@ -222,6 +250,22 @@ mod tests {
         s.link(&alice, "discord", "111").unwrap();
         let err = s.link(&bob, "discord", "111").unwrap_err();
         assert!(format!("{:?}", err).contains("already linked"));
+    }
+
+    #[test]
+    fn relink_overwrites_a_stale_mapping() {
+        // Telegram chat 111 is stale-mapped to alice (e.g. earlier testing).
+        // A plain link by bob is refused — but relink (owner proved ownership
+        // with a fresh code) takes the identity over. This is the fix for a
+        // Personal bot owner who could never re-claim a chat bound elsewhere.
+        let (_d, s, alice, bob) = open_with_users();
+        s.link(&alice, "telegram", "111").unwrap();
+        assert!(s.link(&bob, "telegram", "111").is_err(), "plain link must still refuse a steal");
+        s.relink(&bob, "telegram", "111").unwrap();
+        assert_eq!(s.lookup("telegram", "111").unwrap().as_deref(), Some(bob.as_str()));
+        // Idempotent: relinking to the same owner again is fine.
+        s.relink(&bob, "telegram", "111").unwrap();
+        assert_eq!(s.lookup("telegram", "111").unwrap().as_deref(), Some(bob.as_str()));
     }
 
     #[test]

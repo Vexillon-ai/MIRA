@@ -32,6 +32,11 @@ pub struct SignalCliDaemon {
     pub phone_number: String,
     pub port: u16,
     pub data_dir: String,
+    /// When set, exported as `JAVA_HOME` to the daemon child so the
+    /// signal-cli launcher uses MIRA's managed JRE instead of (or in the
+    /// absence of) a system Java. `None` for the self-contained native
+    /// build, or when relying on a system Java already on `PATH`.
+    java_home: Option<String>,
     child: Option<Child>,
     pub status: DaemonStatus,
 }
@@ -43,9 +48,18 @@ impl SignalCliDaemon {
             phone_number,
             port,
             data_dir,
+            java_home: None,
             child: None,
             status: DaemonStatus::NotStarted,
         }
+    }
+
+    /// Point the daemon at a specific Java runtime (exported as
+    /// `JAVA_HOME` on the child). Builder-style so existing `new` callers
+    /// stay unchanged.
+    pub fn with_java_home(mut self, java_home: Option<String>) -> Self {
+        self.java_home = java_home;
+        self
     }
 
     /// Start the daemon. Waits up to `timeout_secs` for it to become healthy.
@@ -62,22 +76,22 @@ impl SignalCliDaemon {
 
         self.status = DaemonStatus::Starting;
 
-        let child = Command::new(&self.binary)
-            .args([
-                "--config", &self.data_dir,
-                "-u", &self.phone_number,
-                "daemon",
-                "--http",
-                &format!("127.0.0.1:{}", self.port),
-                "--receive-mode", "on-connection",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| MiraError::ProviderError(
-                format!("Failed to start signal-cli: {}. Is signal-cli installed and in PATH?", e)
-            ))?;
+        let http_addr = format!("127.0.0.1:{}", self.port);
+        let args = [
+            "--config", &self.data_dir,
+            "-u", &self.phone_number,
+            "daemon",
+            "--http",
+            &http_addr,
+            "--receive-mode", "on-connection",
+        ];
+
+        let child = spawn_signal_cli(&self.binary, &args, self.java_home.as_deref())
+            .map_err(|e| MiraError::ProviderError(format!(
+                "Failed to start signal-cli: {}. Is signal-cli installed and in PATH? \
+                 On Windows, point `cli_binary` at the full path to signal-cli.bat \
+                 (and ensure a Java 17+ runtime is installed).", e
+            )))?;
 
         let pid = child.id().unwrap_or(0);
         self.child = Some(child);
@@ -112,15 +126,27 @@ impl SignalCliDaemon {
         )))
     }
 
-    /// Stop the daemon gracefully (SIGTERM → kill after 5s)
+    /// Stop the daemon: kill the signal-cli process (and, on Windows, its whole
+    /// tree — see `stop` notes below).
     pub async fn stop(&mut self) {
-        if let Some(ref mut child) = self.child {
+        if let Some(mut child) = self.child.take() {
             info!("Stopping signal-cli daemon");
+            // On Windows the daemon is launched via `cmd /C signal-cli.bat`,
+            // which spawns the JVM as a grandchild. Killing the `cmd.exe`
+            // handle alone orphans the JVM, so terminate the whole tree first.
+            #[cfg(windows)]
+            if let Some(pid) = child.id() {
+                let _ = Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+            }
             if let Err(e) = child.kill().await {
                 warn!("Failed to kill signal-cli daemon: {}", e);
             }
         }
-        self.child = None;
         self.status = DaemonStatus::Stopped;
     }
 
@@ -133,6 +159,48 @@ impl SignalCliDaemon {
             false
         }
     }
+}
+
+/// Spawn the signal-cli daemon process, accounting for how each platform
+/// launches it.
+///
+/// On Unix the binary (a shell wrapper or native build) is executed directly.
+/// On Windows signal-cli ships as `signal-cli.bat`, which `CreateProcess`
+/// cannot launch directly — batch files must run through `cmd.exe`. We detect a
+/// non-`.exe` binary and route it through `cmd /C` so the stock Windows
+/// distribution works; a real `.exe` (e.g. a GraalVM native build) is launched
+/// directly.
+#[cfg(windows)]
+fn spawn_signal_cli(binary: &str, args: &[&str], java_home: Option<&str>) -> std::io::Result<Child> {
+    let mut cmd = if binary.to_ascii_lowercase().ends_with(".exe") {
+        let mut c = Command::new(binary);
+        c.args(args);
+        c
+    } else {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(binary).args(args);
+        c
+    };
+    if let Some(jh) = java_home {
+        cmd.env("JAVA_HOME", jh);
+    }
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+}
+
+#[cfg(not(windows))]
+fn spawn_signal_cli(binary: &str, args: &[&str], java_home: Option<&str>) -> std::io::Result<Child> {
+    let mut cmd = Command::new(binary);
+    cmd.args(args);
+    if let Some(jh) = java_home {
+        cmd.env("JAVA_HOME", jh);
+    }
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
 }
 
 /// Generate the config snippet MIRA writes to `config.toml` when the user

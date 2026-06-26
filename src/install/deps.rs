@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! `mira deps` — managed native deps (ONNX Runtime today, signal-cli
-//! / JRE in v1.1+).
+//! `mira deps` — managed native deps (ONNX Runtime; signal-cli + a
+//! bundled Temurin JRE, fetched on demand when the Signal channel is
+//! enabled — see `ensure_signal_runtime`).
 //!
 //! Closes the "fresh tarball install fails until you `apt install
 //! libonnxruntime`" gap by giving MIRA its own pinned + verified
@@ -28,11 +29,21 @@ pub struct DepsManifest {
     pub deps: std::collections::BTreeMap<String, DepEntry>,
 }
 
+fn default_true() -> bool { true }
+
 #[derive(Debug, Deserialize)]
 pub struct DepEntry {
     pub version:      String,
     pub description:  String,
     pub required_for: String,
+    /// Whether a blanket `mira deps install` should fetch this dep.
+    /// Defaults true (onnxruntime). Large, feature-specific deps
+    /// (signal-cli, the JRE) set this false so they're only pulled on
+    /// demand — e.g. when the user enables the Signal channel — rather
+    /// than on every `mira deps install`. On-demand installs go through
+    /// `install_named` / `ensure_signal_runtime`, which ignore this flag.
+    #[serde(default = "default_true")]
+    pub auto:         bool,
     /// Per-platform variants keyed by `<os>-<arch>` (e.g. `linux-x86_64`).
     /// Captured as a flat map so unknown platform keys don't break
     /// parsing — the lookup at runtime just returns None and the user
@@ -99,6 +110,12 @@ fn install_all(manifest: &DepsManifest, force: bool) -> Result<(), Box<dyn Error
     let mut errors    = Vec::new();
 
     for (name, dep) in &manifest.deps {
+        if !dep.auto {
+            println!("  - {name} {}: skipped (on-demand only; install when enabling its feature)",
+                dep.version);
+            skipped += 1;
+            continue;
+        }
         let Some(p) = dep.platforms.get(&plat) else {
             println!("  - {name} {}: skipped (no pin for {plat} in manifest)",
                 dep.version);
@@ -289,6 +306,122 @@ pub fn install_named(name: &str, force: bool) -> Result<bool, Box<dyn Error>> {
     install_one(name, dep, p, force)
 }
 
+// ─── Signal runtime (signal-cli + JRE) resolution & install ──────────
+
+/// Absolute path to a managed dep's primary file (its manifest
+/// `lib_path`), if a pin exists for this platform AND the file is on
+/// disk under `~/.mira/deps/<name>/`. Generic over `lib_path`, so it
+/// resolves a launcher script/exe (signal-cli) the same way
+/// `is_onnxruntime_available` resolves a shared lib. None means "not
+/// installed / no pin for this platform".
+pub fn managed_dep_path(name: &str) -> Option<PathBuf> {
+    let manifest = DepsManifest::load().ok()?;
+    let plat = current_platform_key();
+    let p = manifest.deps.get(name)?.platforms.get(&plat)?;
+    let path = dep_install_dir(name).ok()?.join(&p.lib_path);
+    path.is_file().then_some(path)
+}
+
+/// `JAVA_HOME` for the managed Temurin JRE, if installed. The manifest
+/// `lib_path` points at the `java` executable (`.../bin/java[.exe]`);
+/// `JAVA_HOME` is the runtime root two levels up (the dir containing
+/// `bin/`). None when no managed JRE is present (e.g. linux-x86_64,
+/// which uses signal-cli's self-contained native build).
+pub fn managed_jre_home() -> Option<PathBuf> {
+    let java = managed_dep_path("jre")?;
+    java.parent()?.parent().map(Path::to_path_buf)
+}
+
+/// Resolve how to launch signal-cli: `(binary, optional JAVA_HOME)`.
+///
+/// Prefers MIRA-managed installs under `~/.mira/deps/` so a fresh box
+/// works without the user installing Java or signal-cli by hand. An
+/// explicitly configured `cli_binary` (anything other than the bare
+/// default `"signal-cli"`) always wins — a user who set a path meant
+/// it. When neither a managed install nor a custom path is present we
+/// fall back to `"signal-cli"` on `PATH` (and the system Java).
+pub fn resolve_signal_cli(configured_binary: &str) -> (String, Option<String>) {
+    let use_managed = configured_binary.is_empty() || configured_binary == "signal-cli";
+    let binary = if use_managed {
+        managed_dep_path("signal-cli")
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| configured_binary.to_string())
+    } else {
+        configured_binary.to_string()
+    };
+    let java_home = managed_jre_home().map(|p| p.to_string_lossy().into_owned());
+    (binary, java_home)
+}
+
+/// True when signal-cli can be launched on this host — either a managed
+/// install exists or `signal-cli` resolves on `PATH`. Used to decide
+/// whether the Signal channel needs an on-demand runtime install.
+pub fn signal_cli_present(configured_binary: &str) -> bool {
+    if managed_dep_path("signal-cli").is_some() {
+        return true;
+    }
+    // A configured absolute/relative path that exists on disk.
+    let p = Path::new(configured_binary);
+    if p.is_absolute() && p.is_file() {
+        return true;
+    }
+    // Otherwise check PATH for the bare name.
+    which_on_path(configured_binary).is_some()
+}
+
+/// Minimal `which`: first hit for `name` across `PATH` entries (adds
+/// `.bat`/`.cmd`/`.exe` probes on Windows). Returns the resolved path.
+fn which_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    #[cfg(windows)]
+    let exts = ["", ".exe", ".bat", ".cmd"];
+    #[cfg(not(windows))]
+    let exts = [""];
+    for dir in std::env::split_paths(&path) {
+        for ext in exts {
+            let cand = dir.join(format!("{name}{ext}"));
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+/// Install the full Signal runtime on demand: signal-cli, plus the
+/// bundled JRE on every platform that needs one (all except
+/// linux-x86_64, which uses the native build). Idempotent — already-
+/// installed components with a matching sha are skipped. Returns a
+/// human-readable summary of what happened. This is the function the
+/// "enable Signal" flow calls; it ignores the manifest `auto` flag.
+pub fn ensure_signal_runtime(force: bool) -> Result<String, Box<dyn Error>> {
+    let manifest = DepsManifest::load()?;
+    let plat = current_platform_key();
+    let mut notes = Vec::new();
+
+    // signal-cli is required on every supported platform.
+    match manifest.deps.get("signal-cli").and_then(|d| d.platforms.get(&plat)) {
+        Some(p) => match install_one("signal-cli", &manifest.deps["signal-cli"], p, force)? {
+            true  => notes.push("signal-cli installed".to_string()),
+            false => notes.push("signal-cli already present".to_string()),
+        },
+        None => return Err(format!(
+            "no signal-cli pin for {plat} — this platform isn't supported for managed install"
+        ).into()),
+    }
+
+    // The JRE is only pinned where signal-cli ships as the Java tarball.
+    match manifest.deps.get("jre").and_then(|d| d.platforms.get(&plat)) {
+        Some(p) => match install_one("jre", &manifest.deps["jre"], p, force)? {
+            true  => notes.push("JRE installed".to_string()),
+            false => notes.push("JRE already present".to_string()),
+        },
+        None => notes.push("JRE not needed on this platform (native build)".to_string()),
+    }
+
+    Ok(notes.join("; "))
+}
+
 /// Snapshot of every managed dep's install state. Used by the admin
 /// UI to render the deps page and decide whether the embedding-
 /// provider save needs an install-and-retry dance.
@@ -417,6 +550,38 @@ mod tests {
         assert!(plat.url.starts_with("https://"), "url must be https");
         assert_eq!(plat.sha256.len(), 64, "sha256 must be 64-char hex");
         assert!(plat.lib_path.contains("libonnxruntime"), "lib_path must point at the actual lib");
+    }
+
+    #[test]
+    fn manifest_signal_runtime_pins_are_wellformed() {
+        let m = DepsManifest::load().unwrap();
+
+        let sig = m.deps.get("signal-cli").expect("signal-cli must be in manifest");
+        assert!(!sig.auto, "signal-cli must be on-demand (auto=false), not blanket-installed");
+        // Every signal-cli pin: https url + 64-char sha + a launcher lib_path.
+        for (plat, p) in &sig.platforms {
+            assert!(p.url.starts_with("https://"), "{plat}: signal-cli url must be https");
+            assert_eq!(p.sha256.len(), 64, "{plat}: signal-cli sha256 must be 64-char hex");
+            assert!(p.lib_path.contains("signal-cli"), "{plat}: lib_path must point at the launcher");
+        }
+        // Windows pin must launch the .bat (CreateProcess can't run it directly;
+        // the daemon routes it through cmd /C).
+        assert!(sig.platforms["windows-x86_64"].lib_path.ends_with(".bat"),
+            "windows signal-cli launcher must be the .bat wrapper");
+
+        let jre = m.deps.get("jre").expect("jre must be in manifest");
+        assert!(!jre.auto, "jre must be on-demand (auto=false)");
+        for (plat, p) in &jre.platforms {
+            assert!(p.url.starts_with("https://"), "{plat}: jre url must be https");
+            assert_eq!(p.sha256.len(), 64, "{plat}: jre sha256 must be 64-char hex");
+            assert!(p.lib_path.ends_with("java") || p.lib_path.ends_with("java.exe"),
+                "{plat}: jre lib_path must point at the java executable");
+        }
+        // Invariant: linux-x86_64 uses signal-cli's self-contained native build,
+        // so it must NOT carry a JRE pin (and signal-cli must).
+        assert!(sig.platforms.contains_key("linux-x86_64"));
+        assert!(!jre.platforms.contains_key("linux-x86_64"),
+            "linux-x86_64 must not pin a JRE — the native signal-cli build needs none");
     }
 
     #[test]

@@ -53,3 +53,78 @@ lib_path  = "onnxruntime-osx-arm64-1.20.1/lib/libonnxruntime.1.20.1.dylib"
 url       = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-osx-x86_64-1.20.1.tgz"
 sha256    = "0f73006813af2a1a5d1723ed7dfb694fc629d15037124081bb61b7bf7d99fc78"
 lib_path  = "onnxruntime-osx-x86_64-1.20.1/lib/libonnxruntime.1.20.1.dylib"
+
+# ── signal-cli ────────────────────────────────────────────────────────
+# The Signal channel daemon. `auto = false` so a blanket `mira deps
+# install` doesn't pull ~100 MB on every box — it's fetched on demand
+# when the user enables the Signal channel (see `ensure_signal_runtime`).
+# Linux x86_64 uses upstream's GraalVM *native* build (no JRE needed);
+# every other platform uses the universal Java tarball, which needs the
+# managed `jre` dep below. `lib_path` is the launcher MIRA spawns:
+# the native binary on linux-x64, the `bin/signal-cli` shell launcher on
+# unix, and `bin/signal-cli.bat` on Windows.
+[deps.signal-cli]
+version      = "0.14.5"
+description  = "signal-cli — Signal messenger CLI/daemon (https://github.com/AsamK/signal-cli)."
+required_for = "the Signal channel"
+auto         = false
+
+[deps.signal-cli.linux-x86_64]
+url       = "https://github.com/AsamK/signal-cli/releases/download/v0.14.5/signal-cli-0.14.5-Linux-native.tar.gz"
+sha256    = "39dc9e483da0d69151065e87aee8486d7a8bc67e0d3e9994c851269c1bfd80e3"
+lib_path  = "signal-cli"
+
+[deps.signal-cli.linux-aarch64]
+url       = "https://github.com/AsamK/signal-cli/releases/download/v0.14.5/signal-cli-0.14.5.tar.gz"
+sha256    = "62d38ebfef3988d78f437e7328183b75ee549d111382e66c1af70d3ebd3cd7a7"
+lib_path  = "signal-cli-0.14.5/bin/signal-cli"
+
+[deps.signal-cli.macos-x86_64]
+url       = "https://github.com/AsamK/signal-cli/releases/download/v0.14.5/signal-cli-0.14.5.tar.gz"
+sha256    = "62d38ebfef3988d78f437e7328183b75ee549d111382e66c1af70d3ebd3cd7a7"
+lib_path  = "signal-cli-0.14.5/bin/signal-cli"
+
+[deps.signal-cli.macos-aarch64]
+url       = "https://github.com/AsamK/signal-cli/releases/download/v0.14.5/signal-cli-0.14.5.tar.gz"
+sha256    = "62d38ebfef3988d78f437e7328183b75ee549d111382e66c1af70d3ebd3cd7a7"
+lib_path  = "signal-cli-0.14.5/bin/signal-cli"
+
+# Windows ships as the universal Java tarball; the launcher is the .bat
+# wrapper (MIRA routes it through `cmd /C` — see signal_cli/daemon.rs).
+[deps.signal-cli.windows-x86_64]
+url       = "https://github.com/AsamK/signal-cli/releases/download/v0.14.5/signal-cli-0.14.5.tar.gz"
+sha256    = "62d38ebfef3988d78f437e7328183b75ee549d111382e66c1af70d3ebd3cd7a7"
+lib_path  = "signal-cli-0.14.5/bin/signal-cli.bat"
+
+# ── JRE (Eclipse Temurin) ─────────────────────────────────────────────
+# signal-cli 0.14.5 requires a Java 25+ runtime. We bundle Temurin's JRE
+# so Signal works on a box with no system Java. NOT needed on linux-x86_64
+# (that platform uses signal-cli's self-contained native build), so there
+# is deliberately no linux-x86_64 pin here. MIRA points the signal-cli
+# launcher at this via JAVA_HOME (the dir holding `bin/`). `auto = false`:
+# fetched on demand alongside signal-cli.
+[deps.jre]
+version      = "25.0.3+9"
+description  = "Eclipse Temurin JRE 25 — Java runtime for signal-cli."
+required_for = "the Signal channel (non-Linux-x86_64 platforms)"
+auto         = false
+
+[deps.jre.linux-aarch64]
+url       = "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.3%2B9/OpenJDK25U-jre_aarch64_linux_hotspot_25.0.3_9.tar.gz"
+sha256    = "d12d5b19ff7f6c4a99fd4f9eecede2c96e64df7d1f41cc84f2e9c9b38408600b"
+lib_path  = "jdk-25.0.3+9-jre/bin/java"
+
+[deps.jre.macos-x86_64]
+url       = "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.3%2B9/OpenJDK25U-jre_x64_mac_hotspot_25.0.3_9.tar.gz"
+sha256    = "594bf4e7d15b622157a54915de7e458c208e3363d61a5e488d8abfbda9aff3e5"
+lib_path  = "jdk-25.0.3+9-jre/Contents/Home/bin/java"
+
+[deps.jre.macos-aarch64]
+url       = "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.3%2B9/OpenJDK25U-jre_aarch64_mac_hotspot_25.0.3_9.tar.gz"
+sha256    = "287cc80077dc2ffd0e5733ba238f92206a84c26bef33e6881a23c213e4c35af4"
+lib_path  = "jdk-25.0.3+9-jre/Contents/Home/bin/java"
+
+[deps.jre.windows-x86_64]
+url       = "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.3%2B9/OpenJDK25U-jre_x64_windows_hotspot_25.0.3_9.zip"
+sha256    = "a183e7280220ad5f6fe94ecbf025a5f10fc5797a0b18c600ed8f813c8158c530"
+lib_path  = "jdk-25.0.3+9-jre/bin/java.exe"
