@@ -39,6 +39,9 @@ pub struct StatusResponse {
     /// Which supervisor was detected, when known. One of "systemd",
     /// "docker", "launchd", or null.
     pub supervisor:       Option<&'static str>,
+    /// Host machine metrics (CPU / memory / disk). Admin-only — `None` for
+    /// non-admin callers, since host load + capacity is fleet-wide posture.
+    pub machine:          Option<crate::health::process::MachineMetrics>,
 }
 
 pub async fn status_handler(
@@ -49,6 +52,7 @@ pub async fn status_handler(
     AuthUser(user):     AuthUser,
     Extension(agent):   Extension<Arc<AgentCore>>,
     Extension(history): Extension<Arc<HistoryStore>>,
+    Extension(data_dir): Extension<crate::server::handlers::onboarding::DataDir>,
 ) -> impl IntoResponse {
     let is_admin = user.role == crate::auth::models::Role::Admin;
 
@@ -73,6 +77,13 @@ pub async fn status_handler(
         (None, None, None, None, None)
     };
 
+    // Host machine metrics — admin-only (host load/capacity is fleet posture).
+    let machine = if is_admin {
+        Some(crate::health::process::machine_metrics(&data_dir.0))
+    } else {
+        None
+    };
+
     axum::Json(StatusResponse {
         version:            env!("CARGO_PKG_VERSION"),
         uptime_secs:        uptime,
@@ -84,6 +95,7 @@ pub async fn status_handler(
         provider_name,
         supervised:         supervisor.is_some(),
         supervisor,
+        machine,
     })
 }
 

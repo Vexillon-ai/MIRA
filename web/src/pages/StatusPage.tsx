@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useQuery } from '@tanstack/react-query'
-import { RefreshCw, Server, Database, Clock, Activity, Brain, MessageSquare, Wifi } from 'lucide-react'
+import { RefreshCw, Server, Database, Clock, Activity, Brain, MessageSquare, Wifi, Cpu, MemoryStick, HardDrive } from 'lucide-react'
 import { providersApi } from '@/api/providers'
 import styles from './StatusPage.module.css'
 
@@ -12,6 +12,13 @@ function formatUptime(secs: number): string {
   if (d > 0) return `${d}d ${h}h ${m}m`
   if (h > 0) return `${h}h ${m}m`
   return `${m}m ${secs % 60}s`
+}
+
+/** MB → a human size (MB / GB) for the machine cards. */
+function formatMb(mb: number | null | undefined): string {
+  if (mb == null) return '—'
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`
+  return `${Math.round(mb)} MB`
 }
 
 export default function StatusPage() {
@@ -51,6 +58,37 @@ export default function StatusPage() {
             <StatCard icon={<Activity size={20} />} label="Provider" value={status.provider_name ?? '—'} />
             <StatCard icon={<Wifi size={20} />} label="Active Sessions" value={status.active_sessions != null ? String(status.active_sessions) : '—'} />
           </div>
+
+          {/* Machine metrics (admin-only; null for non-admins) */}
+          {status.machine && (
+            <>
+              <h2 className={styles.section}>Machine</h2>
+              <div className={styles.grid}>
+                <StatCard
+                  icon={<Cpu size={20} />}
+                  label="CPU"
+                  value={status.machine.cpu_pct != null ? `${Math.round(status.machine.cpu_pct)}%` : '—'}
+                  sublabel="host usage"
+                />
+                <StatCard
+                  icon={<MemoryStick size={20} />}
+                  label="Memory"
+                  value={status.machine.mem_used_mb != null && status.machine.mem_total_mb != null
+                    ? `${formatMb(status.machine.mem_used_mb)} / ${formatMb(status.machine.mem_total_mb)}`
+                    : '—'}
+                  sublabel={status.machine.proc_rss_mb != null ? `MIRA: ${formatMb(status.machine.proc_rss_mb)}` : undefined}
+                />
+                <StatCard
+                  icon={<HardDrive size={20} />}
+                  label="Disk free"
+                  value={status.machine.disk_free_mb != null && status.machine.disk_total_mb != null
+                    ? `${formatMb(status.machine.disk_free_mb)} / ${formatMb(status.machine.disk_total_mb)}`
+                    : formatMb(status.machine.disk_free_mb)}
+                  sublabel="data partition"
+                />
+              </div>
+            </>
+          )}
 
           {/* Database stats */}
           <h2 className={styles.section}>Database</h2>

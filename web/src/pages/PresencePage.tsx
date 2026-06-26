@@ -6,6 +6,9 @@ import { Link } from 'react-router-dom'
 import { Sparkles, Plus, Trash2, Loader2, Save } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { queryClient } from '@/api/queryClient'
+import { api } from '@/api/client'
+import type { User } from '@/api/types'
+import { useAuthStore } from '@/store/authStore'
 import {
   getPresence,
   updatePresence,
@@ -13,6 +16,7 @@ import {
   type PresenceUpdate,
   type PresenceTone,
   type PresenceMessageMix,
+  type CareRole,
 } from '@/api/companion'
 import styles from './PresencePage.module.css'
 
@@ -53,7 +57,17 @@ interface FormState {
   share_agent_activity: boolean
   daily_briefing_enabled: boolean
   daily_briefing_hour: number
+  // Care-net
+  care_role: CareRole
+  care_consent: boolean
+  safety_contact_user_id: string
 }
+
+const CARE_ROLES: { value: CareRole; label: string; blurb: string }[] = [
+  { value: 'standard', label: 'Just me', blurb: 'A companion for myself — no one else is alerted.' },
+  { value: 'child',    label: 'A child', blurb: 'A guardian is alerted if their child seems to be struggling. Gentle, age-aware tone.' },
+  { value: 'elder',    label: 'An older adult', blurb: 'A contact is alerted on silence or signs of distress — a light-touch wellbeing check.' },
+]
 
 function toForm(s: PresenceSettings): FormState {
   return {
@@ -67,6 +81,9 @@ function toForm(s: PresenceSettings): FormState {
     share_agent_activity: s.share_agent_activity,
     daily_briefing_enabled: s.daily_briefing_enabled,
     daily_briefing_hour: s.daily_briefing_hour,
+    care_role: s.care_role,
+    care_consent: s.care_consent,
+    safety_contact_user_id: s.safety_contact_user_id ?? '',
   }
 }
 
@@ -89,6 +106,17 @@ export default function PresencePage() {
     queryKey: ['me-companion'],
     queryFn:  getPresence,
   })
+
+  // Other MIRA users → safety-contact candidates (you can't be your own).
+  const me = useAuthStore((s) => s.user)
+  const { data: users = [] } = useQuery<User[]>({
+    queryKey: ['users'],
+    queryFn:  () => api.get('/api/users').then((r) => r.data),
+  })
+  const contacts = useMemo(
+    () => users.filter((u) => u.id !== me?.id),
+    [users, me],
+  )
 
   const [form, setForm] = useState<FormState | null>(null)
   const [timesError, setTimesError] = useState('')
@@ -138,6 +166,11 @@ export default function PresencePage() {
         return
       }
     }
+    // A monitored care role needs a safety contact to alert.
+    if (form.care_role !== 'standard' && !form.safety_contact_user_id) {
+      toast.error('Pick a safety contact for the care role, or set the role to "Just me".')
+      return
+    }
     setTimesError('')
 
     const body: PresenceUpdate = {
@@ -151,6 +184,11 @@ export default function PresencePage() {
       share_agent_activity:   form.share_agent_activity,
       daily_briefing_enabled: form.daily_briefing_enabled,
       daily_briefing_hour:    form.daily_briefing_hour,
+      care_role:              form.care_role,
+      care_consent:           form.care_consent,
+      ...(form.safety_contact_user_id
+        ? { safety_contact_user_id: form.safety_contact_user_id }
+        : {}),
     }
     saveMut.mutate(body)
   }
@@ -388,7 +426,70 @@ export default function PresencePage() {
           )}
         </div>
 
-        {/* ── 5. Footer note ─────────────────────────────────────────────── */}
+        {/* ── 5. Care network ────────────────────────────────────────────── */}
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>Care network</div>
+          <p className={styles.help}>
+            Presence can be a quiet wellbeing net: if the person seems to be
+            struggling or goes silent, MIRA gives a trusted contact a gentle
+            heads-up — never the full conversation, just enough to check in.
+            MIRA always tells the person this is set up; it's never covert.
+          </p>
+
+          <div className={styles.segmentedRow}>
+            {CARE_ROLES.map((r) => (
+              <button
+                key={r.value}
+                type="button"
+                className={`${styles.segmented} ${form.care_role === r.value ? styles.segmentedActive : ''}`}
+                onClick={() => set('care_role', r.value)}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+          <p className={styles.help}>
+            {CARE_ROLES.find((r) => r.value === form.care_role)?.blurb}
+          </p>
+
+          {form.care_role !== 'standard' && (
+            <>
+              <label className={styles.field}>
+                <span>Alert this contact</span>
+                <select
+                  className={styles.select}
+                  value={form.safety_contact_user_id}
+                  onChange={(e) => set('safety_contact_user_id', e.target.value)}
+                >
+                  <option value="">— pick a contact —</option>
+                  {contacts.map((u) => (
+                    <option key={u.id} value={u.id}>{u.display_name || u.username}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label className={styles.toggleLine}>
+                The person knows MIRA may alert this contact if they seem unwell or go quiet
+                <span className={styles.toggleWrap}>
+                  <input
+                    type="checkbox"
+                    checked={form.care_consent}
+                    onChange={(e) => set('care_consent', e.target.checked)}
+                  />
+                  <span className={styles.toggleTrack} />
+                </span>
+              </label>
+              {!form.care_consent && (
+                <p className={styles.help}>
+                  Until this is checked, MIRA will tell the person about the
+                  arrangement before it would ever reach out to the contact.
+                </p>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* ── 6. Footer note ─────────────────────────────────────────────── */}
         <p className={styles.footerNote}>
           You can also just tell MIRA in chat — "message me less", "be funnier",
           "pause till Monday" — and it updates these settings.

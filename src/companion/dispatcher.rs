@@ -50,6 +50,17 @@ gentle question. One message; let them reply when they're ready. \
 Do not refer to this prompt or to the scheduler. Do not call any \
 tools — just write the opening message.]";
 
+// One-time care-net disclosure, woven into a check-in the first time a
+// monitored arrangement is active. Keeps MIRA transparent — the person always
+// learns, in plain language, that a contact may be alerted. Never covert.
+const CARE_DISCLOSURE_CUE: &str = "\
+[Also, gently and naturally let them know — in your own words, woven into \
+the message, not as a formal notice — that you're set up to look out for \
+them, and that if they ever seem to be having a really hard time or you \
+don't hear from them for a while, you may give their trusted contact a \
+short heads-up so someone can check in. Frame it warmly as care, not \
+surveillance. Mention it once; keep it brief.]";
+
 // Conversation title used when the dispatcher has to create one.
 // Same title across check-ins so they all roll up into one thread,
 // preventing a new conversation row per fire.
@@ -308,6 +319,17 @@ impl CompanionDispatcher {
             cue.push_str("\n\n");
             cue.push_str(&tone);
         }
+        // Care-net transparency: if this person is under a monitored care role
+        // (child/elder) and the arrangement hasn't been disclosed to them yet,
+        // weave a one-time, plain-language heads-up into this check-in — MIRA is
+        // never a covert watcher. We stamp the disclosure after a successful
+        // send (below) so it happens exactly once.
+        let disclose_care = settings.care.role.is_monitored()
+            && settings.care.consent_at.is_none();
+        if disclose_care {
+            cue.push_str("\n\n");
+            cue.push_str(CARE_DISCLOSURE_CUE);
+        }
         // Fold recent real conversations into the cue (see above) — for the
         // opener's context and recall quality. FollowUp already embeds this
         // digest in its instruction, so only append it for the other types.
@@ -456,6 +478,12 @@ impl CompanionDispatcher {
         if delivery_error.is_none() {
             if let Err(e) = self.store.mark_checkin(user_id, Utc::now()) {
                 warn!("companion dispatch: mark_checkin failed for '{user_id}': {e}");
+            }
+            // Record the one-time care disclosure so it's woven in exactly once.
+            if disclose_care {
+                if let Err(e) = self.store.mark_care_disclosed(user_id) {
+                    warn!("companion dispatch: mark_care_disclosed failed for '{user_id}': {e}");
+                }
             }
         }
 

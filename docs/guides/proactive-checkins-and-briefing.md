@@ -1,6 +1,6 @@
 ---
-title: Proactive check-ins & daily briefing
-description: Make MIRA reach out first — periodic companion check-ins, a morning briefing, and a safety contact for missed check-ins.
+title: Presence & proactive check-ins
+description: Presence — MIRA's proactive companion mode. Make MIRA reach out first with periodic companion check-ins, a morning briefing, and a safety contact for missed check-ins.
 sidebar:
   order: 2
 ---
@@ -80,17 +80,52 @@ Each person's settings override the instance-wide defaults an admin sets in the
 `companion` config block. The daily briefing is separate and isn't affected by
 these limits.
 
+## The care network
+
+Presence can be more than friendly company: it can be a quiet **wellbeing net**
+for someone you look out for — a child, or an older parent living
+independently. If the person seems to be having a hard time, or simply goes
+quiet, MIRA gives a trusted contact a gentle heads-up so a real human can check
+in. You set this up on the **Settings → Presence** page under **Care network**.
+
+It's built on four principles:
+
+- **Never covert.** MIRA always tells the person, in plain language, that it's
+  looking out for them and may give their contact a heads-up. The first time a
+  care arrangement is active, MIRA works this disclosure naturally into a
+  check-in. The "the person knows" acknowledgement on the Presence page records
+  that this has happened.
+- **Concern, not tattling.** Only genuine signals escalate — clear distress, or
+  a run of unanswered check-ins. An ordinary off day doesn't trigger anything;
+  MIRA just responds warmly. Repeat alerts for the same signal are suppressed.
+- **A heads-up, not 911.** The contact gets a short, factual note — "you might
+  want to check in" — so a person who knows them can follow up. MIRA escalates
+  to that human; it does **not** call emergency services. In parallel, MIRA
+  responds to the person warmly and surfaces crisis resources to *them*.
+- **Minimal disclosure.** The contact sees a one- or two-sentence summary of the
+  signal and the person's name — never the full conversation.
+
+### Choose a care role
+
+On the Presence page, pick who Presence is for:
+
+- **Just me** — a companion for yourself; no one else is alerted (the default).
+- **A child** — a guardian is alerted if their child seems to be struggling;
+  MIRA keeps a gentle, age-aware tone.
+- **An older adult** — a contact is alerted on silence or signs of distress — a
+  light-touch wellbeing check for someone living more independently.
+
+For a child or older-adult role, choose the **contact to alert** and confirm the
+person has been told. How serious a signal is tunes the message: an *acute*
+signal (mentions of self-harm, or acute physical symptoms) sends an urgent
+heads-up and shows the person crisis resources prominently; a *concerning* one
+(a low mood, loneliness) sends a softer "you might want to check in".
+
 ### Set a safety contact
 
-Companion mode is often used as a wellbeing or caregiver feature — for example,
-keeping a parent who lives alone in low-stakes daily contact. For that reason
-it can escalate to a designated human.
-
-When you configure check-ins, set a **safety contact**: a person MIRA notifies
+When you configure check-ins, set a **safety contact**: the person MIRA notifies
 if check-ins go unanswered (three in a row over 48 hours) or if a message reads
-as distress. The escalation is short and factual — a heads-up so a real person
-can follow up. MIRA escalates to that human; it does **not** call emergency
-services on your behalf.
+as distress. (Choosing a care role above sets this same contact.)
 
 The safety contact is a hard prerequisite for ordinary user accounts — you
 can't enable companion check-ins without one — because a feature that holds

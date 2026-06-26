@@ -646,6 +646,9 @@ impl Tool for CompanionConfigureTool {
                 max_per_day,
                 min_gap_minutes,
                 max_unanswered_checkins,
+                // Care-net role/consent are configured from the Presence page,
+                // not this tool (kept narrow for chat-driven tuning).
+                ..Default::default()
             };
             if let Err(e) = self.system.configure(&user_id, update) {
                 return Ok(map_err(self.name(), e));
@@ -675,6 +678,7 @@ impl Tool for CompanionConfigureTool {
                     last_briefing_at: None,
                     cadence: Default::default(),
                     presence: Default::default(),
+                    care: Default::default(),
                     created_at: now,
                     updated_at: now,
                 },

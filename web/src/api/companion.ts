@@ -37,6 +37,9 @@ export interface PresenceTone {
   verbosity: number
 }
 
+/** Care-net role: who the monitored person is. Tunes escalation framing + tone. */
+export type CareRole = 'standard' | 'child' | 'elder'
+
 /** Which kinds of proactive messages MIRA is allowed to send. */
 export interface PresenceMessageMix {
   check_in: boolean
@@ -70,6 +73,10 @@ export interface PresenceSettings {
   tone: PresenceTone
   message_mix: PresenceMessageMix
   share_agent_activity: boolean
+  /** Care-net (Pass 2): who the person is. */
+  care_role: CareRole
+  /** Whether the care arrangement has been disclosed to + acknowledged. */
+  care_consent: boolean
 }
 
 /** Fields PUT /api/me/companion accepts (a partial update). Note this does NOT
@@ -90,6 +97,9 @@ export type PresenceUpdate = Partial<
     | 'preferred_channels'
     | 'daily_briefing_enabled'
     | 'daily_briefing_hour'
+    | 'safety_contact_user_id'
+    | 'care_role'
+    | 'care_consent'
   >
 >
 

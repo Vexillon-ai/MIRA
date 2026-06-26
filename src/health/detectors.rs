@@ -398,7 +398,7 @@ impl Detector for DiskFreeDetector {
     fn name(&self) -> &'static str { "disk.mira_data_free_mb" }
 
     fn run(&self, ctx: &DetectorContext) -> DetectorReport {
-        let free_mb = match statvfs_free_mb(&ctx.data_dir) {
+        let free_mb = match disk_free_mb(&ctx.data_dir) {
             Ok(v)  => v,
             Err(e) => return err_yellow(self.name(), e),
         };
@@ -419,29 +419,11 @@ impl Detector for DiskFreeDetector {
     }
 }
 
-#[cfg(target_family = "unix")]
-fn statvfs_free_mb(path: &Path) -> Result<u64, String> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let cpath = CString::new(path.as_os_str().as_bytes())
-        .map_err(|e| format!("path -> CString: {e}"))?;
-    // SAFETY: libc::statvfs writes into a stack-allocated struct on
-    // success and returns -1 on failure. cpath outlives the call.
-    let mut sv: libc::statvfs = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::statvfs(cpath.as_ptr(), &mut sv) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(format!("statvfs({}) failed: {err}", path.display()));
-    }
-    // f_bavail is blocks available to non-root, which is what we want
-    // (root can technically still write to a fully-reserved partition).
-    let bytes_free = (sv.f_bavail as u64) * (sv.f_frsize as u64);
-    Ok(bytes_free / 1024 / 1024)
-}
-
-#[cfg(not(target_family = "unix"))]
-fn statvfs_free_mb(_path: &Path) -> Result<u64, String> {
-    Err("statvfs unsupported on this platform".into())
+// Free space (MB) on the filesystem holding `path`, cross-platform via the
+// shared `process::disk_space_mb` helper (Linux/macOS/Windows).
+fn disk_free_mb(path: &Path) -> Result<u64, String> {
+    super::process::disk_space_mb(path).0
+        .ok_or_else(|| format!("no mounted volume contains {}", path.display()))
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -584,7 +566,7 @@ impl Detector for ProcessRssDetector {
     fn run(&self, _ctx: &DetectorContext) -> DetectorReport {
         let snap = super::process::snapshot();
         let Some(rss_kb) = snap.rss_kb else {
-            return err_yellow(self.name(), "could not read /proc/self/status");
+            return err_yellow(self.name(), "could not read process memory");
         };
         let mb = rss_kb / 1024;
         let level = if mb > 2500 { HealthLevel::Red }
@@ -612,7 +594,7 @@ impl Detector for ProcessVszDetector {
     fn run(&self, _ctx: &DetectorContext) -> DetectorReport {
         let snap = super::process::snapshot();
         let Some(vsz_kb) = snap.vsz_kb else {
-            return err_yellow(self.name(), "could not read /proc/self/status");
+            return err_yellow(self.name(), "could not read process virtual memory");
         };
         let mb = vsz_kb / 1024;
         let level = if mb > 24_000 { HealthLevel::Red }
@@ -664,6 +646,7 @@ impl Detector for ProcessCpuDetector {
 pub struct ProcessFdCountDetector;
 impl Detector for ProcessFdCountDetector {
     fn name(&self) -> &'static str { "process.fd_count" }
+    fn is_applicable(&self) -> bool { cfg!(target_os = "linux") } // reads /proc
     fn run(&self, _ctx: &DetectorContext) -> DetectorReport {
         let snap = super::process::snapshot();
         let Some(count) = snap.fd_count else {
@@ -703,6 +686,7 @@ impl Detector for ProcessFdCountDetector {
 pub struct ProcessThreadCountDetector;
 impl Detector for ProcessThreadCountDetector {
     fn name(&self) -> &'static str { "process.thread_count" }
+    fn is_applicable(&self) -> bool { cfg!(target_os = "linux") } // reads /proc
     fn run(&self, _ctx: &DetectorContext) -> DetectorReport {
         let snap = super::process::snapshot();
         let Some(n) = snap.thread_count else {

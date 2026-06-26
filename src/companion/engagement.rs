@@ -19,7 +19,7 @@ use chrono_tz::Tz;
 use tracing::{debug, warn};
 
 use crate::companion::engagement_log::{EngagementEntry, EngagementLabel, EngagementLog};
-use crate::companion::safety::SafetyFloor;
+use crate::companion::safety::{ConcernSeverity, SafetyFloor};
 use crate::providers::ModelProvider;
 use crate::types::{ChatMessage, GenerationOptions};
 
@@ -71,8 +71,8 @@ pub fn spawn_post_hook(
     }
 
     tokio::spawn(async move {
-        let label = match classify(&assessor.provider, &user_msg, &assistant_msg).await {
-            Some(l) => l,
+        let (label, severity) = match classify(&assessor.provider, &user_msg, &assistant_msg).await {
+            Some(c) => c,
             None => {
                 debug!("companion engagement: classifier produced no label for '{user_id}'");
                 return;
@@ -109,7 +109,8 @@ pub fn spawn_post_hook(
         if matches!(label, EngagementLabel::Distressed) {
             if let Some(floor) = &assessor.safety {
                 let summary = build_distress_summary(&user_msg, &assistant_msg);
-                let _ = floor.handle_distress(&user_id, &summary).await;
+                let sev = severity.unwrap_or_default();
+                let _ = floor.handle_distress(&user_id, &summary, sev).await;
             } else {
                 warn!(
                     "companion engagement: distressed signal for '{user_id}' \
@@ -130,13 +131,16 @@ fn build_distress_summary(user_msg: &str, assistant_msg: &str) -> String {
     format!("user: {u} | assistant: {a}")
 }
 
-// Run the LLM classifier on one (user, assistant) pair. Returns
-// `None` on provider error, timeout, or unparseable output.
+// Run the LLM classifier on one (user, assistant) pair. Returns the
+// engagement label plus, when the label is `distressed`, a concern
+// severity (`Acute` vs `Concerning`) parsed from the same response — so
+// severity costs no extra LLM call. `None` on provider error, timeout,
+// or unparseable output.
 async fn classify(
     provider: &Arc<dyn ModelProvider>,
     user_msg: &str,
     assistant_msg: &str,
-) -> Option<EngagementLabel> {
+) -> Option<(EngagementLabel, Option<ConcernSeverity>)> {
     let messages = vec![
         ChatMessage::system(SYSTEM_PROMPT.to_string()),
         ChatMessage::user(build_user_prompt(user_msg, assistant_msg)),
@@ -156,7 +160,10 @@ async fn classify(
         Err(_)     => { warn!("engagement classifier: timed out"); return None; }
     };
 
-    parse_label(&response)
+    let label = parse_label(&response)?;
+    let severity = matches!(label, EngagementLabel::Distressed)
+        .then(|| parse_severity(&response));
+    Some((label, severity.flatten()))
 }
 
 const SYSTEM_PROMPT: &str = "\
@@ -176,7 +183,15 @@ of these labels, on a single line, with no surrounding text:\n\
                self-harm, severe physical symptoms, acute \
                loneliness/hopelessness, etc.).\n\
 \n\
-Output only the label name. No reasoning, no punctuation, no \
+When and ONLY when the label is `distressed`, add a severity after a \
+colon:\n\
+- `distressed:acute`  — imminent or serious: self-harm intent or \
+                        methods, or acute physical symptoms (chest \
+                        pain, can't breathe, a fall).\n\
+- `distressed:concerning` — notable but not imminent: sadness, \
+                        loneliness, hopelessness, a hard day.\n\
+\n\
+Output only the label (and severity if distressed). No reasoning, no \
 explanations.\
 ";
 
@@ -210,6 +225,17 @@ fn parse_label(raw: &str) -> Option<EngagementLabel> {
     None
 }
 
+// Pull the concern severity out of a `distressed:...` response. Defaults to
+// `Concerning` when distress is present but no severity is stated — the safe,
+// non-alarming default. Returns `None` only if the text mentions no distress
+// at all (the caller already gates on the Distressed label).
+fn parse_severity(raw: &str) -> Option<ConcernSeverity> {
+    let lower = raw.to_lowercase();
+    if !lower.contains("distress") { return None; }
+    if lower.contains("acute") { Some(ConcernSeverity::Acute) }
+    else { Some(ConcernSeverity::Concerning) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +246,17 @@ mod tests {
         assert_eq!(parse_label("brief"),   Some(EngagementLabel::Brief));
         assert_eq!(parse_label("declined"), Some(EngagementLabel::Declined));
         assert_eq!(parse_label("distressed"), Some(EngagementLabel::Distressed));
+        assert_eq!(parse_label("distressed:acute"), Some(EngagementLabel::Distressed));
+    }
+
+    #[test]
+    fn parse_severity_reads_distress_grade() {
+        assert_eq!(parse_severity("distressed:acute"), Some(ConcernSeverity::Acute));
+        assert_eq!(parse_severity("distressed:concerning"), Some(ConcernSeverity::Concerning));
+        // distress with no grade defaults to the non-alarming Concerning.
+        assert_eq!(parse_severity("distressed"), Some(ConcernSeverity::Concerning));
+        // no distress mentioned → None (caller gates on the Distressed label).
+        assert_eq!(parse_severity("engaged"), None);
     }
 
     #[test]

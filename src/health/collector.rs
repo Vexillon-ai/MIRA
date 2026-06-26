@@ -72,6 +72,17 @@ pub fn run_audit(
         health_store.list_custom_detectors().unwrap_or_default();
 
     for d in detectors {
+        // Skip detectors whose prerequisites don't exist on this platform
+        // (e.g. the /proc-based process detectors on Windows/macOS). Record a
+        // Green "not applicable" so the snapshot is complete and the Guardian
+        // never warns that these are "unavailable" — they were never meant to
+        // run here.
+        if !d.is_applicable() {
+            reports.push(super::DetectorReport::green(
+                d.name(), "not applicable on this platform".to_string(),
+            ));
+            continue;
+        }
         let policy = policy_lookup(d.name());
         if matches!(policy, ActionPolicy::Disabled) {
             // Still record a Green entry so the snapshot is complete —

@@ -122,6 +122,58 @@ impl Default for PresenceTuning {
     }
 }
 
+// ── Care-net (Presence Pass 2) ─────────────────────────────────────────────
+//
+// The wellbeing/safety layer. The companion already escalates distress + missed
+// check-ins to `safety_contact_user_id` (see safety.rs); the care-net adds the
+// *who is this person* context that tunes how sensitively MIRA watches and how
+// it talks — plus the transparency record that the arrangement was disclosed.
+// Stored as JSON in `carenet_json` so it stays extensible (mirrors cadence /
+// presence). Guardrails: never covert (always disclosed), concern-not-tattling
+// (severity-gated escalation lives in safety.rs), minimal disclosure.
+
+/// Who the monitored person is, which tunes escalation sensitivity + tone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CareRole {
+    /// Ordinary adult — self-managed companion; only clear distress or a run of
+    /// missed check-ins escalates. The default.
+    #[default]
+    Standard,
+    /// A child/teen. A guardian is the safety contact; MIRA keeps a gentle,
+    /// age-aware tone, surfaces age-appropriate support, and is more willing to
+    /// give the guardian a heads-up on an elevated concern.
+    Child,
+    /// An older adult living more independently. Silence (missed check-ins) and
+    /// confused/erratic replies are weighted more heavily toward a heads-up to
+    /// the responsible contact.
+    Elder,
+}
+
+impl CareRole {
+    /// True when this role means someone else is watching over the person, so
+    /// MIRA should disclose the arrangement and apply care-net escalation.
+    pub fn is_monitored(&self) -> bool { !matches!(self, CareRole::Standard) }
+    pub fn as_str(&self) -> &'static str {
+        match self { CareRole::Standard => "standard", CareRole::Child => "child", CareRole::Elder => "elder" }
+    }
+}
+
+/// Per-user care-net configuration. Empty JSON (`{}`) → Standard, no consent
+/// stamp (the common case: companion with no care arrangement).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CareNet {
+    #[serde(default)]
+    pub role: CareRole,
+    /// When the care arrangement was disclosed to + acknowledged by the
+    /// monitored person (or asserted by their guardian at setup). MIRA ALWAYS
+    /// discloses the arrangement before it would escalate — `None` means "not
+    /// yet disclosed/acknowledged", which the dispatcher uses to surface a
+    /// one-time, plain-language heads-up. Never covert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_at: Option<DateTime<Utc>>,
+}
+
 // Per-user companion-mode state. JSON fields (`quiet_hours`,
 // `preferred_channels`) are stored as text and parsed on read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +230,10 @@ pub struct CompanionSettings {
     // Presence (rhythm + personality) tuning. Empty JSON = all defaults.
     #[serde(default)]
     pub presence: PresenceTuning,
+    // Care-net (Pass 2): care role + consent/disclosure. Empty JSON =
+    // Standard, no arrangement. See [`CareNet`].
+    #[serde(default)]
+    pub care: CareNet,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -230,6 +286,7 @@ impl CompanionStore {
                 checkins_today_day            TEXT,
                 cadence_json                  TEXT NOT NULL DEFAULT '{}',
                 presence_json                 TEXT NOT NULL DEFAULT '{}',
+                carenet_json                  TEXT NOT NULL DEFAULT '{}',
                 created_at                    INTEGER NOT NULL,
                 updated_at                    INTEGER NOT NULL
             );
@@ -275,6 +332,10 @@ impl CompanionStore {
         // Empty '{}' = all defaults.
         add("ALTER TABLE companion_settings \
              ADD COLUMN presence_json TEXT NOT NULL DEFAULT '{}'")?;
+        // 0.278.0 — Presence Pass 2 care-net (JSON: role, consent_at).
+        // Empty '{}' = Standard role, no care arrangement.
+        add("ALTER TABLE companion_settings \
+             ADD COLUMN carenet_json TEXT NOT NULL DEFAULT '{}'")?;
         Ok(())
     }
 
@@ -324,7 +385,7 @@ impl CompanionStore {
                     safety_contact_user_id, setup_completed_at,
                     last_checkin_at, consecutive_missed_checkins,
                     daily_briefing_enabled, daily_briefing_hour, last_briefing_at,
-                    created_at, updated_at, cadence_json, presence_json
+                    created_at, updated_at, cadence_json, presence_json, carenet_json
              FROM companion_settings WHERE user_id = ?1",
             params![user_id],
             row_to_settings,
@@ -344,6 +405,7 @@ impl CompanionStore {
         let chan_json  = serde_json::to_string(&s.preferred_channels)?;
         let cadence_json = serde_json::to_string(&s.cadence)?;
         let presence_json = serde_json::to_string(&s.presence)?;
+        let carenet_json = serde_json::to_string(&s.care)?;
         let conn = self.conn.lock().expect("companion store poisoned");
         conn.execute(
             "INSERT INTO companion_settings (
@@ -352,9 +414,9 @@ impl CompanionStore {
                 safety_contact_user_id, setup_completed_at,
                 last_checkin_at, consecutive_missed_checkins,
                 daily_briefing_enabled, daily_briefing_hour,
-                cadence_json, presence_json,
+                cadence_json, presence_json, carenet_json,
                 created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(user_id) DO UPDATE SET
                 enabled                 = excluded.enabled,
                 paused_until            = excluded.paused_until,
@@ -366,6 +428,7 @@ impl CompanionStore {
                 daily_briefing_hour     = excluded.daily_briefing_hour,
                 cadence_json            = excluded.cadence_json,
                 presence_json           = excluded.presence_json,
+                carenet_json            = excluded.carenet_json,
                 updated_at              = excluded.updated_at",
             params![
                 s.user_id,
@@ -381,6 +444,7 @@ impl CompanionStore {
                 s.daily_briefing_hour as i64,
                 cadence_json,
                 presence_json,
+                carenet_json,
                 s.created_at.timestamp_millis(),
                 s.updated_at.timestamp_millis(),
             ],
@@ -401,6 +465,18 @@ impl CompanionStore {
             params![at.timestamp_millis(), Utc::now().timestamp_millis(), user_id],
         )?;
         Ok(())
+    }
+
+    // Stamp the care-net disclosure as done (sets `care.consent_at` to now via a
+    // read-modify-write of the carenet JSON blob). Called by the dispatcher
+    // after it weaves the one-time "you're being looked out for" heads-up into a
+    // check-in, so it happens exactly once. No-op if the user has no row.
+    pub fn mark_care_disclosed(&self, user_id: &str) -> Result<()> {
+        let Some(mut s) = self.get(user_id)? else { return Ok(()); };
+        if s.care.consent_at.is_some() { return Ok(()); }
+        s.care.consent_at = Some(Utc::now());
+        s.updated_at = Utc::now();
+        self.upsert(&s)
     }
 
     // Stamp `last_checkin_at` for `user_id` to `at`. Targeted update so
@@ -467,7 +543,7 @@ impl CompanionStore {
                     safety_contact_user_id, setup_completed_at,
                     last_checkin_at, consecutive_missed_checkins,
                     daily_briefing_enabled, daily_briefing_hour, last_briefing_at,
-                    created_at, updated_at, cadence_json, presence_json
+                    created_at, updated_at, cadence_json, presence_json, carenet_json
              FROM companion_settings
              WHERE enabled = 1
                AND setup_completed_at IS NOT NULL
@@ -510,11 +586,13 @@ fn row_to_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompanionSetting
     let updated_ms:      i64         = row.get(13)?;
     let cadence_json:    String      = row.get(14)?;
     let presence_json:   String      = row.get(15)?;
+    let carenet_json:    String      = row.get(16)?;
 
-    // A malformed cadence/presence blob falls back to "inherit defaults"
-    // rather than failing the whole row read.
+    // A malformed cadence/presence/carenet blob falls back to "inherit
+    // defaults" rather than failing the whole row read.
     let cadence: CompanionCadence = serde_json::from_str(&cadence_json).unwrap_or_default();
     let presence: PresenceTuning  = serde_json::from_str(&presence_json).unwrap_or_default();
+    let care: CareNet             = serde_json::from_str(&carenet_json).unwrap_or_default();
 
     let quiet_hours: Vec<(String, String)> = serde_json::from_str(&quiet_json)
         .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
@@ -542,6 +620,7 @@ fn row_to_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompanionSetting
         last_briefing_at:       last_brief_ms.and_then(DateTime::from_timestamp_millis),
         cadence,
         presence,
+        care,
         created_at: DateTime::from_timestamp_millis(created_ms).unwrap_or_else(Utc::now),
         updated_at: DateTime::from_timestamp_millis(updated_ms).unwrap_or_else(Utc::now),
     })
@@ -575,6 +654,7 @@ mod tests {
             last_briefing_at: None,
             cadence: CompanionCadence::default(),
             presence: PresenceTuning::default(),
+            care: CareNet::default(),
             created_at: now,
             updated_at: now,
         }
@@ -603,6 +683,44 @@ mod tests {
         assert_eq!(back.preferred_channels, vec!["signal".to_string(), "telegram".to_string()]);
         assert_eq!(back.safety_contact_user_id.as_deref(), Some("david"));
         assert!(back.setup_completed_at.is_some());
+    }
+
+    #[test]
+    fn carenet_round_trips_and_defaults_to_standard() {
+        let (_dir, store) = fresh_store();
+        // Fresh row → Standard, not monitored, no consent.
+        let mut s = sample("alice");
+        store.upsert(&s).unwrap();
+        let back = store.get("alice").unwrap().unwrap();
+        assert_eq!(back.care.role, CareRole::Standard);
+        assert!(!back.care.role.is_monitored());
+        assert!(back.care.consent_at.is_none());
+
+        // Set a monitored role + consent → round-trips.
+        s.care.role = CareRole::Child;
+        s.care.consent_at = Some(Utc::now());
+        store.upsert(&s).unwrap();
+        let back = store.get("alice").unwrap().unwrap();
+        assert_eq!(back.care.role, CareRole::Child);
+        assert!(back.care.role.is_monitored());
+        assert!(back.care.consent_at.is_some());
+    }
+
+    #[test]
+    fn mark_care_disclosed_stamps_consent_once() {
+        let (_dir, store) = fresh_store();
+        let mut s = sample("bob");
+        s.care.role = CareRole::Elder;
+        store.upsert(&s).unwrap();
+        assert!(store.get("bob").unwrap().unwrap().care.consent_at.is_none());
+
+        store.mark_care_disclosed("bob").unwrap();
+        let first = store.get("bob").unwrap().unwrap().care.consent_at;
+        assert!(first.is_some(), "disclosure should stamp consent_at");
+
+        // Idempotent: a second call doesn't move the timestamp.
+        store.mark_care_disclosed("bob").unwrap();
+        assert_eq!(store.get("bob").unwrap().unwrap().care.consent_at, first);
     }
 
     #[test]

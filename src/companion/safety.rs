@@ -87,6 +87,24 @@ A separate audit logs distress signals — the user's safety contact \
 will be quietly notified in parallel with your warm reply. You do \
 not need to announce this notification; it happens automatically.";
 
+/// How serious a distress signal is. Tunes the urgency of the care-contact
+/// heads-up and how prominently the *person* is shown crisis resources — it
+/// does NOT gate whether escalation happens (genuine distress always reaches a
+/// configured contact; the classifier's high bar + the dedup window are what
+/// keep this from over-firing — "concern-not-tattling").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConcernSeverity {
+    /// Notable but not imminent — sadness, loneliness, hopelessness. A gentle
+    /// "you might want to check in" heads-up. The default when severity is
+    /// unknown.
+    #[default]
+    Concerning,
+    /// Imminent/serious — self-harm intent, mentions of methods, or acute
+    /// physical symptoms. An urgent heads-up, and the person is shown crisis
+    /// resources prominently.
+    Acute,
+}
+
 // Wires the safety floor's dependencies. Held by `AgentCore` via the
 // `CompanionSystem` facade; the scheduler also holds an `Arc` to call
 // `handle_missed_checkins`.
@@ -114,6 +132,7 @@ impl SafetyFloor {
         &self,
         user_id: &str,
         summary: &str,
+        severity: ConcernSeverity,
     ) -> EscalationOutcome {
         // Resolve safety contact.
         let contact = match self.resolve_contact(user_id) {
@@ -146,18 +165,31 @@ impl SafetyFloor {
             return EscalationOutcome::Suppressed;
         }
 
-        // Build the notice. Short + factual; we deliberately do not
-        // include the full transcript or the model's reply. The
-        // contact can open the user's conversation if they want
+        // Build the notice — named, role-aware, severity-aware. Short + factual:
+        // we deliberately do NOT include the full transcript or the model's
+        // reply (minimal disclosure). The contact can open the conversation for
         // detail.
-        let notice = format!(
-            "Safety alert from your father/family member's MIRA:\n\
-             \n\
-             {} just sent a message that suggested they may be in \
-             distress. The companion is responding warmly. Summary of \
-             the signal: \"{}\". They're safe to message right now.",
-            user_id, clip(summary),
-        );
+        let who = self.display_name(user_id);
+        let rel = self.relationship_phrase(user_id);
+        let notice = match severity {
+            ConcernSeverity::Acute => format!(
+                "⚠ Urgent heads-up from {who}'s MIRA{rel}:\n\
+                 \n\
+                 {who} just sent something suggesting they may need help right \
+                 now. MIRA is responding supportively and has shared crisis \
+                 resources with them. Signal: \"{}\". Please consider reaching \
+                 out to them directly.",
+                clip(summary),
+            ),
+            ConcernSeverity::Concerning => format!(
+                "Heads-up from {who}'s MIRA{rel}:\n\
+                 \n\
+                 {who} sent a message suggesting they may be having a hard time. \
+                 MIRA is responding warmly. Signal: \"{}\". You might want to \
+                 check in with them — it could be nothing, but a kind word helps.",
+                clip(summary),
+            ),
+        };
 
         let outcome = self.deliver(&contact, &notice).await;
         let outcome_str = outcome.as_str().to_string();
@@ -168,7 +200,9 @@ impl SafetyFloor {
             outcome,
             contact_user_id: Some(contact.clone()),
             summary: clip(summary),
-            note: None,
+            note: Some(format!("severity={}", match severity {
+                ConcernSeverity::Acute => "acute", ConcernSeverity::Concerning => "concerning",
+            })),
         });
 
         info!(
@@ -209,10 +243,12 @@ impl SafetyFloor {
             }
         };
 
+        let who = self.display_name(user_id);
+        let rel = self.relationship_phrase(user_id);
         let notice = format!(
-            "Heads-up from your family member's MIRA:\n\
+            "Heads-up from {who}'s MIRA{rel}:\n\
              \n\
-             Hasn't replied to the companion's last {count} check-ins. \
+             {who} hasn't replied to the companion's last {count} check-ins. \
              Could be nothing — phone might be off, or they're busy — \
              but you might want to give them a call. Want me to try a \
              different channel?"
@@ -329,6 +365,26 @@ impl SafetyFloor {
     }
 
     // ── Internals ──────────────────────────────────────────────────────────
+
+    // Best-effort display name for a user, for use in notices. Falls back to
+    // the user id when auth isn't wired (tests) or the name is unknown.
+    fn display_name(&self, user_id: &str) -> String {
+        self.auth.as_ref()
+            .and_then(|a| a.get_user(user_id).ok().flatten())
+            .map(|u| u.display_name.unwrap_or(u.username))
+            .unwrap_or_else(|| user_id.to_string())
+    }
+
+    // A short relationship phrase for the notice, derived from the monitored
+    // person's care role: e.g. " (your child)". Empty for a self-managed adult,
+    // so the notice just reads "<name>'s MIRA".
+    fn relationship_phrase(&self, user_id: &str) -> &'static str {
+        match self.store.get(user_id).ok().flatten().map(|s| s.care.role) {
+            Some(crate::companion::CareRole::Child) => " (your child)",
+            Some(crate::companion::CareRole::Elder) => " (someone you're a care contact for)",
+            _ => "",
+        }
+    }
 
     // Resolve the user's configured safety contact. Returns
     // `Some(contact_user_id)` when configured AND the contact's user
@@ -537,7 +593,7 @@ mod tests {
             daily_briefing_hour: 7,
             last_briefing_at: None,
             cadence: Default::default(),
-            presence: Default::default(),
+            presence: Default::default(), care: Default::default(),
             created_at: now,
             updated_at: now,
         };
@@ -548,7 +604,7 @@ mod tests {
     async fn handle_distress_delivers_to_contact_thread() {
         let (_dir, floor, history) = fresh_setup();
         enable_user(&floor, "alice", "david");
-        let outcome = floor.handle_distress("alice", "user mentioned feeling overwhelmed").await;
+        let outcome = floor.handle_distress("alice", "user mentioned feeling overwhelmed", ConcernSeverity::Concerning).await;
         assert_eq!(outcome, EscalationOutcome::Delivered);
 
         // David's web history should now contain a "Safety alerts" thread
@@ -558,7 +614,9 @@ mod tests {
             .find(|c| c.title.as_deref() == Some("Safety alerts"))
             .expect("expected Safety alerts thread for david");
         let msgs = history.get_messages(&safety_conv.id, 10, None).unwrap();
-        assert!(msgs.iter().any(|m| m.content.contains("distress")));
+        // The notice carries the signal summary (minimal disclosure) and names
+        // the person — assert on the summary content rather than fixed copy.
+        assert!(msgs.iter().any(|m| m.content.contains("overwhelmed")));
 
         // Audit log has the row.
         let evs = floor.log.list_recent_for_user("alice", 10).unwrap();
@@ -588,12 +646,12 @@ mod tests {
             daily_briefing_hour: 7,
             last_briefing_at: None,
             cadence: Default::default(),
-            presence: Default::default(),
+            presence: Default::default(), care: Default::default(),
             created_at: now,
             updated_at: now,
         }).unwrap();
 
-        let outcome = floor.handle_distress("alice", "summary").await;
+        let outcome = floor.handle_distress("alice", "summary", ConcernSeverity::Concerning).await;
         assert_eq!(outcome, EscalationOutcome::NoContact);
 
         let evs = floor.log.list_recent_for_user("alice", 10).unwrap();
@@ -607,10 +665,10 @@ mod tests {
         enable_user(&floor, "alice", "david");
 
         // First delivery
-        let o1 = floor.handle_distress("alice", "first signal").await;
+        let o1 = floor.handle_distress("alice", "first signal", ConcernSeverity::Concerning).await;
         assert_eq!(o1, EscalationOutcome::Delivered);
         // Immediate second signal → suppressed
-        let o2 = floor.handle_distress("alice", "second signal moments later").await;
+        let o2 = floor.handle_distress("alice", "second signal moments later", ConcernSeverity::Concerning).await;
         assert_eq!(o2, EscalationOutcome::Suppressed);
 
         let evs = floor.log.list_recent_for_user("alice", 10).unwrap();
@@ -639,7 +697,7 @@ mod tests {
     async fn missed_checkins_and_distress_share_safety_thread() {
         let (_dir, floor, history) = fresh_setup();
         enable_user(&floor, "alice", "david");
-        floor.handle_distress("alice", "signal").await;
+        floor.handle_distress("alice", "signal", ConcernSeverity::Concerning).await;
         floor.handle_missed_checkins("alice", 3).await;
 
         // Both events should land in the SAME thread.
@@ -707,7 +765,7 @@ mod tests {
         groups.upsert_member(&make_member("family", "david", true, vec![SignalKind::Distress])).unwrap();
         groups.upsert_member(&make_member("family", "sarah", false, vec![SignalKind::Distress])).unwrap();
 
-        floor.handle_distress("alice", "user mentioned feeling low").await;
+        floor.handle_distress("alice", "user mentioned feeling low", ConcernSeverity::Concerning).await;
 
         // David got TWO threads written: one from the single-contact
         // path + one from the group bridge.
@@ -737,7 +795,7 @@ mod tests {
         groups.upsert_member(&make_member("family", "david", true, vec![SignalKind::Distress])).unwrap();
         groups.upsert_member(&make_member("family", "sarah", true, vec![SignalKind::Distress])).unwrap();
 
-        floor.handle_distress("alice", "summary").await;
+        floor.handle_distress("alice", "summary", ConcernSeverity::Concerning).await;
 
         for uid in &["david", "sarah"] {
             let convs = history.list_conversations(uid, Some("web"), 10, 0).unwrap();
@@ -755,7 +813,7 @@ mod tests {
         // STILL be excluded.
         groups.upsert_member(&make_member("family", "alice", true, vec![SignalKind::Distress])).unwrap();
 
-        floor.handle_distress("alice", "summary").await;
+        floor.handle_distress("alice", "summary", ConcernSeverity::Concerning).await;
 
         // Alice's own history must NOT have a Safety alerts thread
         // from the group bridge. (The single-contact path notifies
@@ -774,7 +832,7 @@ mod tests {
         // Sarah opted in but isn't contactable for Distress.
         groups.upsert_member(&make_member("family", "sarah", true, vec![SignalKind::MissedCheckin])).unwrap();
 
-        floor.handle_distress("alice", "summary").await;
+        floor.handle_distress("alice", "summary", ConcernSeverity::Concerning).await;
 
         let evs = floor.log.list_recent_for_user("alice", 20).unwrap();
         // Should include a Suppressed row for sarah with the
@@ -798,7 +856,7 @@ mod tests {
         groups.upsert_member(&make_member("family", "alice", true, vec![SignalKind::Distress])).unwrap();
         groups.upsert_member(&make_member("family", "david", true, vec![SignalKind::Distress])).unwrap();
 
-        floor.handle_distress("alice", "summary").await;
+        floor.handle_distress("alice", "summary", ConcernSeverity::Concerning).await;
 
         // David got the single-contact notice (1 audit row Delivered)
         // and a NotInGroupPolicy suppression (1 audit row Suppressed).

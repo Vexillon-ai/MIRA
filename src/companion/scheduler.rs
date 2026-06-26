@@ -580,7 +580,7 @@ mod tests {
             daily_briefing_enabled: false,
             daily_briefing_hour: 7,
             last_briefing_at: None,
-            cadence: Default::default(), presence: Default::default(),
+            cadence: Default::default(), presence: Default::default(), care: Default::default(),
             created_at: now,
             updated_at: now,
         };
@@ -604,7 +604,7 @@ mod tests {
             safety_contact_user_id: None, setup_completed_at: Some(at(0)),
             last_checkin_at: None, consecutive_missed_checkins: 0,
             daily_briefing_enabled: true, daily_briefing_hour: 9,
-            last_briefing_at: None, cadence: Default::default(), presence: Default::default(),
+            last_briefing_at: None, cadence: Default::default(), presence: Default::default(), care: Default::default(),
             created_at: at(0), updated_at: at(0),
         };
         let fires = |s: &CompanionSettings, now| briefing_decision(s, now, Some("UTC")).0;
@@ -638,7 +638,7 @@ mod tests {
             safety_contact_user_id: None, setup_completed_at: Some(day1_9am),
             last_checkin_at: None, consecutive_missed_checkins: 0,
             daily_briefing_enabled: true, daily_briefing_hour: 9,
-            last_briefing_at: Some(day1_9am), cadence: Default::default(), presence: Default::default(),
+            last_briefing_at: Some(day1_9am), cadence: Default::default(), presence: Default::default(), care: Default::default(),
             created_at: day1_9am, updated_at: day1_9am,
         };
         // ~25h later, a different real day → fires via the normal path.
@@ -663,7 +663,7 @@ mod tests {
             last_checkin_at: None, consecutive_missed_checkins: 0,
             daily_briefing_enabled: false, daily_briefing_hour: 7,
             last_briefing_at: None, cadence: Default::default(),
-            presence: Default::default(),
+            presence: Default::default(), care: Default::default(),
             created_at: t, updated_at: t,
         }
     }

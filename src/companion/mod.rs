@@ -42,7 +42,7 @@ pub mod safety_log;
 pub mod scheduler;
 pub mod settings;
 
-pub use settings::{CompanionSettings, CompanionStore};
+pub use settings::{CareNet, CareRole, CompanionSettings, CompanionStore};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -307,6 +307,8 @@ impl CompanionSystem {
             cadence: prior.as_ref().map(|p| p.cadence.clone()).unwrap_or_default(),
             // Presence tuning likewise survives re-enable.
             presence: prior.as_ref().map(|p| p.presence.clone()).unwrap_or_default(),
+            // Care-net (role + consent) survives re-enable too.
+            care: prior.as_ref().map(|p| p.care.clone()).unwrap_or_default(),
             created_at,
             updated_at: now,
         };
@@ -423,6 +425,17 @@ impl CompanionSystem {
         if let Some(v) = update.min_gap_minutes {
             settings.cadence.min_gap_minutes = Some(v);
         }
+        // Care-net (Pass 2): role tunes escalation framing + tone; the consent
+        // flag stamps/clears the disclosure acknowledgement. Setting a monitored
+        // role with no consent stamp leaves `consent_at = None`, which the
+        // companion uses to surface a one-time, plain-language heads-up to the
+        // person — never covert.
+        if let Some(role) = update.care_role {
+            settings.care.role = role;
+        }
+        if let Some(ack) = update.care_consent_ack {
+            settings.care.consent_at = if ack { Some(now) } else { None };
+        }
         settings.updated_at = now;
         self.store.upsert(&settings)?;
         Ok(settings)
@@ -441,6 +454,11 @@ pub struct CompanionUpdate {
     pub max_unanswered_checkins: Option<u32>,
     pub max_per_day: Option<u32>,
     pub min_gap_minutes: Option<i64>,
+    // Care-net (Pass 2). `care_role` sets who the person is (standard/child/
+    // elder); `care_consent_ack` stamps (true) or clears (false) the consent /
+    // disclosure acknowledgement.
+    pub care_role: Option<CareRole>,
+    pub care_consent_ack: Option<bool>,
 }
 
 // ── Internals ────────────────────────────────────────────────────────────────

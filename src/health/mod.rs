@@ -219,6 +219,15 @@ pub trait Detector: Send + Sync {
     /// `automations.subscriptions_stranded_completion`.
     fn name(&self) -> &'static str;
 
+    /// Whether this detector can run on the current platform. Detectors
+    /// whose prerequisites don't exist here (e.g. the `/proc`-based
+    /// process detectors on a non-Linux host) return `false`; the audit
+    /// then records them as Green "not applicable on this platform"
+    /// instead of running them and reporting a scary "unavailable"
+    /// Yellow. Defaults to `true` — only platform-bound detectors
+    /// override it.
+    fn is_applicable(&self) -> bool { true }
+
     /// Run one probe. Detector errors are reported as Yellow (the
     /// detector itself is broken, not necessarily MIRA) so an
     /// individual probe failure never crashes the whole audit.

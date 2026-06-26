@@ -992,6 +992,7 @@ fn apply_cadence_to_presence(
             last_briefing_at: None,
             cadence: Default::default(),
             presence: Default::default(),
+            care: Default::default(),
             created_at: now,
             updated_at: now,
         },

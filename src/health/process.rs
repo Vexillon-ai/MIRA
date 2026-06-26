@@ -1,26 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // src/health/process.rs
-//! `/proc/self/*` reader — current process resource usage.
+//! Current-process resource usage for the Guardian health detectors.
 //!
-//! Linux only — `/proc` is the convention for runtime introspection on
-//! Linux. The non-Linux build returns `Unsupported` for every call and
-//! the corresponding detectors degrade to Yellow with a clear message.
-//! That's better than fabricating numbers or pulling in `sysinfo` just
-//! for cross-platform support a personal-server tool will rarely need.
+//! Memory (RSS/VSZ), CPU%, and uptime come from `sysinfo`, so these detectors
+//! run on **Linux, macOS, and Windows** alike — no more Linux-only `/proc`
+//! dependency and no "detector unavailable" warnings off Linux.
 //!
-//! CPU% needs delta math across two samples. We keep the previous
-//! reading in a process-static atomic so the detector doesn't have to
-//! plumb state through `DetectorContext`. The first sample after boot
-//! returns 0% — fine, the detector reports informational.
+//! Thread count and open-FD count have no portable source in `sysinfo`, so they
+//! stay Linux-only (`/proc`). On other platforms they're left `None` and their
+//! two detectors report "not applicable on this platform" rather than failing.
+//!
+//! CPU% is a delta between two `sysinfo` refreshes of this process, so we keep a
+//! process-static `System` alive across calls. The first sample after boot
+//! reads ~0% (no prior refresh to diff) — the detector treats that as
+//! informational.
 
-// All `/proc` reads + the CPU-delta atomics below are Linux-only (every reader
-// fn is `#[cfg(target_os = "linux")]`); gate the imports to match so non-Linux
-// builds don't warn on unused `fs` / atomics.
+use std::sync::{Mutex, OnceLock};
+
+use sysinfo::{get_current_pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+// `/proc` readers for the two metrics sysinfo can't provide portably.
 #[cfg(target_os = "linux")]
 use std::fs;
-#[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 /// Snapshot of current-process resource usage. All fields are best-effort —
 /// any individual read failure leaves that field as `None` rather than
@@ -32,29 +34,120 @@ pub struct ProcessSnapshot {
     pub thread_count:  Option<u64>,
     pub fd_count:      Option<u64>,
     pub fd_soft_limit: Option<u64>,
-    /// Approximated cpu utilisation as a fraction (0.0–1.0) over the
-    /// interval since the previous call. None on the first sample
-    /// after process start (no prior reading to diff).
+    /// Approximated CPU utilisation as a fraction (1.0 ≈ one core fully used;
+    /// can exceed 1.0 on multicore) over the interval since the previous call.
     pub cpu_pct:       Option<f64>,
     /// Wall-clock seconds since the process started.
     pub uptime_secs:   Option<u64>,
 }
 
-#[cfg(target_os = "linux")]
+// Persistent `System` so `cpu_usage()` has a prior sample to diff against —
+// sysinfo computes a process's CPU% between consecutive refreshes of the same
+// `System`. A fresh `System` per call would always report 0%.
+fn system() -> &'static Mutex<System> {
+    static SYS: OnceLock<Mutex<System>> = OnceLock::new();
+    SYS.get_or_init(|| Mutex::new(System::new()))
+}
+
 pub fn snapshot() -> ProcessSnapshot {
-    ProcessSnapshot {
-        rss_kb:        read_status_field("VmRSS"),
-        vsz_kb:        read_status_field("VmSize"),
-        thread_count:  read_status_field("Threads"),
-        fd_count:      count_fds(),
-        fd_soft_limit: read_fd_soft_limit(),
-        cpu_pct:       compute_cpu_pct(),
-        uptime_secs:   compute_uptime_secs(),
+    let mut snap = ProcessSnapshot::default();
+
+    // Portable metrics: memory, CPU, uptime via sysinfo (Linux/macOS/Windows).
+    if let Ok(pid) = get_current_pid() {
+        if let Ok(mut sys) = system().lock() {
+            // CPU% is a delta vs the previous refresh of the same process, and
+            // sysinfo computes it relative to total system CPU time — so we must
+            // refresh the system CPU too, then the process (CPU + memory). The
+            // persistent `System` preserves the prior sample across calls; the
+            // first sample after boot reads ~0% (no prior to diff).
+            sys.refresh_cpu_all();
+            let kind = ProcessRefreshKind::nothing().with_cpu().with_memory();
+            sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
+            if let Some(p) = sys.process(pid) {
+                // sysinfo reports memory in bytes.
+                snap.rss_kb = Some(p.memory() / 1024);
+                snap.vsz_kb = Some(p.virtual_memory() / 1024);
+                // cpu_usage(): percent where 100.0 == one core fully used (can
+                // exceed 100 on multicore). The detector wants a "cores used"
+                // fraction, so divide by 100.
+                snap.cpu_pct = Some((p.cpu_usage() as f64 / 100.0).max(0.0));
+                snap.uptime_secs = Some(p.run_time());
+            }
+        }
+    }
+
+    // Thread + FD counts: Linux `/proc` only (no portable source). Other
+    // platforms leave these `None`; their detectors report "not applicable".
+    #[cfg(target_os = "linux")]
+    {
+        snap.thread_count  = read_status_field("Threads");
+        snap.fd_count      = count_fds();
+        snap.fd_soft_limit = read_fd_soft_limit();
+    }
+
+    snap
+}
+
+/// Free + total space (MB) on the filesystem holding `path`. Cross-platform via
+/// sysinfo. Picks the mounted volume whose mount point is the longest prefix of
+/// `path` (the most specific mount), so a data dir on its own volume is measured
+/// against that volume — not `/` or `C:\`. `(None, None)` if no match.
+pub fn disk_space_mb(path: &std::path::Path) -> (Option<u64>, Option<u64>) {
+    use sysinfo::Disks;
+    let disks = Disks::new_with_refreshed_list();
+    let mut best: Option<(usize, u64, u64)> = None;
+    for d in disks.list() {
+        let mp = d.mount_point();
+        if path.starts_with(mp) {
+            let specificity = mp.as_os_str().len();
+            if best.is_none_or(|(len, _, _)| specificity >= len) {
+                best = Some((specificity, d.available_space(), d.total_space()));
+            }
+        }
+    }
+    match best {
+        Some((_, free, total)) => (Some(free / 1024 / 1024), Some(total / 1024 / 1024)),
+        None => (None, None),
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn snapshot() -> ProcessSnapshot { ProcessSnapshot::default() }
+/// Host-level machine metrics for the Status page: overall CPU, host memory,
+/// MIRA's own resident memory, and the data partition's disk usage.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct MachineMetrics {
+    /// Overall host CPU usage, 0..100 (%). `None`/0 on the first sample.
+    pub cpu_pct:       Option<f64>,
+    pub mem_total_mb:  Option<u64>,
+    pub mem_used_mb:   Option<u64>,
+    /// MIRA's own resident memory (MB).
+    pub proc_rss_mb:   Option<u64>,
+    pub disk_free_mb:  Option<u64>,
+    pub disk_total_mb: Option<u64>,
+}
+
+/// Gather host CPU + memory, MIRA's RSS, and the data partition's disk usage.
+/// Reuses the persistent `System` so the CPU% has a prior sample to diff.
+pub fn machine_metrics(data_dir: &std::path::Path) -> MachineMetrics {
+    let mut m = MachineMetrics::default();
+    if let Ok(mut sys) = system().lock() {
+        sys.refresh_cpu_all();
+        sys.refresh_memory();
+        m.cpu_pct      = Some(sys.global_cpu_usage() as f64);
+        m.mem_total_mb = Some(sys.total_memory() / 1024 / 1024);
+        m.mem_used_mb  = Some(sys.used_memory()  / 1024 / 1024);
+        if let Ok(pid) = get_current_pid() {
+            let kind = ProcessRefreshKind::nothing().with_memory();
+            sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
+            if let Some(p) = sys.process(pid) {
+                m.proc_rss_mb = Some(p.memory() / 1024 / 1024);
+            }
+        }
+    }
+    let (free, total) = disk_space_mb(data_dir);
+    m.disk_free_mb  = free;
+    m.disk_total_mb = total;
+    m
+}
 
 #[cfg(target_os = "linux")]
 fn read_status_field(field: &str) -> Option<u64> {
@@ -93,109 +186,49 @@ fn read_fd_soft_limit() -> Option<u64> {
     None
 }
 
-// CPU% delta state. Stored as raw atomics so we don't need a Mutex on
-// the read path. `prev_total_jiffies` tracks the sum of utime + stime
-// at the last sample; `prev_wall_ms` is the wall clock in millis at
-// the same point.
-#[cfg(target_os = "linux")]
-static PREV_TOTAL_JIFFIES: AtomicU64 = AtomicU64::new(0);
-#[cfg(target_os = "linux")]
-static PREV_WALL_MS:       AtomicI64 = AtomicI64::new(0);
-
-#[cfg(target_os = "linux")]
-fn compute_cpu_pct() -> Option<f64> {
-    let stat = fs::read_to_string("/proc/self/stat").ok()?;
-    // Field 14 is utime, 15 is stime (1-indexed per proc(5)). The
-    // `comm` field can contain spaces and parentheses, so split after
-    // the closing paren.
-    let close = stat.rfind(')')?;
-    let after: Vec<&str> = stat[close + 1..].split_whitespace().collect();
-    // After `)` we're at field 3 (state), so utime/stime are at indices
-    // 14-3 = 11 and 12 in `after`.
-    let utime: u64 = after.get(11)?.parse().ok()?;
-    let stime: u64 = after.get(12)?.parse().ok()?;
-    let total = utime + stime;
-
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let prev_total = PREV_TOTAL_JIFFIES.swap(total, Ordering::SeqCst);
-    let prev_wall  = PREV_WALL_MS.swap(now_ms, Ordering::SeqCst);
-
-    // Only PREV_WALL_MS distinguishes "first call" from "subsequent
-    // call". PREV_TOTAL_JIFFIES might legitimately stay 0 for many
-    // calls in a row (bursty single-jiffy clock + idle process), so
-    // gating on it would suppress reporting indefinitely.
-    if prev_wall == 0 { return None; }
-
-    // Floor at 1ms — back-to-back calls in tests can land in the same
-    // millisecond. Returning None there would force callers to wait.
-    let elapsed_ms = ((now_ms - prev_wall) as f64).max(1.0);
-
-    // Read the system clock-tick rate from sysconf. Most Linuxes use
-    // 100 Hz, but we shouldn't assume — `sysconf(_SC_CLK_TCK)` is the
-    // canonical value.
-    let hz = clk_tck();
-    // total_jiffies is monotonic so the diff is non-negative — but
-    // saturating_sub guards against any future quirk (e.g. overflow on
-    // a long-running process).
-    let cpu_secs = total.saturating_sub(prev_total) as f64 / hz;
-    let elapsed_secs = elapsed_ms / 1000.0;
-    Some((cpu_secs / elapsed_secs).clamp(0.0, num_cpus()))
-}
-
-#[cfg(target_os = "linux")]
-fn clk_tck() -> f64 {
-    // SAFETY: sysconf is async-signal-safe and takes a constant int.
-    let n = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if n > 0 { n as f64 } else { 100.0 }
-}
-
-#[cfg(target_os = "linux")]
-fn num_cpus() -> f64 {
-    // SAFETY: sysconf with _SC_NPROCESSORS_ONLN.
-    let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-    if n > 0 { n as f64 } else { 1.0 }
-}
-
-#[cfg(target_os = "linux")]
-fn compute_uptime_secs() -> Option<u64> {
-    let stat = fs::read_to_string("/proc/self/stat").ok()?;
-    let close = stat.rfind(')')?;
-    let after: Vec<&str> = stat[close + 1..].split_whitespace().collect();
-    // start_time is field 22 (1-indexed) → index 22-3 = 19 in `after`.
-    let start_jiffies: u64 = after.get(19)?.parse().ok()?;
-    let uptime_secs = read_proc_uptime()?;
-    let proc_start_secs = start_jiffies as f64 / clk_tck();
-    Some((uptime_secs as f64 - proc_start_secs).max(0.0) as u64)
-}
-
-#[cfg(target_os = "linux")]
-fn read_proc_uptime() -> Option<u64> {
-    let s = fs::read_to_string("/proc/uptime").ok()?;
-    let first = s.split_whitespace().next()?;
-    Some(first.parse::<f64>().ok()? as u64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    #[cfg(target_os = "linux")]
-    fn snapshot_returns_some_basics() {
+    fn snapshot_returns_portable_basics_everywhere() {
+        // RSS + uptime come from sysinfo and must work on every platform.
         let snap = snapshot();
-        // RSS should be Some > 0 — we're running.
         assert!(snap.rss_kb.unwrap_or(0) > 0, "rss should be non-zero: {snap:?}");
+        assert!(snap.vsz_kb.unwrap_or(0) > 0, "vsz should be non-zero: {snap:?}");
+        // cpu_pct is Some from the first sample (0% with no prior refresh).
+        let _ = snapshot();
+        let third = snapshot();
+        assert!(third.cpu_pct.is_some(), "expected cpu_pct: {third:?}");
+    }
+
+    #[test]
+    fn snapshot_captures_real_cpu_under_load() {
+        // A busy loop between two snapshots must surface as non-zero CPU — the
+        // whole point of the detector. Guards the sysinfo refresh recipe
+        // (system CPU + process, persistent System) against regressions.
+        // Retried a few times so the shared global `System` + sysinfo's minimum
+        // CPU-update interval can't make it flake under parallel test load.
+        let mut best = 0.0_f64;
+        for _ in 0..4 {
+            let _ = snapshot(); // establish the prior sample
+            let start = std::time::Instant::now();
+            let mut x: u64 = 0;
+            while start.elapsed().as_millis() < 350 { x = x.wrapping_add(1).wrapping_mul(2654435761); }
+            std::hint::black_box(x);
+            best = best.max(snapshot().cpu_pct.unwrap_or(0.0));
+            if best > 0.0 { break; }
+        }
+        assert!(best > 0.0, "expected real CPU after a busy loop, got {best}");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn snapshot_returns_linux_thread_and_fd_counts() {
+        let snap = snapshot();
         // FD count includes stdin/stdout/stderr so >= 3.
         assert!(snap.fd_count.unwrap_or(0) >= 3, "fd_count too low: {snap:?}");
         assert!(snap.thread_count.unwrap_or(0) >= 1);
-        // Soft limit should be > 0 (typically 1024+).
         assert!(snap.fd_soft_limit.unwrap_or(0) > 0);
-        // First call returns no cpu_pct (no prior sample).
-        // Don't assert on the first cpu_pct value because tests in a
-        // module can run in any order; just ensure subsequent calls
-        // produce *some* number.
-        let _second = snapshot();
-        let third = snapshot();
-        assert!(third.cpu_pct.is_some(), "expected cpu_pct on second+ call");
     }
 }

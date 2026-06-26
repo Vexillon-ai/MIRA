@@ -30,6 +30,18 @@ export interface StatusInfo {
   supervised: boolean
   /** Which supervisor was detected, when known. */
   supervisor: 'systemd' | 'docker' | 'launchd' | null
+  /** Host machine metrics (CPU / memory / disk). Admin-only — null otherwise. */
+  machine: MachineMetrics | null
+}
+
+/** Host CPU / memory / disk usage, surfaced on the Status page. */
+export interface MachineMetrics {
+  cpu_pct: number | null        // overall host CPU %, 0..100
+  mem_total_mb: number | null
+  mem_used_mb: number | null
+  proc_rss_mb: number | null    // MIRA's own resident memory
+  disk_free_mb: number | null
+  disk_total_mb: number | null
 }
 
 // ── OpenRouter catalog ───────────────────────────────────────────────────────

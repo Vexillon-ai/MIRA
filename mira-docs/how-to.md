@@ -27,6 +27,11 @@ Two independent settings on a Telegram account:
 - **Or just tell MIRA in chat:** "message me less", "be funnier", "stop the jokes", "only check in in the mornings", "pause till Monday" — it updates the same settings.
 - Test instantly with "Send a check-in now" / "Send a briefing now" in Settings → Notifications.
 
+## Set up a care network (look out for a child or older adult)
+- On **Settings → Presence → Care network**, pick a **care role**: *Just me* (default, no one alerted), *A child* (a guardian is alerted; gentle age-aware tone), or *An older adult* (a contact is alerted on silence or distress).
+- For a child/older-adult role, choose the **contact to alert** and tick that **the person knows**. If you don't, MIRA discloses the arrangement to the person itself (woven naturally into a check-in) before it would ever reach out to the contact — it's never covert.
+- What escalates: genuine distress, or three unanswered check-ins over ~48h. An *acute* signal (self-harm, acute physical symptoms) sends an urgent heads-up and shows the person crisis resources; a *concerning* one (low mood) sends a softer nudge. The contact only ever sees a one-line summary — never the conversation. MIRA gives a human a heads-up; it does not call emergency services.
+
 ## Get replies as voice
 - Set your per-channel voice preference to **always** (Telegram/Signal). MIRA will send a voice note alongside text. Web plays TTS in the browser.
 - Pick a voice (e.g. Kokoro `af_heart`, `bf_emma`). Enable Kokoro for natural local speech.

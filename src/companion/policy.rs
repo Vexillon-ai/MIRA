@@ -16,7 +16,7 @@
 //! Variance comes from the `jitter` and "windows shouldn't be on the
 //! dot" semantics applied here.
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Timelike, Utc, Weekday};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -324,8 +324,12 @@ fn mix(base: u64, idx: u64) -> u64 {
     h
 }
 
-// Minutes-since-local-midnight for a `NaiveTime`.
+// Minutes-since-local-midnight for a `NaiveTime`. Test-only helper
+// (the production planner works in `time_from_mins` units), so gate it
+// to test builds to avoid a dead_code warning in release.
+#[cfg(test)]
 fn mins_of(t: NaiveTime) -> i64 {
+    use chrono::Timelike;
     (t.hour() * 60 + t.minute()) as i64
 }
 

@@ -27,7 +27,7 @@ use crate::companion::groups::{
     CompanionGroupStore, GroupCompanionMember, GroupCompanionPolicy, SignalKind,
 };
 use crate::companion::settings::{
-    CompanionSettings, FrequencyMode, MessageMix, PresenceTuning, ToneAxes,
+    CareRole, CompanionSettings, FrequencyMode, MessageMix, PresenceTuning, ToneAxes,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -481,6 +481,11 @@ fn settings_to_dto(s: &CompanionSettings) -> serde_json::Value {
         "tone":                   s.presence.tone,
         "message_mix":            s.presence.message_mix,
         "share_agent_activity":   s.presence.share_agent_activity,
+        // Care-net (Pass 2): who the person is, whether the arrangement has
+        // been disclosed/acknowledged, and who gets the heads-up.
+        "care_role":              s.care.role,
+        "care_consent":           s.care.consent_at.is_some(),
+        "safety_contact_user_id": s.safety_contact_user_id,
     })
 }
 
@@ -509,6 +514,9 @@ pub async fn get_my_companion(
             "tone": ToneAxes::default(),
             "message_mix": MessageMix::default(),
             "share_agent_activity": true,
+            "care_role": CareRole::default(),
+            "care_consent": false,
+            "safety_contact_user_id": serde_json::Value::Null,
         }),
     }))
 }
@@ -527,6 +535,10 @@ pub struct UpdateCompanionRequest {
     pub preferred_channels:    Option<Vec<String>>,
     pub daily_briefing_enabled: Option<bool>,
     pub daily_briefing_hour:   Option<u8>,
+    // Care-net (Pass 2).
+    pub care_role:             Option<CareRole>,
+    pub care_consent:          Option<bool>,    // true = acknowledge/disclose; false = clear
+    pub safety_contact_user_id: Option<String>, // who gets the heads-up
 }
 
 /// PUT /api/me/companion — partial update of the caller's Presence tuning. Does
@@ -536,6 +548,7 @@ pub struct UpdateCompanionRequest {
 pub async fn update_my_companion(
     AuthUser(me):     AuthUser,
     Extension(agent): Extension<Arc<AgentCore>>,
+    Extension(auth):  Extension<Arc<crate::auth::LocalAuthService>>,
     Json(body):       Json<UpdateCompanionRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let sys = agent.companion().ok_or_else(|| err(
@@ -561,6 +574,18 @@ pub async fn update_my_companion(
     if let (Some(mn), Some(mx)) = (body.min_per_day, body.max_per_day) {
         if mn > mx { return Err(err(StatusCode::BAD_REQUEST, "min_per_day cannot exceed max_per_day")); }
     }
+    // Safety contact must be a real, different user.
+    if let Some(contact) = body.safety_contact_user_id.as_ref() {
+        if contact == &me.id {
+            return Err(err(StatusCode::BAD_REQUEST, "safety contact cannot be yourself"));
+        }
+        let exists = auth.get_user(contact)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("auth lookup: {e}")))?
+            .is_some();
+        if !exists {
+            return Err(err(StatusCode::BAD_REQUEST, "safety contact is not a known user"));
+        }
+    }
 
     let now = Utc::now();
     // Start from existing settings, or a fresh disabled row.
@@ -581,6 +606,7 @@ pub async fn update_my_companion(
             last_briefing_at: None,
             cadence: Default::default(),
             presence: Default::default(),
+            care: Default::default(),
             created_at: now,
             updated_at: now,
         });
@@ -598,6 +624,9 @@ pub async fn update_my_companion(
     if let Some(v) = body.preferred_channels   { s.preferred_channels = v; }
     if let Some(v) = body.daily_briefing_enabled { s.daily_briefing_enabled = v; }
     if let Some(v) = body.daily_briefing_hour  { s.daily_briefing_hour = v; }
+    if let Some(v) = body.care_role            { s.care.role = v; }
+    if let Some(v) = body.care_consent         { s.care.consent_at = if v { Some(now) } else { None }; }
+    if let Some(v) = body.safety_contact_user_id { s.safety_contact_user_id = Some(v); }
     s.updated_at = now;
 
     sys.store().upsert(&s)
