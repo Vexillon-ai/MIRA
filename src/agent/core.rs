@@ -709,6 +709,21 @@ impl AgentCore {
             format!("{effective_system}{channel_hint}")
         };
 
+        // Truthful self-identification. The model has no idea what it actually
+        // is — local/open models routinely claim to be GPT-4 or Claude — so we
+        // tell it the real configured model + provider. Skipped for overrides
+        // (onboarding etc. supply their own context).
+        let identity_hint = if context.system_prompt_override.is_none() {
+            runtime_identity_hint(&self.config)
+        } else {
+            String::new()
+        };
+        let effective_system = if identity_hint.is_empty() {
+            effective_system
+        } else {
+            format!("{effective_system}{identity_hint}")
+        };
+
         let mut messages: Vec<ChatMessage> = Vec::new();
         messages.push(ChatMessage::system(effective_system));
 
@@ -925,17 +940,118 @@ impl AgentCore {
     ) -> (String, Vec<StreamEvent>) {
         let mut tokens  = String::new();
         let mut all     = Vec::new();
+        let mut had_error = false;
         while let Some(event) = rx.recv().await {
             if let StreamEvent::Token(ref t) = event { tokens.push_str(t); }
+            if matches!(event, StreamEvent::Error(_)) { had_error = true; }
             let is_done = matches!(event, StreamEvent::Done { .. } | StreamEvent::Error(_));
             all.push(event);
             if is_done { break; }
+        }
+        // Empty-final-turn guard. Some (esp. local) models return no text after
+        // a successful tool call — which on a messaging channel surfaces as a
+        // blank "MIRA" bubble (the user thinks it froze). When the model said
+        // nothing but tools ran cleanly, synthesize a short confirmation from
+        // the tool results so the user always gets a reply. Skipped on an error
+        // turn (that path reports the failure itself).
+        if tokens.trim().is_empty() && !had_error {
+            if let Some(confirmation) = synthesize_tool_confirmation(&all) {
+                tokens = confirmation;
+            }
         }
         (tokens, all)
     }
 }
 
+// Build a brief confirmation from a turn's *successful* tool calls — used by
+// `collect_response` when the model produced no text of its own, so a messaging
+// channel never sends a blank message. Returns `None` when no tool ran (nothing
+// to confirm; the caller keeps the empty string).
+fn synthesize_tool_confirmation(events: &[StreamEvent]) -> Option<String> {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
+    for e in events {
+        if let StreamEvent::ToolResult { name, success: true, .. } = e {
+            *counts.entry(name.as_str()).or_default() += 1;
+        }
+    }
+    if counts.is_empty() { return None; }
+
+    // Friendly phrasing for the common write tools; other tools fall through to
+    // a plain "Done." so we never dump raw tool output at the user.
+    let phrase = |name: &str, n: u32| -> Option<String> {
+        Some(match name {
+            "calendar_create_event" =>
+                if n == 1 { "added an event to your calendar".into() }
+                else { format!("added {n} events to your calendar") },
+            "calendar_update_event" =>
+                if n == 1 { "updated a calendar event".into() }
+                else { format!("updated {n} calendar events") },
+            "calendar_delete_event" =>
+                if n == 1 { "removed a calendar event".into() }
+                else { format!("removed {n} calendar events") },
+            "automations" =>
+                if n == 1 { "set up a reminder".into() }
+                else { format!("set up {n} reminders") },
+            "wiki_write_page" | "wiki_append_section" | "wiki_log_entry" =>
+                "saved a note".into(),
+            "memory_supersede" => "updated my memory".into(),
+            _ => return None,
+        })
+    };
+    let parts: Vec<String> = counts.iter().filter_map(|(n, c)| phrase(n, *c)).collect();
+    if parts.is_empty() {
+        Some("✅ Done.".to_string())
+    } else {
+        Some(format!("✅ Done — I {}.", human_join(&parts)))
+    }
+}
+
+// Join phrases as "a", "a and b", or "a, b, and c".
+fn human_join(parts: &[String]) -> String {
+    match parts.len() {
+        0 => String::new(),
+        1 => parts[0].clone(),
+        2 => format!("{} and {}", parts[0], parts[1]),
+        _ => format!("{}, and {}", parts[..parts.len() - 1].join(", "), parts[parts.len() - 1]),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Build the "Your runtime" system-prompt block stating the real model +
+// provider, so MIRA self-identifies truthfully instead of hallucinating
+// (open/local models love to claim they're GPT-4 or Claude). Derived from the
+// configured primary provider + its model. Returns "" for an unknown primary or
+// an unset model. Reflects the default/primary path — a per-conversation model
+// override or a live failover to a fallback isn't echoed here.
+fn runtime_identity_hint(config: &MiraConfig) -> String {
+    let p = &config.providers;
+    let (label, model): (&str, &str) = match config.primary_provider.as_str() {
+        "lmstudio"   => ("LM Studio (a local model server)", p.lmstudio.default_model.as_str()),
+        "ollama"     => ("Ollama (a local model server)",    p.ollama.default_model.as_str()),
+        "openrouter" => ("OpenRouter",                       p.openrouter.default_model.as_str()),
+        "anthropic"  => ("Anthropic's API",                  p.anthropic.default_model.as_str()),
+        "gemini"     => ("Google's Gemini API",              p.gemini.default_model.as_str()),
+        "openai"     => ("the OpenAI API",                   p.openai.default_model.as_str()),
+        "deepseek"   => ("the DeepSeek API",                 p.deepseek.default_model.as_str()),
+        "moonshot"   => ("the Moonshot API",                 p.moonshot.default_model.as_str()),
+        "groq"       => ("Groq",                             p.groq.default_model.as_str()),
+        "xai"        => ("xAI",                              p.xai.default_model.as_str()),
+        _ => return String::new(),
+    };
+    let model = model.trim();
+    if model.is_empty() { return String::new(); }
+    // Gemini stores model ids with a `models/` resource prefix — drop it for display.
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    format!(
+        "\n\n## Your runtime (factual)\n\
+         You are currently served by the model `{model}` running via {label}. \
+         If the user asks what model or which provider you are, answer truthfully \
+         with this — do not guess or claim to be a different model (such as GPT-4 \
+         or Claude) unless that is literally the model named here.",
+    )
+}
 
 fn load_system_prompt(config: &MiraConfig) -> String {
     if config.agent.system_prompt_file.is_empty() {
@@ -1016,6 +1132,65 @@ mod tests {
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────
+
+    fn tool_ok(name: &str) -> StreamEvent {
+        StreamEvent::ToolResult {
+            name: name.into(), output: "{}".into(), success: true, call_id: "c".into(),
+        }
+    }
+
+    #[test]
+    fn runtime_identity_hint_names_real_model_and_provider() {
+        let mut cfg = MiraConfig::default();
+        cfg.primary_provider = "lmstudio".to_string();
+        cfg.providers.lmstudio.default_model = "openai/gpt-oss-20b".to_string();
+        let hint = runtime_identity_hint(&cfg);
+        assert!(hint.contains("openai/gpt-oss-20b"), "got: {hint}");
+        assert!(hint.contains("LM Studio"), "got: {hint}");
+        assert!(hint.to_lowercase().contains("truthful"), "got: {hint}");
+
+        // Gemini's `models/` prefix is stripped for display.
+        cfg.primary_provider = "gemini".to_string();
+        cfg.providers.gemini.default_model = "models/gemini-flash-lite-latest".to_string();
+        let g = runtime_identity_hint(&cfg);
+        assert!(g.contains("gemini-flash-lite-latest") && !g.contains("models/gemini"), "got: {g}");
+
+        // Unknown primary / empty model → no hint (don't fabricate).
+        cfg.primary_provider = "something-else".to_string();
+        assert!(runtime_identity_hint(&cfg).is_empty());
+        cfg.primary_provider = "lmstudio".to_string();
+        cfg.providers.lmstudio.default_model = "".to_string();
+        assert!(runtime_identity_hint(&cfg).is_empty());
+    }
+
+    #[test]
+    fn synthesize_confirmation_counts_calendar_events() {
+        // Three successful calendar creates with no text → one pluralised line.
+        let events = vec![
+            tool_ok("calendar_create_event"),
+            tool_ok("calendar_create_event"),
+            tool_ok("calendar_create_event"),
+        ];
+        let s = synthesize_tool_confirmation(&events).unwrap();
+        assert!(s.contains("added 3 events to your calendar"), "got: {s}");
+    }
+
+    #[test]
+    fn synthesize_confirmation_handles_mixed_and_unknown_tools() {
+        // A known + an unknown tool → the known phrase, never raw output.
+        let s = synthesize_tool_confirmation(&[tool_ok("calendar_create_event"), tool_ok("web_search")]).unwrap();
+        assert!(s.contains("added an event to your calendar"), "got: {s}");
+        // Only an unknown tool → a generic "Done." (never empty, never raw JSON).
+        let s2 = synthesize_tool_confirmation(&[tool_ok("web_search")]).unwrap();
+        assert_eq!(s2, "✅ Done.");
+        // No tools at all → None (caller keeps the empty string).
+        assert!(synthesize_tool_confirmation(&[StreamEvent::Token("".into())]).is_none());
+        // A failed tool doesn't count as a confirmation.
+        let failed = StreamEvent::ToolResult {
+            name: "calendar_create_event".into(), output: "boom".into(), success: false, call_id: "c".into(),
+        };
+        assert!(synthesize_tool_confirmation(&[failed]).is_none());
+    }
 
     #[tokio::test]
     async fn process_returns_echo_as_tokens() {

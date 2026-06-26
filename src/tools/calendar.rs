@@ -222,6 +222,16 @@ impl Tool for CalendarCreateEventTool {
             Ok(i)  => i,
             Err(e) => return Ok(ToolResult::failure(e)),
         };
+        // Dedup guard: a flaky model can re-issue the same create call (we've
+        // seen one birthday created 4×). If an identical native event already
+        // exists (same summary + start), return it instead of inserting a
+        // duplicate, and tell the model so it doesn't keep retrying.
+        if let Some(existing) = self.store.find_duplicate_native(&caller, &input.summary, input.starts_at)? {
+            return Ok(ToolResult::success(format!(
+                "An identical event already exists (\"{}\", id {}) — not creating a duplicate. {}",
+                existing.summary, existing.id, serde_json::to_string(&existing)?,
+            )));
+        }
         let ev = self.store.create_event(&caller, &input)?;
         Ok(ToolResult::success(serde_json::to_string(&ev)?))
     }
@@ -393,6 +403,41 @@ mod tests {
         assert!(deleted.success);
         let body: Value = serde_json::from_str(&deleted.output).unwrap();
         assert_eq!(body["deleted"], true);
+    }
+
+    #[tokio::test]
+    async fn create_event_dedups_identical_calls() {
+        let (store, _dir) = setup();
+        let tool = CalendarCreateEventTool::new(Arc::clone(&store));
+        let args = json!({
+            "_user_id": "u1",
+            "summary":  "Tarek's Birthday",
+            "starts_at": "2026-02-09",
+            "all_day":  true,
+        });
+        // First create succeeds.
+        let first = tool.execute(args.clone()).await.unwrap();
+        assert!(first.success);
+        // A second identical call is deduped — reported success, but no insert.
+        let second = tool.execute(args.clone()).await.unwrap();
+        assert!(second.success);
+        assert!(second.output.contains("already exists"), "got: {}", second.output);
+        // A third for good measure (the model retried up to 4× in the wild).
+        let _ = tool.execute(args).await.unwrap();
+
+        // Exactly one event in the store.
+        let listed = CalendarListEventsTool::new(Arc::clone(&store))
+            .execute(json!({ "_user_id": "u1", "from": "2026-02-01", "to": "2026-02-28" }))
+            .await.unwrap();
+        let body: Value = serde_json::from_str(&listed.output).unwrap();
+        assert_eq!(body["count"], 1, "dedup should keep exactly one event");
+
+        // A different start time is NOT a duplicate (legitimately distinct).
+        let other = tool.execute(json!({
+            "_user_id": "u1", "summary": "Tarek's Birthday", "starts_at": "2026-02-08", "all_day": true,
+        })).await.unwrap();
+        assert!(other.success);
+        assert!(!other.output.contains("already exists"), "different date must not dedup");
     }
 
     #[tokio::test]

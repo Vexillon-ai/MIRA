@@ -100,11 +100,20 @@ impl GeminiProvider {
             }).collect())
     }
 
+    /// Bare model id for request paths. Gemini's catalog (`/v1beta/models`)
+    /// returns resource names as `models/<id>`, and users paste them that way,
+    /// but our REST paths already include `/models/` — so a configured
+    /// `models/<id>` would double up to `.../models/models/<id>` (404, provider
+    /// shows red). Strip a leading `models/` so both forms work.
+    fn model_path_id(&self) -> &str {
+        self.model.strip_prefix("models/").unwrap_or(&self.model)
+    }
+
     fn endpoint_url(&self, method: &str) -> String {
         // method is `generateContent` or `streamGenerateContent?alt=sse`.
         format!(
             "{}/{}/models/{}:{}",
-            self.base_url, GEMINI_API_VERSION, self.model, method,
+            self.base_url, GEMINI_API_VERSION, self.model_path_id(), method,
         )
     }
 
@@ -345,7 +354,7 @@ impl ModelProvider for GeminiProvider {
         // GET /v1beta/models/{model} returns the model card if the
         // key is valid + the model is reachable. Cheaper than a full
         // generate call and doesn't burn output tokens.
-        let url = format!("{}/{}/models/{}", self.base_url, GEMINI_API_VERSION, self.model);
+        let url = format!("{}/{}/models/{}", self.base_url, GEMINI_API_VERSION, self.model_path_id());
         let mut rb = self.http.get(&url);
         if !self.api_key.is_empty() {
             rb = rb.header("x-goog-api-key", &self.api_key);
@@ -375,6 +384,21 @@ mod tests {
             "https://generativelanguage.googleapis.com".into(),
             30,
         )
+    }
+
+    #[test]
+    fn strips_leading_models_prefix_from_url() {
+        // A model id pasted with Gemini's `models/` resource prefix (as the
+        // catalog returns it) must NOT produce a doubled `/models/models/` path.
+        let p = GeminiProvider::new(
+            "k".into(), "models/gemini-flash-lite-latest".into(),
+            "https://generativelanguage.googleapis.com".into(), 30,
+        );
+        let url = p.endpoint_url("generateContent");
+        assert!(url.contains("/v1beta/models/gemini-flash-lite-latest:generateContent"), "got: {url}");
+        assert!(!url.contains("models/models/"), "doubled prefix: {url}");
+        // A bare id is unchanged.
+        assert_eq!(provider().model_path_id(), "gemini-2.5-pro");
     }
 
     #[test]

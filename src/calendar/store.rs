@@ -271,6 +271,37 @@ impl CalendarStore {
         })
     }
 
+    /// Find a native event identical to a would-be new one — same owner, same
+    /// start instant, and the same (case-insensitive, trimmed) summary. Used by
+    /// the create-event tool to skip duplicate inserts when a flaky model
+    /// re-issues the same call (we've seen a single birthday created 4×). Only
+    /// matches `source = 'native'` events, so it never dedups against events
+    /// mirrored in from an external calendar.
+    pub fn find_duplicate_native(
+        &self,
+        owner_user_id: &str,
+        summary:       &str,
+        starts_at:     i64,
+    ) -> Result<Option<CalendarEvent>, MiraError> {
+        let id: Option<String> = {
+            let conn = self.lock()?;
+            conn.query_row(
+                "SELECT id FROM calendar_events
+                  WHERE owner_user_id = ?1 AND source = 'native'
+                    AND starts_at = ?2
+                    AND LOWER(TRIM(summary)) = LOWER(TRIM(?3))
+                  LIMIT 1",
+                params![owner_user_id, starts_at, summary],
+                |r| r.get(0),
+            ).optional()
+             .map_err(|e| MiraError::DatabaseError(format!("find_duplicate_native: {e}")))?
+        };
+        match id {
+            Some(id) => self.get_event(owner_user_id, &id),
+            None     => Ok(None),
+        }
+    }
+
     pub fn update_event(
         &self,
         owner_user_id: &str,
