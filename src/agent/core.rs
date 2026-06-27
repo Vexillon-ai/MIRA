@@ -85,6 +85,11 @@ pub struct TurnContext {
     // history conversation with a different DB id, so the caller must supply
     // the conversation id explicitly.
     pub conversation_id:        Option<String>,
+    // Per-turn override for reasoning suppression (the `/no_think` directive).
+    // `Some(true)` forces it on, `Some(false)` off; `None` = fall back to the
+    // global `agent.disable_reasoning` config. Set by the web chat's
+    // per-conversation toggle; channels leave it `None` (use the config default).
+    pub disable_reasoning:      Option<bool>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -722,6 +727,21 @@ impl AgentCore {
             effective_system
         } else {
             format!("{effective_system}{identity_hint}")
+        };
+
+        // Reasoning suppression: per-turn override (web chat toggle) wins, else
+        // the global `agent.disable_reasoning`. When on, append the `/no_think`
+        // directive so reasoning models (qwen3 family, etc.) skip chain-of-
+        // thought and act within the tool-loop token budget. Harmless on models
+        // that don't recognise it. Applies on every turn (chat, channels,
+        // onboarding) — unlike the channel/identity hints, suppression is
+        // universally helpful for a reasoning model.
+        let suppress_reasoning =
+            context.disable_reasoning.unwrap_or(self.config.agent.disable_reasoning);
+        let effective_system = if suppress_reasoning {
+            format!("{effective_system}\n\n/no_think")
+        } else {
+            effective_system
         };
 
         let mut messages: Vec<ChatMessage> = Vec::new();

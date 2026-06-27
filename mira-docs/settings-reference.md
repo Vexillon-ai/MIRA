@@ -30,6 +30,7 @@ _Agent reasoning and tool-calling behaviour._
 - **`agent.reasoning.min_chars`** (integer) — Input length (chars) at/above which a turn counts as a routing signal.
 - **`agent.reasoning.effort`** (string; one of: `low`, `medium`, `high`) — Reasoning effort for the routed-to provider on hard turns. Sent as OpenAI reasoning_effort; mapped to an Anthropic thinking budget.
 - **`agent.reasoning.classifier_provider`** (string) — Provider id for the cheap classifier consulted on ambiguous turns (hybrid fallback). Should be a small/fast model. Empty uses the default provider.
+- **`agent.disable_reasoning`** (boolean) — Suppress model 'thinking' by appending the /no_think directive to the system prompt. Turn on when the active model is a reasoning model (e.g. the qwen3 family) — otherwise it can burn the per-round token budget on chain-of-thought before acting, stalling tool loops. The web chat can override this per-conversation. Default false.
 - **`agent.system_prompt_file`** (string) — Path to an agent.md persona file. If empty or the file is absent the built-in default MIRA prompt is used. Supports ~ expansion.
 - **`agent.tool_mode`** (string; one of: `auto`, `openai`, `react`, `disabled`) — Tool-calling protocol. 'auto' tries OpenAI structured tool_calls first and falls back to ReAct text parsing. 'openai' enforces structured format only. 'react' enforces text parsing only. 'disabled' disables all tool use.
 - **`agent.tools`** (object) — Per-tool enable/disable switches. All tools are disabled by default for security.

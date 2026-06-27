@@ -9,7 +9,7 @@ import rehypeHighlight from 'rehype-highlight'
 import {
   Send, Square, User, ChevronDown, Paperclip, X as XIcon,
   Copy, Check, Wrench, RotateCcw, Pencil, Settings, Volume2, VolumeX, Loader2,
-  BookOpen, BookmarkPlus, Download, Link as LinkIcon,
+  BookOpen, BookmarkPlus, Download, Link as LinkIcon, Brain,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { wikiApi } from '@/api/wiki'
@@ -69,6 +69,10 @@ export default function ChatPage() {
   // pendingAttachments so the overlay shows during the drag even
   // before any file is actually dropped.
   const [isDragOver, setIsDragOver] = useState(false)
+  // Per-conversation reasoning suppression. false = inherit the global
+  // `agent.disable_reasoning` (send nothing); true = force `/no_think` for
+  // this chat. Lets you silence a reasoning model's chain-of-thought ad hoc.
+  const [noThink, setNoThink] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [showModels, setShowModels] = useState(false)
 
@@ -231,8 +235,9 @@ export default function ChatPage() {
       setPendingAttachments([])
       if (textareaRef.current) textareaRef.current.style.height = 'auto'
     }
-    sendMessage(text, convIdStr, selectedModel?.id, selectedModel?.provider, atts)
-  }, [input, isStreaming, sendMessage, convIdStr, selectedModel, pendingAttachments])
+    sendMessage(text, convIdStr, selectedModel?.id, selectedModel?.provider, atts,
+                noThink ? true : undefined)
+  }, [input, isStreaming, sendMessage, convIdStr, selectedModel, pendingAttachments, noThink])
 
   // Q1.3 — convert a File into the on-wire Attachment shape. Hard caps
   // at 10 MiB after base64 because the major vision endpoints all reject
@@ -440,6 +445,18 @@ export default function ChatPage() {
                 </div>
               )}
             </div>
+            <button
+              type="button"
+              className={styles.modelBtn}
+              onClick={() => setNoThink((v) => !v)}
+              title={noThink
+                ? 'Reasoning suppressed for this chat (/no_think). Click to allow thinking.'
+                : 'Model may show its thinking. Click to suppress reasoning (/no_think) for this chat.'}
+              style={noThink ? { color: 'var(--accent, #4f8cff)' } : undefined}
+            >
+              <Brain size={12} />
+              <span>{noThink ? 'No-think' : 'Thinking'}</span>
+            </button>
             <div className={styles.modelBarRight}>
               {(contextTokens > 0 || totalOutputTokens > 0) && (() => {
                 const cost = lastTurnCost && lastTurnCost.provider === 'openrouter'

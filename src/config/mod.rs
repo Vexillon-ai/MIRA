@@ -1682,6 +1682,14 @@ pub struct AgentConfig {
     #[serde(default)]
     pub system_prompt_file: String,
 
+    // Suppress model "thinking" by appending the `/no_think` directive to the
+    // system prompt. Reasoning models (the qwen3 family, etc.) otherwise burn
+    // the per-round token budget on chain-of-thought before acting, which
+    // stalls MIRA's tool loops. Off by default; flip on when the active model
+    // is a reasoning model. The web chat can override this per-conversation.
+    #[serde(default)]
+    pub disable_reasoning: bool,
+
     // Maximum history turns kept in context per session (1 turn = user + assistant).
     #[serde(default = "default_max_context_turns")]
     pub max_context_turns: usize,
@@ -1822,6 +1830,7 @@ impl Default for AgentConfig {
             max_tool_rounds:   default_max_tool_rounds(),
             tool_mode:         default_tool_mode(),
             system_prompt_file: String::new(),
+            disable_reasoning: false,
             max_context_turns: default_max_context_turns(),
             tools:             ToolsConfig::default(),
             reasoning:         ReasoningConfig::default(),

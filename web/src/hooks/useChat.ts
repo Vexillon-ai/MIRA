@@ -68,6 +68,7 @@ export function useChat() {
     modelOverride?: string,
     providerOverride?: string,
     attachments?: Attachment[],
+    disableReasoning?: boolean,
   ) => {
     // Allow attachment-only sends (image with no caption) — the
     // vision-capable providers handle this gracefully.
@@ -108,6 +109,7 @@ export function useChat() {
           model_override:    modelOverride ?? undefined,
           provider_override: providerOverride ?? undefined,
           attachments:       hasAttachments ? attachments : undefined,
+          disable_reasoning: disableReasoning,
         }),
         signal: controller.signal,
       })

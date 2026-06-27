@@ -165,6 +165,7 @@ pub async fn dispatch_inbound(
         skip_memory_hooks: false,
         skip_wiki_hooks:   false,
         reasoning_effort:  None,
+        disable_reasoning: None,
         // Set the persisted thread so the agent can rehydrate this
         // conversation's context on a cache miss (restart / idle eviction).
         // The conversation was already resolved above.

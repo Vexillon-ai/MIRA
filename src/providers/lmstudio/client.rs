@@ -185,8 +185,9 @@ struct LmStudioResponseMessage {
     /// Reasoning-distilled Qwen models (and some others) route tool-call XML
     /// into this channel instead of `content`. When `content` and `tool_calls`
     /// both come back empty, we fall back to this so the Hermes parser in the
-    /// tool loop can still recover the calls.
-    #[serde(default)]
+    /// tool loop can still recover the calls. Aliased to `reasoning` for parity
+    /// with the streaming delta field name.
+    #[serde(default, alias = "reasoning")]
     reasoning_content: Option<String>,
 }
 
@@ -226,10 +227,12 @@ struct LmStudioStreamChoice {
 struct LmStudioDelta {
     #[serde(default)]
     content: Option<String>,
-    /// Reasoning-distilled models stream their output into this delta channel
-    /// rather than `content`. We treat tokens arriving here the same as
-    /// content tokens so the final answer path still produces text.
-    #[serde(default)]
+    /// Reasoning channel. LM Studio names this `reasoning_content` in
+    /// non-streaming responses but **`reasoning`** in streaming deltas (gpt-oss,
+    /// the qwen3 family, etc.) — accept both so live chain-of-thought is
+    /// captured and wrapped in `<thinking>` for the collapsible UI block,
+    /// instead of being silently dropped.
+    #[serde(default, alias = "reasoning")]
     reasoning_content: Option<String>,
 }
 

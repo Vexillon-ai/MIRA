@@ -52,6 +52,7 @@ function orderProviders(slugs: string[], primary: string): string[] {
 interface ProvidersConfigShape {
   primary_provider?: string
   providers?: Record<string, ProviderEntry>
+  agent?: { disable_reasoning?: boolean }
 }
 interface ProviderEntry {
   enabled?:          boolean
@@ -113,6 +114,8 @@ export default function ProvidersPage() {
     queryKey: ['config'],
     queryFn:  () => api.get<ProvidersConfigShape>('/api/config').then(r => r.data),
   })
+  const reasoningMut = useConfigMutation()
+  const reasoningOff = cfg?.agent?.disable_reasoning ?? false
 
   const refresh = () => {
     void refetchHealth()
@@ -168,6 +171,26 @@ export default function ProvidersPage() {
           Refresh
         </button>
       </div>
+
+      {/* Reasoning suppression — applies to every surface (chat, channels,
+          tool loops). Turn on for reasoning models (qwen3 family, etc.) so they
+          don't burn the tool-loop token budget on chain-of-thought. */}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 16px',
+                      fontSize: 13, color: 'var(--text-muted)', cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={reasoningOff}
+          disabled={reasoningMut.isPending}
+          onChange={(e) => {
+            const off = e.target.checked
+            reasoningMut.mutate((c) => { c.agent = c.agent || {}; c.agent.disable_reasoning = off })
+          }}
+        />
+        <span>
+          <strong style={{ color: 'var(--text)' }}>Disable model reasoning</strong> (sends <code>/no_think</code>)
+          {' '}— recommended for reasoning models so they don't stall tool loops. Applies everywhere.
+        </span>
+      </label>
 
       {status && (
         <div className={styles.statusStrip}>

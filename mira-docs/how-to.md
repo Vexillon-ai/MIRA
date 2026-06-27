@@ -54,6 +54,9 @@ Two independent settings on a Telegram account:
 - Your own: ask MIRA ("set my briefing hour to 7") or use the UI.
 - Server-wide (admin): use Settings, or ask MIRA (it confirms global changes; secrets stay hidden; security/provider/proxy keys are protected).
 
+## Control model "thinking" (reasoning)
+- **See it:** when a reasoning model (gpt-oss, the qwen3 family, …) thinks, its chain-of-thought appears as a collapsed **Thinking** block above the reply — click to expand. (Reasoning streams over LM Studio's `reasoning` channel; MIRA captures it automatically.)
+- **Suppress it:** reasoning models can burn the per-round token budget thinking before they act, which stalls tool loops. Turn on **Disable model reasoning (`/no_think`)** on **Settings → Providers** (applies everywhere — chat, channels, tool loops), or use the **Thinking / No-think** toggle in the chat window to override it for one conversation.
 ## Use the calendar
 - The built-in calendar works on its own — no external service. Create events from the **Calendar** page or just ask MIRA ("add lunch with Dana Friday 1pm").
 - **Connect your own external calendar** (each user, from their Calendar page): Google/Outlook via "Connect", or CalDAV (e.g. Nextcloud) by entering your server URL + username + an **app password**. An admin sets the provider once in Settings → Calendar first.

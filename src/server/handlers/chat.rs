@@ -46,6 +46,10 @@ pub struct ChatRequest {
     // server persists them onto the user message's metadata blob and
     // passes them through to the agent for provider-side translation.
     pub attachments:     Option<Vec<crate::types::Attachment>>,
+    // Per-conversation override for reasoning suppression (`/no_think`).
+    // `Some(true/false)` overrides the global `agent.disable_reasoning` for this
+    // turn; `None` uses the global default. Set by the chat window's toggle.
+    pub disable_reasoning: Option<bool>,
 }
 
 // Payload for the SSE `done` event. `model`/`provider` echo what the server
@@ -242,7 +246,7 @@ pub async fn chat_handler(
 
     let mut turn_ctx = build_turn_context(
         &agent, &auth, &preamble, &data_dir, &user_id, &conv_id_c, &conv_mode,
-        conv_skip_wiki,
+        conv_skip_wiki, req.disable_reasoning,
     );
     // Q1.3 — attach the current turn's images. Only the immediate user
     // message gets them; history replay is handled at render time on
@@ -629,6 +633,7 @@ fn build_turn_context(
     conv_id:  &str,
     conv_mode: &str,
     conv_skip_wiki: bool,
+    disable_reasoning: Option<bool>,
 ) -> TurnContext {
     if conv_mode == "onboarding" {
         return build_onboarding_turn_context(agent, auth, user_id, conv_id);
@@ -658,6 +663,7 @@ fn build_turn_context(
         system_prompt_override,
         inject_tool_args: inject,
         skip_wiki_hooks:  conv_skip_wiki,
+        disable_reasoning,
         ..TurnContext::default()
     }
 }
@@ -708,6 +714,7 @@ fn build_onboarding_turn_context(
         skip_wiki_hooks:        true,
         attachments:            Vec::new(),
         reasoning_effort:       None,
+        disable_reasoning:      None,
         conversation_id:        Some(conv_id.to_owned()),
     }
 }
