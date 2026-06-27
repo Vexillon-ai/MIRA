@@ -11,7 +11,7 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use rand::Rng;
+use rand::{Rng, RngCore};
 use tracing::{info, warn};
 
 use crate::auth::models::{AuthDb, NewUser, Role, User, UserProfile};
@@ -216,6 +216,48 @@ impl LocalAuthService {
     pub fn create_user(&self, req: NewUser) -> Result<User, MiraError> {
         let hash = Self::hash_password(&req.password)?;
         self.db.create_user(req, hash)
+    }
+
+    // ── Device pairing (QR mobile onboarding, 0.282.0) ────────────────────────
+
+    /// Start a pairing: mint a random single-use secret, store only its
+    /// SHA-256 hash, and return `(pairing_id, raw_secret, expires_at_ms)`.
+    /// The raw secret is returned to the caller exactly once (embedded in
+    /// the QR code) and never persisted or logged.
+    pub fn start_device_pairing(
+        &self,
+        user_id:     &str,
+        device_name: Option<&str>,
+        ttl_secs:    i64,
+    ) -> Result<(String, String, i64), MiraError> {
+        let pairing_id = uuid::Uuid::new_v4().to_string();
+        let mut raw = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut raw);
+        let secret      = hex::encode(raw);
+        let secret_hash = hash_refresh_token(&secret);
+        let expires_at  = chrono::Utc::now().timestamp_millis() + ttl_secs * 1000;
+        self.db.create_device_pairing(&pairing_id, &secret_hash, user_id, device_name, expires_at)?;
+        Ok((pairing_id, secret, expires_at))
+    }
+
+    /// Claim a pairing with the raw secret. On `PairingClaim::Ok`, the
+    /// caller mints a token pair via [`issue_session`].
+    pub fn claim_device_pairing(
+        &self,
+        pairing_id: &str,
+        secret:     &str,
+    ) -> Result<crate::auth::models::PairingClaim, MiraError> {
+        let secret_hash = hash_refresh_token(secret);
+        self.db.claim_device_pairing(pairing_id, &secret_hash)
+    }
+
+    /// Status of a pairing the caller started (for the web UI to poll).
+    pub fn device_pairing_status(
+        &self,
+        pairing_id: &str,
+        owner_id:   &str,
+    ) -> Result<Option<crate::auth::models::DevicePairingStatus>, MiraError> {
+        self.db.device_pairing_status(pairing_id, owner_id)
     }
 
     // ── SSO / OIDC (Q2 #11) ──────────────────────────────────────────────────

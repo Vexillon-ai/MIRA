@@ -602,6 +602,7 @@ pub async fn chat_handler(
                     channel:         Some("web".to_owned()),
                     user_id:         Some(user_id.clone()),
                     message:         None,
+                    category:        None,
                 });
 
                 info!("Chat turn complete — conv={} user={}", conv_id_c, user_id);

@@ -164,8 +164,8 @@ mod tests {
 
     #[test]
     fn extract_host_port_covers_common_cases() {
-        assert_eq!(extract_host_port("http://searxng.home.lan:8080").as_ref().map(|(h,p)| (h.as_str(), *p)),
-                   Some(("searxng.home.lan", 8080)));
+        assert_eq!(extract_host_port("http://searxng.example.com:8080").as_ref().map(|(h,p)| (h.as_str(), *p)),
+                   Some(("searxng.example.com", 8080)));
         assert_eq!(extract_host_port("http://192.168.1.5:8888").as_ref().map(|(h,p)| (h.as_str(), *p)),
                    Some(("192.168.1.5", 8888)));
         // Default ports are inferred from scheme.

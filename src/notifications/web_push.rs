@@ -35,7 +35,7 @@ use tracing::{debug, info, warn};
 use web_push_native::jwt_simple::algorithms::{ECDSAP256KeyPairLike, ES256KeyPair};
 use web_push_native::{Auth, WebPushBuilder};
 
-use crate::notifications::{Notification, NotificationBus, NotificationKind};
+use crate::notifications::{NotificationBus, NotificationEnvelope};
 use crate::MiraError;
 
 /// File under `data_dir/` that stores the PEM-encoded VAPID keypair.
@@ -51,17 +51,32 @@ const VAPID_CONTACT: &str = "mailto:admin@mira.local";
 
 // ── Service ──────────────────────────────────────────────────────────────────
 
+/// The proactive-notification dispatcher. Despite the historical name, this
+/// is the single transport-agnostic fan-out point: it owns the subscription
+/// store and delivers each event to every registered subscription for a
+/// user, branching by `kind` — Web Push (VAPID, built in) and, when
+/// configured, Firebase Cloud Messaging for the native app. (We kept the
+/// `WebPushService` name rather than introducing a parallel
+/// `NotificationDispatcher` type so the existing Extension wiring and call
+/// sites stay put — see design-docs/mobile-app-support.md.)
 #[derive(Clone)]
 pub struct WebPushService {
     keypair: Arc<ES256KeyPair>,
     store:   Arc<WebPushStore>,
     http:    reqwest::Client,
+    /// Optional FCM transport — `None` when `notifications.fcm.enabled=false`.
+    fcm:     Option<crate::notifications::fcm::FcmService>,
 }
 
 impl WebPushService {
     /// Open the service: load or mint a VAPID keypair, open the
-    /// subscriptions store. Idempotent; safe to call from tests.
-    pub fn open(data_dir: &Path, db_path: &Path) -> Result<Self, MiraError> {
+    /// subscriptions store, and attach the optional FCM transport.
+    /// Idempotent; safe to call from tests.
+    pub fn open(
+        data_dir: &Path,
+        db_path:  &Path,
+        fcm:      Option<crate::notifications::fcm::FcmService>,
+    ) -> Result<Self, MiraError> {
         let keypair = load_or_create_keypair(&data_dir.join(VAPID_KEY_FILENAME))?;
         let store   = Arc::new(WebPushStore::open(db_path)?);
         let http    = reqwest::Client::builder()
@@ -69,7 +84,7 @@ impl WebPushService {
             .timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| MiraError::ConfigError(format!("web push http client: {e}")))?;
-        Ok(Self { keypair: Arc::new(keypair), store, http })
+        Ok(Self { keypair: Arc::new(keypair), store, http, fcm })
     }
 
     /// The VAPID public key in uncompressed SEC1 form, base64url-no-pad
@@ -97,6 +112,24 @@ impl WebPushService {
         self.store.upsert(user_id, endpoint, p256dh, auth, user_agent)
     }
 
+    /// Register (or refresh) an FCM device token for the native app. Tokens
+    /// are deduped by value — re-registering the same token just refreshes
+    /// its `platform` / `device_name` / `updated_at`.
+    pub fn subscribe_fcm(
+        &self,
+        user_id:     &str,
+        token:       &str,
+        platform:    Option<&str>,
+        device_name: Option<&str>,
+    ) -> Result<String, MiraError> {
+        self.store.upsert_fcm(user_id, token, platform, device_name)
+    }
+
+    /// Whether the FCM transport is configured + enabled.
+    pub fn fcm_enabled(&self) -> bool {
+        self.fcm.is_some()
+    }
+
     /// Remove a single subscription. Caller scopes by user_id so a user
     /// can only delete their own rows (admin scope handled at the HTTP
     /// layer).
@@ -118,23 +151,42 @@ impl WebPushService {
     pub async fn send_to_user(
         &self,
         user_id: &str,
-        payload: &PushPayload,
+        payload: &NotificationEnvelope,
     ) -> Result<u32, MiraError> {
+        use crate::notifications::fcm::FcmSendError;
+
         let subs = self.store.list_for_user(user_id)?;
         if subs.is_empty() { return Ok(0); }
         let body = serde_json::to_vec(payload)
             .map_err(|e| MiraError::ConfigError(format!("payload serialise: {e}")))?;
         let mut delivered = 0u32;
         for sub in subs {
-            match self.send_one(&sub, &body).await {
-                Ok(()) => delivered += 1,
-                Err(WebPushSendError::Gone) => {
-                    debug!("web push: gateway 404/410 for sub {} — removing", sub.id);
-                    let _ = self.store.delete(&sub.id, user_id);
+            match sub.kind.as_str() {
+                // FCM device token (native app). `endpoint` holds the token.
+                "fcm" => {
+                    let Some(fcm) = &self.fcm else { continue }; // FCM disabled — skip.
+                    match fcm.send(&sub.endpoint, payload).await {
+                        Ok(()) => delivered += 1,
+                        Err(FcmSendError::Gone) => {
+                            debug!("fcm: token gone for sub {} — removing", sub.id);
+                            let _ = self.store.delete(&sub.id, user_id);
+                        }
+                        Err(FcmSendError::Other(e)) => {
+                            warn!("fcm: send to {} failed: {e}", sub.id);
+                        }
+                    }
                 }
-                Err(WebPushSendError::Other(e)) => {
-                    warn!("web push: send to {} failed: {e}", sub.id);
-                }
+                // Web Push (VAPID) — the default for browser subscriptions.
+                _ => match self.send_one(&sub, &body).await {
+                    Ok(()) => delivered += 1,
+                    Err(WebPushSendError::Gone) => {
+                        debug!("web push: gateway 404/410 for sub {} — removing", sub.id);
+                        let _ = self.store.delete(&sub.id, user_id);
+                    }
+                    Err(WebPushSendError::Other(e)) => {
+                        warn!("web push: send to {} failed: {e}", sub.id);
+                    }
+                },
             }
         }
         Ok(delivered)
@@ -215,7 +267,7 @@ pub fn spawn_bus_forwarder(bus: Arc<NotificationBus>, service: WebPushService) {
             match rx.recv().await {
                 Ok(notif) => {
                     let Some(user_id) = notif.user_id.clone() else { continue };
-                    let payload = notification_to_payload(&notif);
+                    let payload = notif.to_envelope();
                     if let Err(e) = service.send_to_user(&user_id, &payload).await {
                         warn!("web push: forwarder send_to_user failed: {e}");
                     }
@@ -232,49 +284,25 @@ pub fn spawn_bus_forwarder(bus: Arc<NotificationBus>, service: WebPushService) {
     });
 }
 
-fn notification_to_payload(n: &Notification) -> PushPayload {
-    let (title, body) = match n.kind {
-        NotificationKind::InboundMessage => (
-            "New message".to_string(),
-            n.message.clone().unwrap_or_default(),
-        ),
-        NotificationKind::ConversationUpdated => (
-            "MIRA".to_string(),
-            n.message.clone().unwrap_or_else(|| "New activity".to_string()),
-        ),
-        NotificationKind::SystemDegraded => (
-            "MIRA — subsystem degraded".to_string(),
-            n.message.clone().unwrap_or_else(|| "A subsystem fell back to a degraded path".to_string()),
-        ),
-        NotificationKind::GuardianAlert => (
-            "MIRA-Guardian".to_string(),
-            n.message.clone().unwrap_or_else(|| "MIRA-Guardian flagged a health issue".to_string()),
-        ),
-    };
-    let url = n.conversation_id.as_ref().map(|c| format!("/chat/{c}"));
-    PushPayload { title, body, url, channel: n.channel.clone() }
-}
-
 // ── Types ────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PushPayload {
-    pub title:   String,
-    pub body:    String,
-    pub url:     Option<String>,
-    pub channel: Option<String>,
-}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PushSubscription {
     pub id:         String,
     pub user_id:    String,
+    /// Web Push endpoint URL, or — for `kind == "fcm"` — the device token.
     pub endpoint:   String,
     pub p256dh:     String,
     pub auth:       String,
     pub user_agent: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Transport: `"webpush"` (default) or `"fcm"`.
+    pub kind:        String,
+    /// Native-client platform (e.g. "android"). FCM rows only.
+    pub platform:    Option<String>,
+    /// Native-client device label. FCM rows only.
+    pub device_name: Option<String>,
 }
 
 // ── Store ────────────────────────────────────────────────────────────────────
@@ -301,6 +329,19 @@ impl WebPushStore {
              CREATE INDEX IF NOT EXISTS idx_web_push_user
                ON web_push_subscriptions(user_id);"
         ).map_err(|e| MiraError::ConfigError(format!("web push schema: {e}")))?;
+
+        // 0.282.0 — additive columns for the FCM transport. Existing rows
+        // (browser Web Push) default to kind='webpush'. For FCM rows the
+        // `endpoint` column holds the device token (reusing its UNIQUE
+        // constraint for per-token dedup); p256dh/auth are empty. ALTER is
+        // idempotent via error-swallow — SQLite has no IF NOT EXISTS here.
+        for sql in [
+            "ALTER TABLE web_push_subscriptions ADD COLUMN kind TEXT NOT NULL DEFAULT 'webpush'",
+            "ALTER TABLE web_push_subscriptions ADD COLUMN platform TEXT",
+            "ALTER TABLE web_push_subscriptions ADD COLUMN device_name TEXT",
+        ] {
+            let _ = conn.execute(sql, []);
+        }
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -337,10 +378,53 @@ impl WebPushStore {
                 let id = uuid::Uuid::new_v4().to_string();
                 conn.execute(
                     "INSERT INTO web_push_subscriptions
-                       (id, user_id, endpoint, p256dh, auth, user_agent, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                       (id, user_id, endpoint, p256dh, auth, user_agent, created_at, updated_at, kind)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 'webpush')",
                     params![id, user_id, endpoint, p256dh, auth, user_agent, now],
                 ).map_err(|e| MiraError::ConfigError(format!("web push insert: {e}")))?;
+                id
+            }
+        };
+        Ok(id)
+    }
+
+    /// Upsert an FCM device-token subscription, deduped by token (stored in
+    /// the `endpoint` column). p256dh/auth are unused for FCM rows — set to
+    /// empty strings to satisfy NOT NULL.
+    fn upsert_fcm(
+        &self,
+        user_id:     &str,
+        token:       &str,
+        platform:    Option<&str>,
+        device_name: Option<&str>,
+    ) -> Result<String, MiraError> {
+        let conn = self.conn.lock().expect("web push store poisoned");
+        let now = chrono::Utc::now().timestamp_millis();
+        let existing: Option<String> = conn.query_row(
+            "SELECT id FROM web_push_subscriptions WHERE endpoint = ?1",
+            params![token],
+            |r| r.get(0),
+        ).ok();
+        let id = match existing {
+            Some(id) => {
+                conn.execute(
+                    "UPDATE web_push_subscriptions
+                     SET user_id = ?2, kind = 'fcm', platform = ?3,
+                         device_name = ?4, updated_at = ?5
+                     WHERE id = ?1",
+                    params![id, user_id, platform, device_name, now],
+                ).map_err(|e| MiraError::ConfigError(format!("fcm update: {e}")))?;
+                id
+            }
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                conn.execute(
+                    "INSERT INTO web_push_subscriptions
+                       (id, user_id, endpoint, p256dh, auth, user_agent,
+                        created_at, updated_at, kind, platform, device_name)
+                     VALUES (?1, ?2, ?3, '', '', NULL, ?4, ?4, 'fcm', ?5, ?6)",
+                    params![id, user_id, token, now, platform, device_name],
+                ).map_err(|e| MiraError::ConfigError(format!("fcm insert: {e}")))?;
                 id
             }
         };
@@ -359,20 +443,24 @@ impl WebPushStore {
     fn list_for_user(&self, user_id: &str) -> Result<Vec<PushSubscription>, MiraError> {
         let conn = self.conn.lock().expect("web push store poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, user_id, endpoint, p256dh, auth, user_agent, created_at, updated_at
+            "SELECT id, user_id, endpoint, p256dh, auth, user_agent, created_at, updated_at,
+                    kind, platform, device_name
              FROM web_push_subscriptions WHERE user_id = ?1
              ORDER BY updated_at DESC"
         ).map_err(|e| MiraError::ConfigError(format!("web push list prep: {e}")))?;
         let rows = stmt.query_map(params![user_id], |r| {
             Ok(PushSubscription {
-                id:         r.get(0)?,
-                user_id:    r.get(1)?,
-                endpoint:   r.get(2)?,
-                p256dh:     r.get(3)?,
-                auth:       r.get(4)?,
-                user_agent: r.get(5)?,
-                created_at: r.get(6)?,
-                updated_at: r.get(7)?,
+                id:          r.get(0)?,
+                user_id:     r.get(1)?,
+                endpoint:    r.get(2)?,
+                p256dh:      r.get(3)?,
+                auth:        r.get(4)?,
+                user_agent:  r.get(5)?,
+                created_at:  r.get(6)?,
+                updated_at:  r.get(7)?,
+                kind:        r.get(8)?,
+                platform:    r.get(9)?,
+                device_name: r.get(10)?,
             })
         }).map_err(|e| MiraError::ConfigError(format!("web push list query: {e}")))?;
         let mut out = Vec::new();
@@ -429,19 +517,19 @@ mod tests {
     #[test]
     fn open_mints_a_keypair_and_returns_a_public_key() {
         let dir = tempdir().unwrap();
-        let svc = WebPushService::open(dir.path(), &dir.path().join("wp.db")).unwrap();
+        let svc = WebPushService::open(dir.path(), &dir.path().join("wp.db"), None).unwrap();
         let pk = svc.vapid_public_key_b64url();
         // Uncompressed SEC1 P-256 = 65 bytes → 87 base64url chars.
         assert_eq!(pk.len(), 87, "VAPID public key should be 87 b64url chars");
         // Reopening reuses the same keypair (subscriptions don't churn).
-        let svc2 = WebPushService::open(dir.path(), &dir.path().join("wp.db")).unwrap();
+        let svc2 = WebPushService::open(dir.path(), &dir.path().join("wp.db"), None).unwrap();
         assert_eq!(pk, svc2.vapid_public_key_b64url());
     }
 
     #[test]
     fn subscribe_is_idempotent_per_endpoint() {
         let dir = tempdir().unwrap();
-        let svc = WebPushService::open(dir.path(), &dir.path().join("wp.db")).unwrap();
+        let svc = WebPushService::open(dir.path(), &dir.path().join("wp.db"), None).unwrap();
         let id1 = svc.subscribe("alice", "https://fcm/x", "pubkey", "auth123456789012", None).unwrap();
         let id2 = svc.subscribe("alice", "https://fcm/x", "pubkey", "auth123456789012", None).unwrap();
         assert_eq!(id1, id2, "same endpoint refreshes the row instead of creating a second");
@@ -452,7 +540,7 @@ mod tests {
     #[test]
     fn unsubscribe_scoped_by_user() {
         let dir = tempdir().unwrap();
-        let svc = WebPushService::open(dir.path(), &dir.path().join("wp.db")).unwrap();
+        let svc = WebPushService::open(dir.path(), &dir.path().join("wp.db"), None).unwrap();
         let id = svc.subscribe("alice", "https://fcm/y", "pk", "auth123456789012", None).unwrap();
         // Wrong user can't delete alice's row.
         svc.unsubscribe(&id, "mallory").unwrap();

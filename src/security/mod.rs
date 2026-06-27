@@ -83,6 +83,12 @@ impl SecurityConfig {
                 "/api/auth/signup",
                 "/api/auth/signup/config",
                 "/api/auth/invite",
+                // 0.282.0 — QR device pairing: a phone claims a pairing the
+                // logged-in web session started, exchanging the single-use
+                // secret for a token pair. No Bearer token yet (that's the
+                // whole point); /start + /{id}/status stay behind auth via
+                // the AuthUser extractor.
+                "/api/auth/pairing/claim",
                 // Q1.7 — landing page + public waitlist signup. The
                 // landing page is served from /landing/* and posts to
                 // /api/waitlist/signup; the admin read/export/delete
@@ -132,6 +138,12 @@ impl Default for SecurityConfig {
                 "/api/auth/signup",
                 "/api/auth/signup/config",
                 "/api/auth/invite",
+                // 0.282.0 — QR device pairing: a phone claims a pairing the
+                // logged-in web session started, exchanging the single-use
+                // secret for a token pair. No Bearer token yet (that's the
+                // whole point); /start + /{id}/status stay behind auth via
+                // the AuthUser extractor.
+                "/api/auth/pairing/claim",
                 // Q1.7 — landing page + public waitlist signup. The
                 // landing page is served from /landing/* and posts to
                 // /api/waitlist/signup; the admin read/export/delete

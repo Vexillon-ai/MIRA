@@ -110,6 +110,7 @@ impl DegradationTracker {
                 channel: None,
                 user_id: None,
                 message: Some(format!("{label} is degraded — fell back from “{from}” to “{to}” ({reason}).")),
+                category: None,
             });
         }
     }

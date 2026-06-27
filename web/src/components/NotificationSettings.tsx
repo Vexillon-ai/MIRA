@@ -19,14 +19,18 @@ import { Bell, BellOff, Trash2, Send } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { api } from '@/api/client'
 import btn from './actionButton.module.css'
+import PairDeviceCard from './PairDeviceCard'
 
 const SW_URL = '/mira-sw.js'
 
 interface PushSubscriptionView {
-  id:         string
-  user_agent: string | null
-  created_at: number
-  updated_at: number
+  id:          string
+  kind?:       string
+  platform?:   string | null
+  device_name?: string | null
+  user_agent:  string | null
+  created_at:  number
+  updated_at:  number
 }
 
 /// Convert a base64url-no-pad string into a Uint8Array. The Push API
@@ -275,6 +279,8 @@ export default function NotificationSettings() {
         )}
       </div>
 
+      <PairDeviceCard />
+
       <div>
         <strong style={{ fontSize: 13 }}>Registered devices</strong>
         <p style={{ margin: '4px 0 8px', fontSize: 12, color: 'var(--text-muted)' }}>
@@ -293,7 +299,9 @@ export default function NotificationSettings() {
               fontSize: 12, fontFamily: 'monospace',
             }}>
               <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {s.user_agent || '(unknown user-agent)'}
+                {s.kind === 'fcm'
+                  ? `📱 ${s.device_name || s.platform || 'Mobile app'}`
+                  : (s.user_agent || '(unknown user-agent)')}
               </span>
               <span style={{ color: 'var(--text-muted)' }}>
                 {new Date(s.updated_at).toLocaleDateString()}

@@ -402,6 +402,7 @@ pub fn spawn_watch_loop(
                         channel:         Some("web".to_string()),
                         user_id:         notify_user_id.clone(),
                         message:         Some(text.clone()),
+                        category:        None,
                     });
                     if let Some(ref bus) = event_bus {
                         bus.emit(crate::events::Event::new(
@@ -570,7 +571,7 @@ mod tests {
         for ok in ["http://127.0.0.1:11434", "http://localhost:1234/v1", "http://[::1]:1234"] {
             assert!(url_is_loopback(ok), "{ok} should be loopback");
         }
-        for no in ["http://192.168.70.243:1234/v1", "https://api.openai.com", "http://10.0.0.5:11434"] {
+        for no in ["http://192.0.2.10:1234/v1", "https://api.openai.com", "http://192.0.2.11:11434"] {
             assert!(!url_is_loopback(no), "{no} should NOT be loopback");
         }
     }
@@ -594,7 +595,7 @@ mod tests {
         // LAN lmstudio → allowed but flagged LAN.
         c.agent.llm_aliases.insert("guardian".into(),
             crate::config::LlmAlias { provider: "lmstudio".into(), model: None });
-        c.providers.lmstudio.url = "http://192.168.70.243:1234/v1".into();
+        c.providers.lmstudio.url = "http://192.0.2.10:1234/v1".into();
         let chk = model_check(&c);
         assert!(chk.allowed && chk.locality == ModelLocality::LanLocal);
     }

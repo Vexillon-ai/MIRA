@@ -406,6 +406,7 @@ impl Dispatcher {
                 channel:         Some(p.channel.clone()),
                 user_id:         Some(user_id.to_string()),
                 message:         Some(snippet(&assistant_text)),
+                category:        None,
             });
         }
 
@@ -1388,6 +1389,7 @@ impl Dispatcher {
                     channel:         Some("web".to_string()),
                     user_id:         Some(user_id.to_string()),
                     message:         Some(snippet(&text)),
+                    category:        None,
                 });
                 Ok(format!("web → {}", snippet(&text)))
             }

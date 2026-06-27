@@ -468,6 +468,7 @@ impl CompanionDispatcher {
                 channel:         Some(channel.clone()),
                 user_id:         Some(user_id.to_string()),
                 message:         Some(snippet(&assistant_text)),
+                category:        None,
             });
         }
 
@@ -645,6 +646,7 @@ impl CompanionDispatcher {
                 channel:         Some(channel.clone()),
                 user_id:         Some(user_id.to_string()),
                 message:         Some(snippet(&assistant_text)),
+                category:        None,
             });
         }
 

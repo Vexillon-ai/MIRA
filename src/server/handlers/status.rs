@@ -22,6 +22,9 @@ pub fn init_start_time() {
 #[derive(Serialize)]
 pub struct StatusResponse {
     pub version:          &'static str,
+    /// Human label for this instance (config `server.display_name`, else
+    /// "MIRA"). Shown by the mobile app; mirrors the device-pairing payload.
+    pub server_name:      String,
     pub uptime_secs:      u64,
     pub now_utc:          i64,
     /// System-wide aggregate counts + provider name are admin-only — `None`
@@ -84,8 +87,12 @@ pub async fn status_handler(
         None
     };
 
+    let server_name = agent.config.server.display_name.clone()
+        .unwrap_or_else(|| "MIRA".to_string());
+
     axum::Json(StatusResponse {
         version:            env!("CARGO_PKG_VERSION"),
+        server_name,
         uptime_secs:        uptime,
         now_utc,
         active_sessions,

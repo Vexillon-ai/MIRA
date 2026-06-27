@@ -1190,6 +1190,7 @@ impl GatewayBuilder {
                             "{} service URL(s) can't reach the Windows host from WSL ({list}). \
                              Open Settings to switch them to windows-host (one click).",
                             findings.len())),
+                        category:        None,
                     });
                 }
             });
@@ -1483,10 +1484,19 @@ impl GatewayBuilder {
         // messages reach registered browsers/phones. `None` on failure —
         // the HTTP endpoints will 503 but the rest of the server is
         // unaffected.
+        // FCM transport (opt-in, mobile app). Misconfiguration while enabled
+        // is non-fatal: log and fall back to web-push-only rather than block
+        // boot. `None` when disabled.
+        let fcm = match crate::notifications::fcm::FcmService::open(&config.notifications.fcm) {
+            Ok(Some(svc)) => { info!("FCM transport initialised (project {})", config.notifications.fcm.project_id.as_deref().unwrap_or("from-service-account")); Some(svc) }
+            Ok(None)      => None,
+            Err(e)        => { warn!("FCM transport failed to open (non-fatal — web push still active): {e}"); None }
+        };
         let web_push: Option<Arc<crate::notifications::web_push::WebPushService>> =
             match crate::notifications::web_push::WebPushService::open(
                 &data_dir,
                 &crate::notifications::web_push::service_path(&data_dir),
+                fcm,
             ) {
                 Ok(svc) => {
                     info!("Web Push service initialised (VAPID at {})", data_dir.display());

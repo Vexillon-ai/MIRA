@@ -384,22 +384,33 @@ impl LmStudioProvider {
         // `<thinking>` wrapper, so tool extraction still finds the calls
         // embedded inside the promoted content.
         let tool_calls_empty = tool_calls.as_ref().map_or(true, |v| v.is_empty());
-        let content = if raw_content.trim().is_empty() && tool_calls_empty {
+        let (content, reasoning) = if raw_content.trim().is_empty() && tool_calls_empty {
+            // Empty visible content: promote reasoning into <thinking>-wrapped
+            // content so the Hermes tool-call parser in the tool loop can still
+            // recover any calls the model emitted on the reasoning channel.
+            // (Unchanged behaviour — `strip_think_blocks` only strips `<think>`,
+            // not `<thinking>`, so the wrapped `<tool_call>` survives parsing.)
             match choice.message.reasoning_content {
                 Some(r) if !r.trim().is_empty() => {
                     debug!("LM Studio returned empty content+tool_calls; promoting reasoning_content ({} chars), wrapped in <thinking>", r.len());
-                    format!("<thinking>{r}</thinking>\n\n")
+                    (format!("<thinking>{r}</thinking>\n\n"), None)
                 }
-                _ => raw_content,
+                _ => (raw_content, None),
             }
         } else {
-            raw_content
+            // Normal case: keep the visible answer AND surface the model's
+            // chain-of-thought on its own channel so the chat UI renders it in
+            // the collapsible Thinking panel. Previously this was dropped
+            // (reasoning: None), so LM Studio reasoning models showed no
+            // thinking at all — only the openai_compat provider captured it.
+            let reasoning = choice.message.reasoning_content.filter(|s| !s.trim().is_empty());
+            (raw_content, reasoning)
         };
 
         Ok(GenerationResponse {
             content,
             tool_calls,
-            reasoning:   None,
+            reasoning,
             usage: parsed.usage.unwrap_or_default(),
             provider_id: ProviderId::Local(format!("lmstudio/{}", self.model)),
             model_name: self.model.clone(),

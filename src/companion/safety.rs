@@ -455,6 +455,8 @@ impl SafetyFloor {
                 channel:         Some("web".into()),
                 user_id:         Some(contact_user_id.to_string()),
                 message:         Some(clip(body)),
+                // Care-network escalation → envelope type:"care", severity:"high".
+                category:        Some("wellbeing".into()),
             });
         }
 

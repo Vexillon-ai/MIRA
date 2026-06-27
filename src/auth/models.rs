@@ -97,6 +97,30 @@ pub struct StoredRefreshToken {
     pub revoked:    bool,
 }
 
+// ── Device pairing (QR mobile onboarding) ───────────────────────────────────────
+
+/// Outcome of a device-pairing claim. The handler maps these to HTTP
+/// codes: `Ok` → 200 (issue tokens), `Expired`/`Claimed` → 410 Gone,
+/// `NotFound`/`BadSecret` → 401 (indistinguishable to the client so a
+/// guessed pairing id leaks nothing). The secret check is constant-time.
+pub enum PairingClaim {
+    Ok { user_id: String, device_name: Option<String> },
+    NotFound,
+    BadSecret,
+    Expired,
+    Claimed,
+}
+
+/// Status snapshot for `GET /api/auth/pairing/{id}/status` — lets the web
+/// UI show "waiting / paired / expired" without exposing the secret.
+pub struct DevicePairingStatus {
+    pub claimed:     bool,
+    pub expired:     bool,
+    pub expires_at:  i64,
+    pub claimed_at:  Option<i64>,
+    pub device_name: Option<String>,
+}
+
 // ── AuthDb ────────────────────────────────────────────────────────────────────
 
 /// Wraps a single SQLite connection and handles all auth tables.
@@ -267,6 +291,26 @@ impl AuthDb {
                 banned_until  INTEGER NOT NULL,
                 reason        TEXT
             );
+
+            -- 0.282.0 — QR device pairing (mobile app onboarding). A
+            -- logged-in web session mints a short-lived pairing record; the
+            -- phone scans the QR and POSTs the secret to claim a full token
+            -- pair. The secret is SHA-256 hashed (never stored or logged in
+            -- the clear) and is strictly single-use: `claimed_at` is set
+            -- atomically on the first successful claim. Expired/claimed rows
+            -- are swept lazily on each start/claim.
+            CREATE TABLE IF NOT EXISTS device_pairings (
+                pairing_id   TEXT PRIMARY KEY,
+                secret_hash  TEXT NOT NULL,
+                user_id      TEXT NOT NULL,
+                device_name  TEXT,
+                created_at   INTEGER NOT NULL,
+                expires_at   INTEGER NOT NULL,
+                claimed_at   INTEGER,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_device_pairings_expires
+                ON device_pairings(expires_at);
             "#,
         )
         .map_err(|e| MiraError::DatabaseError(format!("Auth DB migration failed: {}", e)))?;
@@ -701,6 +745,118 @@ impl AuthDb {
             params![ip, username, reason, now],
         ).map_err(|e| MiraError::DatabaseError(format!("record_failed_login: {e}")))?;
         Ok(())
+    }
+
+    // ── 0.282.0: device pairing (QR mobile onboarding) ─────────────────
+
+    /// Insert a new pairing record. `secret_hash` is the SHA-256 hex of the
+    /// raw secret (which the caller returns to the browser exactly once and
+    /// never persists). `expires_at` is unix-millis.
+    pub fn create_device_pairing(
+        &self,
+        pairing_id:  &str,
+        secret_hash: &str,
+        user_id:     &str,
+        device_name: Option<&str>,
+        expires_at:  i64,
+    ) -> Result<(), MiraError> {
+        let now  = Self::now_ms();
+        let conn = self.conn.lock().unwrap();
+        // Opportunistic sweep so the table can't grow unbounded.
+        let _ = conn.execute(
+            "DELETE FROM device_pairings WHERE expires_at < ?1 OR claimed_at IS NOT NULL",
+            params![now],
+        );
+        conn.execute(
+            "INSERT INTO device_pairings
+               (pairing_id, secret_hash, user_id, device_name, created_at, expires_at, claimed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+            params![pairing_id, secret_hash, user_id, device_name, now, expires_at],
+        ).map_err(|e| MiraError::DatabaseError(format!("create_device_pairing: {e}")))?;
+        Ok(())
+    }
+
+    /// Atomically claim a pairing: verify the secret (constant-time),
+    /// enforce single-use + expiry, and stamp `claimed_at`. Returns the
+    /// owning user on success. The whole check-and-set runs under the
+    /// connection mutex so two phones can't both win the same pairing.
+    pub fn claim_device_pairing(
+        &self,
+        pairing_id:        &str,
+        secret_hash_input: &str,
+    ) -> Result<PairingClaim, MiraError> {
+        let now  = Self::now_ms();
+        let conn = self.conn.lock().unwrap();
+
+        let row: Option<(String, String, Option<String>, i64, Option<i64>)> = conn.query_row(
+            "SELECT secret_hash, user_id, device_name, expires_at, claimed_at
+               FROM device_pairings WHERE pairing_id = ?1",
+            params![pairing_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).ok();
+
+        let (secret_hash, user_id, device_name, expires_at, claimed_at) = match row {
+            Some(v) => v,
+            None    => return Ok(PairingClaim::NotFound),
+        };
+
+        // Constant-time compare of the SHA-256 hex digests (equal length).
+        use subtle::ConstantTimeEq;
+        let matches = secret_hash.len() == secret_hash_input.len()
+            && secret_hash.as_bytes().ct_eq(secret_hash_input.as_bytes()).into();
+        if !matches {
+            return Ok(PairingClaim::BadSecret);
+        }
+        if claimed_at.is_some() {
+            return Ok(PairingClaim::Claimed);
+        }
+        if expires_at < now {
+            return Ok(PairingClaim::Expired);
+        }
+
+        // Guard the set with the same predicate so a concurrent claim that
+        // slipped in between the SELECT and here can't double-issue.
+        let affected = conn.execute(
+            "UPDATE device_pairings SET claimed_at = ?2
+               WHERE pairing_id = ?1 AND claimed_at IS NULL AND expires_at >= ?3",
+            params![pairing_id, now, now],
+        ).map_err(|e| MiraError::DatabaseError(format!("claim_device_pairing: {e}")))?;
+        if affected == 0 {
+            return Ok(PairingClaim::Claimed);
+        }
+        Ok(PairingClaim::Ok { user_id, device_name })
+    }
+
+    /// Read a pairing's status without exposing the secret. `None` when the
+    /// id is unknown (or was already swept).
+    pub fn device_pairing_status(
+        &self,
+        pairing_id: &str,
+        owner_id:   &str,
+    ) -> Result<Option<DevicePairingStatus>, MiraError> {
+        let now  = Self::now_ms();
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(String, Option<String>, i64, Option<i64>)> = conn.query_row(
+            "SELECT user_id, device_name, expires_at, claimed_at
+               FROM device_pairings WHERE pairing_id = ?1",
+            params![pairing_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).ok();
+        let (user_id, device_name, expires_at, claimed_at) = match row {
+            Some(v) => v,
+            None    => return Ok(None),
+        };
+        // Only the user who started the pairing may poll it.
+        if user_id != owner_id {
+            return Ok(None);
+        }
+        Ok(Some(DevicePairingStatus {
+            claimed:    claimed_at.is_some(),
+            expired:    claimed_at.is_none() && expires_at < now,
+            expires_at,
+            claimed_at,
+            device_name,
+        }))
     }
 
     /// (total_failures, top_ip_count) over `since`. The detector uses

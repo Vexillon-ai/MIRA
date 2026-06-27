@@ -580,6 +580,20 @@
             "null"
           ]
         },
+        "display_name": {
+          "description": "Human-readable label for this instance (e.g. 'Tarek's MIRA'), shown by the mobile app and returned in the device-pairing payload and /api/status. Null falls back to the hostname.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "public_base_url": {
+          "description": "Canonical public base URL (scheme+host[+port]) the outside world — phones, pairing QR codes — should use to reach this instance. Null derives it from the incoming request. Set this when behind a reverse proxy.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "update_check": {
           "description": "Periodic check against an upstream Releases API for a newer MIRA build. Off by default; intended for self-hosted operators who want a 'new version available' notice.",
           "type": "object",
@@ -2572,6 +2586,38 @@
           "description": "How many scheduled snapshots to retain on disk. Older snapshots are pruned after each write. 0 = keep all (use with care). Default 7.",
           "type": "integer",
           "minimum": 0
+        }
+      }
+    },
+    "notifications": {
+      "description": "Proactive-notification transports. Web Push (VAPID) is always available; this section adds opt-in Firebase Cloud Messaging for the native mobile app. Off by default.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fcm": {
+          "description": "Firebase Cloud Messaging (HTTP v1). Off by default. When enabled, the notification dispatcher also delivers proactive events to registered FCM device tokens.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Master switch. false → behaves exactly as before (web push only).",
+              "type": "boolean"
+            },
+            "project_id": {
+              "description": "Firebase project id (the project_id field in the service-account JSON). Required when enabled.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "service_account_json_path": {
+              "description": "Filesystem path to the Google service-account JSON used to mint OAuth2 access tokens. Required when enabled. The file is a secret — keep it readable only by the MIRA process user.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
         }
       }
     }

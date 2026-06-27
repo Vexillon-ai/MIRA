@@ -552,6 +552,13 @@ pub fn build_router(
             .route("/api/auth/signup",         post(crate::server::handlers::signup::signup))
             .route("/api/auth/signup/config",  get(crate::server::handlers::signup::signup_config))
             .route("/api/auth/invite",         get(crate::server::handlers::signup::invite_info))
+            // 0.282.0 — QR device pairing (mobile onboarding). /start +
+            // /status are authed (AuthUser extractor); /claim is public
+            // (allow-listed in security::public_routes) — the phone has no
+            // token yet and exchanges the single-use secret for one.
+            .route("/api/auth/pairing/start",        post(crate::server::handlers::auth::pairing_start_handler))
+            .route("/api/auth/pairing/claim",        post(crate::server::handlers::auth::pairing_claim_handler))
+            .route("/api/auth/pairing/{id}/status",  get(crate::server::handlers::auth::pairing_status_handler))
             .layer(Extension(oidc_service))
             .layer(Extension(ldap_service))
             .layer(Extension(Arc::clone(&auth)));

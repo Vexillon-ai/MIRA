@@ -209,6 +209,191 @@ pub async fn me_handler(AuthUser(user): AuthUser) -> impl IntoResponse {
     axum::Json(UserResponse::from(user)).into_response()
 }
 
+// ── QR device pairing (mobile onboarding, 0.282.0) ─────────────────────────────
+//
+// Flow: a logged-in web session calls POST /pairing/start and renders the
+// returned {base_url, pairing_id, pairing_secret} as a QR code. The phone
+// scans it and POSTs to /pairing/claim (no Bearer token — it has none yet),
+// exchanging the single-use secret for a full access+refresh token pair.
+// The secret is SHA-256 hashed at rest, never logged, and consumed on first
+// claim. /pairing/{id}/status lets the web page poll for "paired".
+
+const PAIRING_TTL_DEFAULT_SECS: i64 = 120; // doc default — long enough to scan.
+const PAIRING_TTL_MAX_SECS:     i64 = 600; // hard cap on exposure window.
+
+#[derive(Deserialize, Default)]
+pub struct PairingStartRequest {
+    /// Optional label the web user attaches to the device being paired.
+    pub device_name: Option<String>,
+    /// Optional time-to-live in seconds. Default 120, clamped to [30, 600].
+    pub ttl_secs: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct PairingStartResponse {
+    pub pairing_id:     String,
+    /// Raw single-use secret — embedded in the QR, returned exactly once.
+    pub pairing_secret: String,
+    /// Canonical base URL the phone should use to reach this instance.
+    pub base_url:       String,
+    /// Human label for this instance (config `server.display_name`, else "MIRA").
+    pub server_name:    String,
+    /// Expiry, unix-millis.
+    pub expires_at:     i64,
+}
+
+#[derive(Deserialize)]
+pub struct PairingClaimRequest {
+    pub pairing_id:     String,
+    pub pairing_secret: String,
+    /// The phone's own device label, used to name the resulting session.
+    pub device_name:    Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PairingClaimResponse {
+    pub access_token:  String,
+    /// Native clients store the refresh token themselves (no cookie).
+    pub refresh_token: String,
+    pub user:          UserResponse,
+}
+
+/// Resolve the canonical public base URL for pairing: prefer the
+/// configured `server.public_base_url`, else derive from the request's
+/// Host (+ forwarded scheme), else fall back to host:port.
+fn resolve_base_url(cfg: &crate::config::MiraConfig, headers: &HeaderMap) -> String {
+    if let Some(u) = cfg.server.public_base_url.as_deref()
+        .map(str::trim).filter(|s| !s.is_empty())
+    {
+        return u.trim_end_matches('/').to_string();
+    }
+    if let Some(host) = headers.get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty())
+    {
+        let scheme = headers.get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+            .unwrap_or_else(|| if cfg.server.tls_cert_path.is_some() { "https".into() } else { "http".into() });
+        return format!("{scheme}://{host}");
+    }
+    let host = match cfg.server.host.as_str() {
+        "" | "0.0.0.0" | "::" => "127.0.0.1",
+        h => h,
+    };
+    format!("http://{host}:{}", cfg.server.port)
+}
+
+// POST /api/auth/pairing/start  (authenticated)
+pub async fn pairing_start_handler(
+    AuthUser(user):      AuthUser,
+    Extension(auth):     Extension<Arc<LocalAuthService>>,
+    Extension(live_cfg): Extension<Arc<crate::web::LiveConfig>>,
+    headers: HeaderMap,
+    body: Option<Json<PairingStartRequest>>,
+) -> impl IntoResponse {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let device_name = req.device_name
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let ttl = req.ttl_secs.unwrap_or(PAIRING_TTL_DEFAULT_SECS).clamp(30, PAIRING_TTL_MAX_SECS);
+    let (pairing_id, secret, expires_at) = match auth.start_device_pairing(
+        &user.id, device_name.as_deref(), ttl,
+    ) {
+        Ok(v)  => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          format!("Could not start pairing: {e}")).into_response(),
+    };
+    let cfg         = live_cfg.get().await;
+    let base_url    = resolve_base_url(&cfg, &headers);
+    let server_name = cfg.server.display_name.clone().unwrap_or_else(|| "MIRA".to_string());
+    axum::Json(PairingStartResponse {
+        pairing_id, pairing_secret: secret, base_url, server_name, expires_at,
+    }).into_response()
+}
+
+// POST /api/auth/pairing/claim  (public — the phone has no token yet)
+pub async fn pairing_claim_handler(
+    Extension(auth): Extension<Arc<LocalAuthService>>,
+    headers: HeaderMap,
+    Json(req): Json<PairingClaimRequest>,
+) -> impl IntoResponse {
+    use crate::auth::models::PairingClaim;
+
+    // Treat a guessed/forged secret like a failed login so the existing
+    // failed-login detector + IP-ban auto-action throttle brute force.
+    let record_fail = |reason: &str| {
+        if let Err(e) = auth.db_arc().record_failed_login(None, Some(&req.pairing_id), reason) {
+            tracing::debug!("pairing record_failed_login skipped: {e}");
+        }
+    };
+
+    let outcome = match auth.claim_device_pairing(&req.pairing_id, &req.pairing_secret) {
+        Ok(o)  => o,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          format!("Pairing claim failed: {e}")).into_response(),
+    };
+
+    match outcome {
+        PairingClaim::Ok { user_id, device_name } => {
+            let user = match auth.get_user(&user_id) {
+                Ok(Some(u)) => u,
+                _ => return (StatusCode::UNAUTHORIZED, "Pairing owner not found").into_response(),
+            };
+            if !user.is_active {
+                return (StatusCode::UNAUTHORIZED, "Account is disabled").into_response();
+            }
+            // Label the session: phone-supplied name wins, then the name the
+            // web user set at start, then the User-Agent.
+            let ua = req.device_name.as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .or(device_name.as_deref())
+                .map(str::to_owned)
+                .or_else(|| headers.get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok()).map(str::to_owned));
+            match auth.issue_session(&user, ua.as_deref(), None) {
+                Ok(pair) => axum::Json(PairingClaimResponse {
+                    access_token:  pair.access_token,
+                    refresh_token: pair.refresh_token,
+                    user:          UserResponse::from(user),
+                }).into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
+                           format!("Could not start session: {e}")).into_response(),
+            }
+        }
+        PairingClaim::Expired => (StatusCode::GONE, "This pairing code has expired.").into_response(),
+        PairingClaim::Claimed => (StatusCode::GONE, "This pairing code was already used.").into_response(),
+        PairingClaim::NotFound | PairingClaim::BadSecret => {
+            record_fail("pairing_bad_secret");
+            (StatusCode::UNAUTHORIZED, "Invalid pairing code.").into_response()
+        }
+    }
+}
+
+// GET /api/auth/pairing/{id}/status  (authenticated — only the starter polls)
+pub async fn pairing_status_handler(
+    AuthUser(user):  AuthUser,
+    Extension(auth): Extension<Arc<LocalAuthService>>,
+    axum::extract::Path(pairing_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    match auth.device_pairing_status(&pairing_id, &user.id) {
+        Ok(Some(s)) => {
+            // `status` is the doc's canonical field; the booleans + timestamps
+            // are a superset the web UI uses for the countdown.
+            let status = if s.claimed { "claimed" } else if s.expired { "expired" } else { "pending" };
+            axum::Json(serde_json::json!({
+                "status":      status,
+                "claimed":     s.claimed,
+                "expired":     s.expired,
+                "expires_at":  s.expires_at,
+                "claimed_at":  s.claimed_at,
+                "device_name": s.device_name,
+            })).into_response()
+        }
+        Ok(None)  => (StatusCode::NOT_FOUND, "Unknown pairing.").into_response(),
+        Err(e)    => (StatusCode::INTERNAL_SERVER_ERROR, format!("status: {e}")).into_response(),
+    }
+}
+
 // ── SSO / OIDC (Q2 #11) ─────────────────────────────────────────────────────
 //
 // Three public endpoints. /providers feeds the login buttons; /authorize

@@ -36,6 +36,16 @@ Two independent settings on a Telegram account:
 - Set your per-channel voice preference to **always** (Telegram/Signal). MIRA will send a voice note alongside text. Web plays TTS in the browser.
 - Pick a voice (e.g. Kokoro `af_heart`, `bf_emma`). Enable Kokoro for natural local speech.
 
+## Pair the mobile app
+- In the web UI go to **Settings → Notifications → Pair a mobile device** and click **Show pairing code**. Open the MIRA app on your phone and scan the QR — it configures the server URL and signs you in with no password to type. The code is single-use and expires in ~2 minutes; click **Regenerate** if it lapses. The panel flips to "✓ Paired" once the phone claims it.
+- The QR is only ever drawn in your authenticated browser; the pairing secret is stored hashed and consumed on first use.
+
+## Send mobile push via Firebase (FCM)
+- Browser/phone Web Push works out of the box. The **native app** uses Firebase Cloud Messaging, which is **off by default**.
+- To enable (admin): create a Firebase project, download a **service-account JSON**, then set in `mira_config.json`:
+  `notifications.fcm = { "enabled": true, "project_id": "<your-project>", "service_account_json_path": "/path/to/service-account.json" }` and restart. Keep the JSON readable only by the MIRA process user — it's a credential (MIRA redacts its path in the config API).
+- With `enabled=false`, nothing changes (web push only). Care/wellbeing alerts are delivered at high Android priority; other notifications at normal priority.
+
 ## Add an external tool (MCP)
 - Go to the `/mcp` page → **Browse catalog** → pick a server (e.g. Filesystem, GitHub, Puppeteer) → **Use** → fill any path/key → **Save**. It connects immediately (no restart). Tools appear to the agent as `mcp__<server>__<tool>`.
 - **Runtimes are handled for you.** Most catalog servers run via `npx` (Node) or `uvx` (Python/uv). If that runtime isn't installed, MIRA **asks permission** ("This MCP server needs Node.js (~55 MB) — install it now?") and, on approval, downloads a pinned, checksum-verified copy into `~/.mira/deps/` and connects the server. Works on Linux, macOS, and **Windows** — including a Windows service running as LocalSystem, which can't see a user-only Node/uv install. No manual Node/Python setup. (0.280.0+.)

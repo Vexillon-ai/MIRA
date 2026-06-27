@@ -8,7 +8,7 @@ Standalone: stdlib only, hits any OpenAI-compatible /v1/chat/completions endpoin
 (LM Studio, Ollama, …). Run it where the model server is reachable.
 
   python3 scripts/guardian_eval.py \
-      --url http://192.168.70.243:1234/v1 \
+      --url http://192.0.2.10:1234/v1 \
       --model qwen/qwen3.5-35b-a3b \
       --runs 3
 

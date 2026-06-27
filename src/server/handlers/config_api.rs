@@ -308,6 +308,10 @@ fn is_secret_field(k: &str) -> bool {
             | "client_secret"   // OIDC providers + Google/Outlook calendar OAuth
             | "bind_password"   // LDAP service-account bind password
             | "smtp_password"   // system outbound-email relay password
+            // FCM service-account credential path → treat as secret so the
+            // path (and the credential location it points at) isn't leaked
+            // on config GET and can't be silently overwritten on PUT.
+            | "service_account_json_path"
     )
 }
 

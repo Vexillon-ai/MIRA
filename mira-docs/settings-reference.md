@@ -248,6 +248,12 @@ _Persistent memory system and vector search settings._
 - **`memory.context_top_k`** (integer) — How many memories the per-turn context hook retrieves and injects into the prompt. Higher helps aggregation / "how many" / multi-session questions at the cost of a larger prompt. Default 15.
 - **`memory.vector_backend`** (string; one of: `sqlite`, `qdrant`) — Storage backend for vector embeddings. 'sqlite' uses the bundled SQLite database (no extra services needed). 'qdrant' connects to an external Qdrant server for production or high-volume use.
 
+## notifications
+
+- **`notifications.fcm.enabled`** (boolean) — Master switch for Firebase Cloud Messaging (push to the native mobile app). false → behaves exactly as before (web push only).
+- **`notifications.fcm.project_id`** (string) — Firebase project id (the project_id field in the service-account JSON). Required when enabled.
+- **`notifications.fcm.service_account_json_path`** (string) — Filesystem path to the Google service-account JSON used to mint OAuth2 access tokens. Required when enabled. The file is a secret — keep it readable only by the MIRA process user.
+
 ## primary_provider
 
 - **`primary_provider`** (string; one of: `ollama`, `lmstudio`, `openrouter`, `openai`, `deepseek`, `moonshot`, `groq`, `xai`, `openai_compat`, `anthropic`, `gemini`) — The AI provider MIRA uses for chat by default. Must match the slug of a configured provider under `providers`. Can be switched at runtime with /provider-use.
@@ -390,10 +396,12 @@ _MIRA HTTP server settings (invoked with --server flag). Exposes an API for Tele
 
 - **`server.allowed_origins`** (array) — CORS allowed origins list. Use ["*"] to allow all origins. Empty array disables CORS headers.
 - **`server.auth_token`** (string) — Bearer token for API authentication. Callers must include 'Authorization: Bearer <token>' in every request. Set to null to disable authentication (not recommended for public-facing servers).
+- **`server.display_name`** (string) — Human-readable label for this instance (e.g. 'Tarek's MIRA'), shown by the mobile app and returned in the device-pairing payload and /api/status. Null falls back to the hostname.
 - **`server.enabled`** (boolean) — Whether the server starts automatically when MIRA launches in server mode.
 - **`server.host`** (string) — IP address to bind. Use '0.0.0.0' to accept external connections, '127.0.0.1' for localhost only.
 - **`server.max_connections`** (integer) — Maximum number of simultaneous client connections.
 - **`server.port`** (integer) — TCP port to listen on.
+- **`server.public_base_url`** (string) — Canonical public base URL (scheme+host[+port]) the outside world — phones, pairing QR codes — should use to reach this instance. Null derives it from the incoming request. Set this when behind a reverse proxy.
 - **`server.request_timeout_secs`** (integer) — Maximum seconds to process a single request before returning a 408 timeout.
 - **`server.tls_cert_path`** (string) — Path to a TLS certificate file in PEM format. Set to null to use plain HTTP (not recommended for public servers).
 - **`server.tls_key_path`** (string) — Path to the TLS private key file in PEM format. Required when tls_cert_path is set.

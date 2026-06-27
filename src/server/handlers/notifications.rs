@@ -36,7 +36,11 @@ pub async fn notifications_stream(
         loop {
             match rx.recv().await {
                 Ok(notif) => {
-                    let data = serde_json::to_string(&notif).unwrap_or_default();
+                    // Serialise the canonical envelope (superset of the
+                    // legacy shape) so native clients get type/severity/
+                    // sent_at while the existing web client keeps reading
+                    // kind/channel/message.
+                    let data = serde_json::to_string(&notif.to_envelope()).unwrap_or_default();
                     let event = Event::default().event("notification").data(data);
                     return Some((Ok::<Event, Infallible>(event), rx));
                 }
@@ -70,9 +74,20 @@ pub async fn push_public_key(
 
 #[derive(Debug, Deserialize)]
 pub struct SubscribeRequest {
-    pub endpoint:   String,
-    pub keys:       SubscribeKeys,
+    /// Transport: "webpush" (default, browser) or "fcm" (native app).
+    #[serde(default)]
+    pub kind:       Option<String>,
+    // ── Web Push fields ──
+    pub endpoint:   Option<String>,
+    pub keys:       Option<SubscribeKeys>,
     pub user_agent: Option<String>,
+    // ── FCM fields ──
+    /// FCM registration token (the device's push token).
+    pub fcm_token:  Option<String>,
+    /// Native platform label, e.g. "android".
+    pub platform:   Option<String>,
+    /// Human device label for the "Registered devices" list.
+    pub device_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,13 +109,33 @@ pub async fn push_subscribe(
     Json(body): Json<SubscribeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let svc = svc.ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "web push not enabled"))?;
-    if body.endpoint.is_empty() || body.keys.p256dh.is_empty() || body.keys.auth.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "endpoint + keys.p256dh + keys.auth required"));
-    }
-    let id = svc.subscribe(
-        &me.id, &body.endpoint, &body.keys.p256dh, &body.keys.auth,
-        body.user_agent.as_deref(),
-    ).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("subscribe: {e}")))?;
+    let kind = body.kind.as_deref().unwrap_or("webpush");
+    let id = match kind {
+        "fcm" => {
+            let token = body.fcm_token.as_deref()
+                // tolerate `endpoint` as an alias for the token
+                .or(body.endpoint.as_deref())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| err(StatusCode::BAD_REQUEST, "fcm_token required for kind=fcm"))?;
+            if !svc.fcm_enabled() {
+                return Err(err(StatusCode::SERVICE_UNAVAILABLE, "FCM is not enabled on this server"));
+            }
+            svc.subscribe_fcm(&me.id, token, body.platform.as_deref(), body.device_name.as_deref())
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("subscribe: {e}")))?
+        }
+        "webpush" => {
+            let endpoint = body.endpoint.as_deref().unwrap_or("");
+            let keys = body.keys.as_ref();
+            let p256dh = keys.map(|k| k.p256dh.as_str()).unwrap_or("");
+            let auth   = keys.map(|k| k.auth.as_str()).unwrap_or("");
+            if endpoint.is_empty() || p256dh.is_empty() || auth.is_empty() {
+                return Err(err(StatusCode::BAD_REQUEST, "endpoint + keys.p256dh + keys.auth required"));
+            }
+            svc.subscribe(&me.id, endpoint, p256dh, auth, body.user_agent.as_deref())
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("subscribe: {e}")))?
+        }
+        other => return Err(err(StatusCode::BAD_REQUEST, format!("unknown subscription kind: {other}"))),
+    };
     Ok(Json(serde_json::json!({ "id": id })))
 }
 
@@ -116,10 +151,13 @@ pub async fn push_list_subscriptions(
     // needs id + ua + timestamps to show the "Registered devices" list
     // and a Revoke button.
     let view: Vec<_> = subs.into_iter().map(|s| serde_json::json!({
-        "id":         s.id,
-        "user_agent": s.user_agent,
-        "created_at": s.created_at,
-        "updated_at": s.updated_at,
+        "id":          s.id,
+        "kind":        s.kind,
+        "platform":    s.platform,
+        "device_name": s.device_name,
+        "user_agent":  s.user_agent,
+        "created_at":  s.created_at,
+        "updated_at":  s.updated_at,
     })).collect();
     Ok(Json(serde_json::json!({ "subscriptions": view })))
 }
@@ -144,12 +182,12 @@ pub async fn push_test(
     Extension(svc): Extension<Option<Arc<WebPushService>>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let svc = svc.ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "web push not enabled"))?;
-    let payload = crate::notifications::web_push::PushPayload {
-        title:   "MIRA test push".to_string(),
-        body:    "If you can see this, browser push is wired correctly.".to_string(),
-        url:     Some("/".to_string()),
-        channel: None,
-    };
+    let payload = crate::notifications::Notification {
+        kind:    crate::notifications::NotificationKind::ConversationUpdated,
+        message: Some("If you can see this, browser push is wired correctly.".to_string()),
+        channel: Some("web".to_string()),
+        ..Default::default()
+    }.to_envelope();
     let delivered = svc.send_to_user(&me.id, &payload).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("send: {e}")))?;
     Ok(Json(serde_json::json!({ "delivered": delivered })))

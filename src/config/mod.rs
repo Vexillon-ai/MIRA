@@ -161,6 +161,13 @@ pub struct MiraConfig {
     // All off-by-default; see `BackupConfig`.
     #[serde(default)]
     pub backup: BackupConfig,
+
+    // 0.282.0 — proactive-notification transports. Web Push (VAPID) is
+    // always available; this section adds opt-in Firebase Cloud Messaging
+    // for the native mobile app. Off by default — with `fcm.enabled=false`
+    // the server behaves exactly as before.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
 }
 
 // Backup runtime knobs. The on-demand `GET /api/admin/backup` and the
@@ -893,6 +900,18 @@ pub struct ServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhook_secret: Option<String>,
 
+    // Human-readable label for this instance ("Tarek's MIRA"), shown by the
+    // mobile app and returned in the device-pairing payload + /api/status.
+    // None → falls back to the hostname.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+
+    // Canonical public base URL (scheme+host[+port]) the outside world — phones,
+    // pairing QR codes — should use to reach this instance. None → derive from
+    // the incoming request. Set this when behind a reverse proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_base_url: Option<String>,
+
     // periodic check against a Releases API for a newer
     // MIRA version. Renders a banner in the admin web UI when one
     // is available. Off by default ("skippable per-version, off by
@@ -937,6 +956,8 @@ impl Default for ServerConfig {
             request_timeout_secs: default_request_timeout(),
             allowed_origins:      vec![],
             webhook_secret:       None,
+            display_name:         None,
+            public_base_url:      None,
             update_check:         UpdateCheckConfig::default(),
         }
     }
@@ -1981,7 +2002,7 @@ pub struct BraveSearchConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SearxngConfig {
-    // Full URL to a SearXNG instance, e.g. `http://searxng.home.lan:8080`.
+    // Full URL to a SearXNG instance, e.g. `http://searxng.example.com:8080`.
     // If set and the URL points at a private IP, the HTTP policy will
     // auto-whitelist that single host:port.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2049,7 +2070,7 @@ pub struct HttpSecurityConfig {
     pub allowlist_only: bool,
 
     // One user-configured SearXNG `host:port` exempted from the private-IP
-    // block. Format: `"searxng.home.lan:8080"`. Other checks still apply.
+    // block. Format: `"searxng.example.com:8080"`. Other checks still apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub searxng_exception: Option<String>,
 
@@ -3548,7 +3569,50 @@ impl Default for MiraConfig {
             auth:            AuthConfig::default(),
             system_email:    SystemEmailConfig::default(),
             backup:          BackupConfig::default(),
+            notifications:   NotificationsConfig::default(),
         }
+    }
+}
+
+// ── Notifications (proactive push transports, 0.282.0) ──────────────────
+
+/// Proactive-notification transports. Web Push (VAPID) is always on; this
+/// section adds opt-in Firebase Cloud Messaging for the native mobile app.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationsConfig {
+    #[serde(default)]
+    pub fcm: FcmConfig,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self { fcm: FcmConfig::default() }
+    }
+}
+
+/// Firebase Cloud Messaging (HTTP v1). Off by default. When enabled, the
+/// notification dispatcher also fans proactive events out to registered
+/// FCM device tokens. Auth is an OAuth2 service-account JWT minted from
+/// the service-account JSON — that file is a secret (redacted in the API).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FcmConfig {
+    /// Master switch. `false` → behaves exactly as before (web push only).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Firebase project id (the `project_id` in the service-account JSON).
+    /// Required when `enabled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// Filesystem path to the Google service-account JSON. Required when
+    /// `enabled`. The file itself is the credential — keep it readable
+    /// only by the MIRA process user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account_json_path: Option<String>,
+}
+
+impl Default for FcmConfig {
+    fn default() -> Self {
+        Self { enabled: false, project_id: None, service_account_json_path: None }
     }
 }
 

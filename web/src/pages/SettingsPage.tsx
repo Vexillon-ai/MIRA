@@ -1986,7 +1986,7 @@ function ToolsTab({
           <TextInput
             value={str('agent.tools.web_search.searxng.url')}
             onChange={(v) => set('agent.tools.web_search.searxng.url', v)}
-            placeholder="http://searxng.home.lan:8080"
+            placeholder="http://searxng.example.com:8080"
             mono
           />
         </Field>

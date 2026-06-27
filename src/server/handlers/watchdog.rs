@@ -304,6 +304,7 @@ fn spawn_analysis_task(
                     channel:         Some("web".to_owned()),
                     user_id:         Some(user_id.clone()),
                     message:         None,
+                    category:        None,
                 });
                 return;
             }
@@ -351,6 +352,7 @@ fn spawn_analysis_task(
             channel:         Some("web".to_owned()),
             user_id:         Some(user_id.clone()),
             message:         None,
+            category:        None,
         });
     });
 }
