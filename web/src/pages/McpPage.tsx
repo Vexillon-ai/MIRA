@@ -220,14 +220,37 @@ export default function McpPage() {
     qc.invalidateQueries({ queryKey: ['mcp', 'status'] })
   }
 
+  // When a newly-added server needs a runtime (Node/uv) MIRA can install, the
+  // create response carries `dependency_required` — we prompt for consent here.
+  const [pendingDep, setPendingDep] = useState<
+    { dep: string; label: string; approx_mb: number } | null
+  >(null)
+
   const createMut = useMutation({
     mutationFn: (body: any) => api.post('/api/mcp/servers', body).then((r) => r.data),
-    onSuccess: () => {
+    onSuccess: (data: any) => {
       invalidateMcp()
       setEditing(null)
-      toast.success('MCP server added — connecting and loading its tools now.')
+      if (data?.dependency_required) {
+        // Server saved, but its runtime isn't installed yet — ask to install.
+        setPendingDep(data.dependency_required)
+      } else {
+        toast.success('MCP server added — connecting and loading its tools now.')
+      }
     },
     onError: (e: any) => toast.error(`Create failed: ${e?.response?.data ?? e?.message ?? e}`),
+  })
+
+  const installRuntimeMut = useMutation({
+    mutationFn: (dep: string) =>
+      api.post('/api/mcp/runtime/install', { dep }).then((r) => r.data),
+    onSuccess: () => {
+      setPendingDep(null)
+      invalidateMcp()
+      toast.success('Runtime installed — connecting the server now.')
+    },
+    onError: (e: any) =>
+      toast.error(`Install failed: ${e?.response?.data?.error ?? e?.message ?? e}`),
   })
 
   const updateMut = useMutation({
@@ -295,6 +318,37 @@ export default function McpPage() {
 
   return (
     <div style={{ padding: '24px 32px', maxWidth: 960, margin: '0 auto', overflow: 'auto' }}>
+      {/* Runtime-dependency consent dialog (Node/uv) */}
+      {pendingDep && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'var(--surface, #1e1e1e)', border: '1px solid var(--border-subtle)',
+                        borderRadius: 10, padding: 24, maxWidth: 440,
+                        boxShadow: '0 10px 40px rgba(0,0,0,0.45)' }}>
+            <h2 style={{ fontSize: 17, margin: '0 0 10px' }}>Install required runtime?</h2>
+            <p style={{ color: 'var(--text-muted)', fontSize: 13.5, lineHeight: 1.55, margin: '0 0 18px' }}>
+              This MCP server needs <strong>{pendingDep.label}</strong>{' '}
+              (~{pendingDep.approx_mb}&nbsp;MB), which isn't installed yet. MIRA can download a
+              pinned, checksum-verified copy into <code>~/.mira/deps</code> and connect the server.
+              Install it now?
+            </p>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={() => setPendingDep(null)} disabled={installRuntimeMut.isPending}
+                      style={{ padding: '8px 14px', borderRadius: 6, cursor: 'pointer',
+                               background: 'transparent', border: '1px solid var(--border-subtle)',
+                               color: 'var(--text)' }}>
+                Not now
+              </button>
+              <button onClick={() => installRuntimeMut.mutate(pendingDep.dep)}
+                      disabled={installRuntimeMut.isPending}
+                      style={{ padding: '8px 14px', borderRadius: 6, cursor: 'pointer', fontWeight: 600,
+                               background: 'var(--accent, #4f8cff)', border: 'none', color: '#fff' }}>
+                {installRuntimeMut.isPending ? 'Installing…' : `Install ${pendingDep.label}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
         <Plug size={22} />
         <h1 style={{ fontSize: 22, margin: 0 }}>MCP Servers</h1>

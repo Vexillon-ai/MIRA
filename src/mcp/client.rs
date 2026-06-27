@@ -353,13 +353,51 @@ impl McpClient {
                 let cmd_str = cfg.command.as_deref().ok_or_else(|| MiraError::ConfigError(
                     format!("mcp server '{}': stdio transport requires `command`", cfg.name)
                 ))?;
-                let command = Command::new(cmd_str);
+                // Prefer a MIRA-managed runtime: if the command is a bare
+                // `npx`/`uvx` and we've installed the bundled Node/uv, resolve
+                // it to that absolute launcher — deterministic, and it works on
+                // a Windows service (LocalSystem) PATH that can't see a user
+                // Node install. Falls back to the configured command otherwise.
+                let resolved = crate::install::deps::resolve_mcp_command(cmd_str);
+                let runtime_dirs = crate::install::deps::managed_runtime_bin_dirs();
                 let args = cfg.args.clone();
                 let env  = cfg.env.clone();
+
+                // On Windows the common MCP launchers (`npx`, `uvx`, `pnpm`,
+                // `yarn`, `bunx`) are `.cmd`/`.bat` shims, which `CreateProcess`
+                // can't execute directly — `Command::new("npx")` fails with
+                // "program not found". Route a non-`.exe` command through
+                // `cmd /C` so PATHEXT resolution finds the shim; a real `.exe`
+                // launches directly. The MCP args are appended after the command
+                // by the `.configure` closure below either way. Unix unchanged.
+                #[cfg(windows)]
+                let command = if resolved.to_ascii_lowercase().ends_with(".exe") {
+                    Command::new(&resolved)
+                } else {
+                    let mut c = Command::new("cmd");
+                    c.arg("/C").arg(&resolved);
+                    c
+                };
+                #[cfg(not(windows))]
+                let command = Command::new(&resolved);
+
                 let child_transport = TokioChildProcess::new(command.configure(move |cmd| {
                     cmd.args(&args);
                     for (k, v) in &env {
                         cmd.env(k, v);
+                    }
+                    // Prepend managed runtime bin dirs to PATH so `npx` can find
+                    // `node` (and uvx resolves) regardless of the service PATH.
+                    // Built on the MCP server's own PATH override if it set one,
+                    // else the process PATH. Runs last so it's the final PATH.
+                    if !runtime_dirs.is_empty() {
+                        let base = env.get("PATH").map(std::ffi::OsString::from)
+                            .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+                        let mut paths = runtime_dirs.clone();
+                        paths.extend(std::env::split_paths(&base));
+                        if let Ok(joined) = std::env::join_paths(paths) {
+                            cmd.env("PATH", joined);
+                        }
                     }
                 }))
                 .map_err(|e| MiraError::ConfigError(format!(

@@ -748,6 +748,10 @@ pub fn build_router(
             .route("/api/mcp/servers/{id}",
                    axum::routing::put(crate::server::handlers::mcp::update_server)
                        .delete(crate::server::handlers::mcp::delete_server))
+            // Install a managed MCP runtime (Node/uv) after the user consents to
+            // the dependency prompt, then reconnect servers.
+            .route("/api/mcp/runtime/install",
+                   post(crate::server::handlers::mcp::install_runtime))
             // Recommended-server catalog: any user reads the enabled list to
             // pre-fill the add form; admins manage the entries.
             .route("/api/mcp/catalog",

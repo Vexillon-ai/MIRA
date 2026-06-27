@@ -332,6 +332,57 @@ pub fn managed_jre_home() -> Option<PathBuf> {
     java.parent()?.parent().map(Path::to_path_buf)
 }
 
+// ─── MCP runtimes (Node / uv) resolution ─────────────────────────────
+
+/// The runtime a managed MCP launcher maps to: `npx` → the `node` dep,
+/// `uvx` → the `uv` dep. Returns the managed dep name, or None for a
+/// command we don't manage (left to the system PATH).
+pub fn mcp_runtime_for_command(command: &str) -> Option<&'static str> {
+    // Tolerate a `.cmd`/`.exe` suffix or a full path basename.
+    let base = std::path::Path::new(command)
+        .file_name().and_then(|s| s.to_str()).unwrap_or(command)
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "npx" | "npx.cmd" => Some("node"),
+        "uvx" | "uvx.exe" => Some("uv"),
+        _ => None,
+    }
+}
+
+/// Resolve an MCP stdio `command` to a concrete launcher: if it's a bare
+/// `npx`/`uvx` and the matching managed runtime is installed, return the
+/// absolute path to the managed launcher (deterministic, sidesteps the
+/// system/service PATH); otherwise return the command unchanged (system
+/// PATH). The Windows `.cmd`/`.exe` handling happens at spawn time.
+pub fn resolve_mcp_command(command: &str) -> String {
+    match mcp_runtime_for_command(command).and_then(managed_dep_path) {
+        Some(p) => p.to_string_lossy().into_owned(),
+        None    => command.to_string(),
+    }
+}
+
+/// Bin directories of any installed managed MCP runtimes (Node, uv), for
+/// prepending to a spawned MCP server's PATH — so `npx` finds `node`, and
+/// the runtimes resolve regardless of the system/LocalSystem PATH. Empty
+/// when none are installed.
+pub fn managed_runtime_bin_dirs() -> Vec<PathBuf> {
+    ["node", "uv"].into_iter()
+        .filter_map(managed_dep_path)
+        .filter_map(|p| p.parent().map(Path::to_path_buf))
+        .collect()
+}
+
+/// Whether the runtime a command needs is available — either MIRA-managed
+/// or resolvable on the system PATH. Used by the MCP add/connect flow to
+/// decide whether to prompt the user to install a dependency. Commands we
+/// don't manage (not npx/uvx) are assumed available (system's problem).
+pub fn mcp_runtime_available(command: &str) -> bool {
+    match mcp_runtime_for_command(command) {
+        None => true,
+        Some(dep) => managed_dep_path(dep).is_some() || which_on_path(command).is_some(),
+    }
+}
+
 /// Resolve how to launch signal-cli: `(binary, optional JAVA_HOME)`.
 ///
 /// Prefers MIRA-managed installs under `~/.mira/deps/` so a fresh box
@@ -582,6 +633,41 @@ mod tests {
         assert!(sig.platforms.contains_key("linux-x86_64"));
         assert!(!jre.platforms.contains_key("linux-x86_64"),
             "linux-x86_64 must not pin a JRE — the native signal-cli build needs none");
+    }
+
+    #[test]
+    fn manifest_mcp_runtime_pins_are_wellformed() {
+        let m = DepsManifest::load().unwrap();
+        for name in ["node", "uv"] {
+            let dep = m.deps.get(name).unwrap_or_else(|| panic!("{name} must be in manifest"));
+            assert!(!dep.auto, "{name} must be on-demand (auto=false)");
+            // All 5 platforms pinned.
+            for plat in ["linux-x86_64","linux-aarch64","macos-x86_64","macos-aarch64","windows-x86_64"] {
+                let p = dep.platforms.get(plat)
+                    .unwrap_or_else(|| panic!("{name} missing pin for {plat}"));
+                assert!(p.url.starts_with("https://"), "{name}/{plat}: url must be https");
+                assert_eq!(p.sha256.len(), 64, "{name}/{plat}: sha256 must be 64 hex");
+            }
+        }
+        // The launchers we resolve must be present in lib_path.
+        assert!(m.deps["node"].platforms["windows-x86_64"].lib_path.ends_with("npx.cmd"));
+        assert!(m.deps["node"].platforms["linux-x86_64"].lib_path.ends_with("/npx"));
+        assert!(m.deps["uv"].platforms["windows-x86_64"].lib_path.ends_with("uvx.exe"));
+        assert!(m.deps["uv"].platforms["linux-x86_64"].lib_path.ends_with("/uvx"));
+    }
+
+    #[test]
+    fn mcp_runtime_command_mapping_and_resolution() {
+        assert_eq!(mcp_runtime_for_command("npx"), Some("node"));
+        assert_eq!(mcp_runtime_for_command("npx.cmd"), Some("node"));
+        assert_eq!(mcp_runtime_for_command("uvx"), Some("uv"));
+        // Full path with the native separator resolves by basename.
+        assert_eq!(mcp_runtime_for_command("/usr/local/bin/uvx"), Some("uv"));
+        assert_eq!(mcp_runtime_for_command("docker"), None);
+        // With nothing installed in this test env, resolve is a passthrough and
+        // an unmanaged command is treated as available.
+        assert_eq!(resolve_mcp_command("docker"), "docker");
+        assert!(mcp_runtime_available("docker"));
     }
 
     #[test]

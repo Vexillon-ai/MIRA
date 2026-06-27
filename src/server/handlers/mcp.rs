@@ -20,6 +20,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Extension, Json};
 
+use tracing::{info, warn};
+
 use crate::auth::{AdminUser, AuthUser};
 use crate::mcp::{
     McpCatalogEntry, McpCatalogStore, McpServerRegistry, McpServerRow, McpServerStatus,
@@ -55,15 +57,83 @@ pub async fn create_server(
     Extension(store):    Extension<Arc<McpServerStore>>,
     Extension(registry): Extension<Arc<McpServerRegistry>>,
     Json(new):           Json<NewMcpServer>,
-) -> Result<(StatusCode, Json<McpServerRow>), (StatusCode, String)> {
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     if new.name.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "name required".into()));
     }
+    // Does this server need a runtime (Node/uv) that isn't available yet? If so,
+    // we still create the row, but signal the UI to prompt the user to install
+    // the dependency — then a reconnect brings the server up. (npx/uvx only;
+    // other commands are the host's responsibility.)
+    let dep_required: Option<serde_json::Value> = if new.transport == "stdio" {
+        new.command.as_deref().and_then(|c| {
+            let dep = crate::install::deps::mcp_runtime_for_command(c)?;
+            (!crate::install::deps::mcp_runtime_available(c)).then(|| runtime_dep_info(dep))
+        })
+    } else {
+        None
+    };
+
     let row = store.create(&user.id, new)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     // Hot-reload: connect the new server + publish its tools now, no restart.
+    // (No-op connect when a dependency is still missing — the row is saved and a
+    // reconnect after install picks it up.)
     registry.reload().await;
-    Ok((StatusCode::CREATED, Json(row)))
+
+    let mut body = serde_json::to_value(&row)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(dep) = dep_required {
+        body["dependency_required"] = dep;
+    }
+    Ok((StatusCode::CREATED, Json(body)))
+}
+
+/// Describe a managed runtime dependency for the consent prompt.
+fn runtime_dep_info(dep: &str) -> serde_json::Value {
+    let (label, approx_mb) = match dep {
+        "node" => ("Node.js", 55),
+        "uv"   => ("uv (Python tool runner)", 35),
+        other  => (other, 0),
+    };
+    serde_json::json!({ "dep": dep, "label": label, "approx_mb": approx_mb })
+}
+
+#[derive(serde::Deserialize)]
+pub struct RuntimeInstallReq { pub dep: String }
+
+/// `POST /api/mcp/runtime/install` — install a managed MCP runtime (Node or uv)
+/// after the user consents to the dependency prompt, then reconnect servers.
+/// Available to any authenticated user (it's part of the per-user MCP add flow;
+/// the download is pinned + checksum-verified into `~/.mira/deps`).
+pub async fn install_runtime(
+    AuthUser(caller):    AuthUser,
+    Extension(registry): Extension<Arc<McpServerRegistry>>,
+    Json(req):           Json<RuntimeInstallReq>,
+) -> impl IntoResponse {
+    if req.dep != "node" && req.dep != "uv" {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "unknown runtime (expected 'node' or 'uv')" })))
+            .into_response();
+    }
+    info!(user = %caller.username, dep = %req.dep, "mcp: runtime install requested");
+    let dep = req.dep.clone();
+    let result: Result<bool, String> = tokio::task::spawn_blocking(
+        move || crate::install::deps::install_named(&dep, false).map_err(|e| e.to_string())
+    ).await.map_err(|e| format!("install thread panicked: {e}")).and_then(|r| r);
+
+    match result {
+        Ok(_) => {
+            // Runtime present now — reconnect so the waiting MCP server comes up.
+            registry.reload().await;
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "dep": req.dep }))).into_response()
+        }
+        Err(e) => {
+            warn!("mcp: runtime install failed for {}: {e}", req.dep);
+            (StatusCode::INTERNAL_SERVER_ERROR,
+             Json(serde_json::json!({ "ok": false, "dep": req.dep, "error": e }))).into_response()
+        }
+    }
 }
 
 // `PUT /api/mcp/servers/{id}` — update a row the caller owns.

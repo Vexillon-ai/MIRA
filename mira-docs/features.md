@@ -44,7 +44,7 @@ Web search, web fetch / URL preview, code execution (sandboxed), shell (opt-in, 
 
 ## MCP host mode
 
-MIRA can connect to external **MCP servers** (stdio or Streamable-HTTP) and surface their tools to the agent as `mcp__<server>__<tool>`. A built-in, admin-managed **catalog** of recommended servers (filesystem, memory, fetch, git, GitHub, Slack, Postgres, Puppeteer browser automation, MIRA's own voice, …) makes adding them one click. Servers hot-reload — no restart. Tools that return images/audio/video render inline in chat. Per-user isolation, collision-safe naming, and opt-in sampling are supported.
+MIRA can connect to external **MCP servers** (stdio or Streamable-HTTP) and surface their tools to the agent as `mcp__<server>__<tool>`. A built-in, admin-managed **catalog** of recommended servers (filesystem, memory, fetch, git, GitHub, Slack, Postgres, Puppeteer browser automation, MIRA's own voice, …) makes adding them one click. Servers hot-reload — no restart. Tools that return images/audio/video render inline in chat. Per-user isolation, collision-safe naming, and opt-in sampling are supported. **Runtimes are managed:** stdio servers that need `npx` (Node) or `uvx` (Python/uv) trigger a one-time **consent prompt** — on approval MIRA fetches a pinned, checksum-verified Node/uv into `~/.mira/deps/` and connects, so the shipped catalog works out of the box on Linux, macOS, and Windows (no system Node/Python, no LocalSystem-PATH pitfalls); `.cmd`/`.bat` shims are launched correctly on Windows.
 
 ## Calendar
 

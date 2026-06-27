@@ -46,6 +46,13 @@ The quickest path is the built-in catalogue of recommended servers.
 That's it. The server **connects immediately — no restart**. Its tools are
 available to the agent on your very next message.
 
+> **Runtimes are installed for you.** Most catalogue servers run via `npx`
+> (Node) or `uvx` (Python). If that runtime isn't on the host yet, MIRA asks
+> first — *"This MCP server needs Node.js (~55 MB) — install it now?"* — and on
+> your approval downloads a pinned, checksum-verified copy into `~/.mira/deps/`
+> and connects the server. You don't need to install Node or Python yourself,
+> on any platform (Linux, macOS, or Windows).
+
 > The catalogue is **admin-curated**. An admin adds, edits, enables, or disables
 > entries, so the list you see is the set your instance's operator trusts. You
 > can also add a server that isn't in the catalogue by giving MIRA the command
@@ -85,9 +92,13 @@ table, or fill a form, all in plain language.
   directly by giving MIRA the server's launch command or HTTP URL.
 - **A tool needs a key I didn't set.** Reopen the server on the `/mcp` page and
   fill in the missing field — changes apply on save, no restart.
-- **A stdio server won't start.** Stdio servers run as a local process, so the
-  command (and its runtime, e.g. `node` or `npx`) must be on the server's PATH.
-  This is an operator-side detail; flag it to your admin.
+- **A stdio server won't start.** For `npx`/`uvx` servers MIRA manages the
+  runtime itself (it prompts to install Node/uv and runs them from
+  `~/.mira/deps/`), so these work out of the box. A *custom* stdio server whose
+  command MIRA doesn't manage still needs its command + runtime reachable — if
+  MIRA runs as a background service it uses the **machine/system PATH**, not your
+  user PATH, so install that runtime system-wide or give the full path in the
+  command. Flag it to your admin if unsure.
 
 ## Next steps
 
