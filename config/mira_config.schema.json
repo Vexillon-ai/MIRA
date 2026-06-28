@@ -2655,6 +2655,30 @@
           }
         }
       }
+    },
+    "weather": {
+      "description": "Built-in weather tool. Defaults to keyless Open-Meteo (global, no API key, includes geocoding). An admin can switch to a keyed provider for an alternative source.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "description": "Weather data source. 'open_meteo' (default, keyless) or 'openweathermap' (requires api_key).",
+          "type": "string",
+          "enum": ["open_meteo", "openweathermap"]
+        },
+        "api_key": {
+          "description": "API key for keyed providers (openweathermap). Secret — redacted on config read. Null for keyless Open-Meteo.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "units": {
+          "description": "'metric' (°C, mm, km/h — default) or 'imperial' (°F, in, mph).",
+          "type": "string",
+          "enum": ["metric", "imperial"]
+        }
+      }
     }
   }
 }

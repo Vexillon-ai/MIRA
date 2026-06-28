@@ -14,6 +14,7 @@ pub mod onboarding;
 pub mod recall;
 pub mod datetime;
 pub mod math_eval;
+pub mod weather;
 pub mod pdf;
 pub mod summarize;
 pub mod memory_supersede;

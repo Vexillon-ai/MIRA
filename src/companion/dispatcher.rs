@@ -283,6 +283,8 @@ impl CompanionDispatcher {
             // eviction doesn't blank the agent's context — and so it can see
             // its own recent check-ins and avoid repeating the same opener.
             conversation_id: Some(conv_id.clone()),
+            // Check-in/briefing pins its (empty) toolset — never adapt it.
+            tools_flow_restricted: true,
             ..TurnContext::default()
         };
 
@@ -514,6 +516,22 @@ impl CompanionDispatcher {
     // via the same channel-routing path send_checkin uses. Stamps
     // `last_briefing_at` on success so the scheduler's once-per-day
     // guard works on the next tick.
+    // Today's-weather context line for a briefing, or `None` when weather
+    // can't be resolved (no live config, no location, fetch failed). Uses the
+    // user's IANA timezone city as the location and the MIRA-wide weather
+    // provider config.
+    async fn briefing_weather_line(&self, tz: Option<&str>) -> Option<String> {
+        let cfg = self.live_config.as_ref()?.get().await;
+        let city = crate::tools::weather::location_from_tz(tz)?;
+        match crate::tools::weather::get_weather(&cfg.weather, &city, 1).await {
+            Ok(report) => Some(format!(
+                "Today's weather for the user — {}. Weave it into the briefing naturally if it fits.",
+                report.summary_line()
+            )),
+            Err(_) => None,
+        }
+    }
+
     pub async fn send_briefing(&self, user_id: &str) -> Result<DispatchOutcome> {
         let settings = self.store.get(user_id)?
             .ok_or_else(|| CompanionError::NotEnabled(user_id.to_string()))?;
@@ -561,6 +579,14 @@ impl CompanionDispatcher {
             None         => cue,
         };
 
+        // Fold today's weather for the user's location into the briefing so a
+        // morning/evening briefing can mention it. Best-effort: skipped when
+        // we can't resolve a location or the fetch fails.
+        let cue = match self.briefing_weather_line(user_tz.as_deref()).await {
+            Some(line) => format!("{cue}\n\n{line}"),
+            None       => cue,
+        };
+
         let turn_ctx = TurnContext {
             // Same restriction as check-ins — the briefing is content,
             // not a tool-calling moment. Empty allowlist + the
@@ -570,6 +596,8 @@ impl CompanionDispatcher {
             // send_checkin) so restarts don't blank context and the briefing
             // sees the recent check-in/briefing exchange.
             conversation_id: Some(conv_id.clone()),
+            // Check-in/briefing pins its (empty) toolset — never adapt it.
+            tools_flow_restricted: true,
             ..TurnContext::default()
         };
 

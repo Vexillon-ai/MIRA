@@ -369,6 +369,9 @@ impl Dispatcher {
             .unwrap_or_else(|| agent.tools.list_for_flow("chat"));
         let turn_ctx = TurnContext {
             allowed_tool_names: Some(allowed),
+            // Automation turns run a deliberate toolset (explicit whitelist or
+            // the chat flow set) — don't let adaptive selection narrow it.
+            tools_flow_restricted: true,
             ..TurnContext::default()
         };
 

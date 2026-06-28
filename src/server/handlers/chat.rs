@@ -733,6 +733,9 @@ fn build_onboarding_turn_context(
         reasoning_effort:       None,
         disable_reasoning:      None,
         conversation_id:        Some(conv_id.to_owned()),
+        // Onboarding pins exactly the onboarding toolset — adaptive selection
+        // must not narrow or replace it.
+        tools_flow_restricted:  true,
     }
 }
 

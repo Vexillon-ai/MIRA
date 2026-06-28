@@ -545,6 +545,12 @@ _Rich terminal UI (TUI) appearance and layout defaults. All settings can be chan
 - **`tui.show_token_count`** (boolean) — Display the running token estimate in the status bar.
 - **`tui.theme`** (string; one of: `mira-dark`, `mira-light`, `dracula`, `gruvbox`, `nord`) — Colour theme. Switch at runtime with /theme <name> or F5. Available themes: mira-dark, mira-light, dracula, gruvbox, nord.
 
+## weather
+
+- **`weather.provider`** (string; one of: `open_meteo`, `openweathermap`) — Weather data source for the built-in `weather` tool. 'open_meteo' (default) is free, global, and keyless (includes geocoding). 'openweathermap' requires `weather.api_key`.
+- **`weather.api_key`** (string) — API key for keyed providers (openweathermap). Secret — redacted on config read. Null for keyless Open-Meteo.
+- **`weather.units`** (string; one of: `metric`, `imperial`) — 'metric' (°C, mm, km/h — default) or 'imperial' (°F, in, mph).
+
 ## wiki
 
 _Per-user wiki — markdown knowledge base companion to the structured memory DB. Stores narrative pages on disk under {data_dir}/wikis/users/<id>/._

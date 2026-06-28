@@ -168,6 +168,11 @@ pub struct MiraConfig {
     // the server behaves exactly as before.
     #[serde(default)]
     pub notifications: NotificationsConfig,
+
+    // 0.284.0 — built-in weather. Defaults to keyless Open-Meteo (global, no
+    // setup); an admin can switch to a keyed provider for richer data.
+    #[serde(default)]
+    pub weather: WeatherConfig,
 }
 
 // Backup runtime knobs. The on-demand `GET /api/admin/backup` and the
@@ -3628,6 +3633,37 @@ impl Default for MiraConfig {
             system_email:    SystemEmailConfig::default(),
             backup:          BackupConfig::default(),
             notifications:   NotificationsConfig::default(),
+            weather:         WeatherConfig::default(),
+        }
+    }
+}
+
+// ── Weather (built-in tool, 0.284.0) ────────────────────────────────────
+
+/// Built-in weather. Defaults to keyless **Open-Meteo** (global, no API key,
+/// includes free geocoding). An admin may switch to a keyed provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeatherConfig {
+    /// "open_meteo" (default, keyless) | "openweathermap" (needs api_key).
+    #[serde(default = "default_weather_provider")]
+    pub provider: String,
+    /// API key for keyed providers (openweathermap). Treated as a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// "metric" (°C, mm, km/h — default) | "imperial" (°F, in, mph).
+    #[serde(default = "default_weather_units")]
+    pub units: String,
+}
+
+fn default_weather_provider() -> String { "open_meteo".to_string() }
+fn default_weather_units() -> String { "metric".to_string() }
+
+impl Default for WeatherConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_weather_provider(),
+            api_key:  None,
+            units:    default_weather_units(),
         }
     }
 }

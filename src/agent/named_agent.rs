@@ -155,6 +155,7 @@ impl WorkerTask for NamedAgentExecutor {
             &serde_json::Map::new(),
             ToolEventCtx::NONE,
             None, // named agents use a fixed toolset; no progressive disclosure
+            None, // …and therefore no find_tools pool
         )
         .await;
 

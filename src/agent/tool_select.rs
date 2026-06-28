@@ -27,9 +27,11 @@ pub const FIND_TOOLS_NAME: &str = "find_tools";
 /// loop calls it when the model invokes `find_tools`.
 #[async_trait]
 pub trait ToolExpander: Send + Sync {
-    /// Return up to a few `(tool_name, one-line description)` from the FULL
-    /// catalog matching `query`, excluding tools already active this turn.
-    async fn expand(&self, query: &str, already_active: &[String]) -> Vec<(String, String)>;
+    /// Return up to a few `(tool_name, one-line description)` matching `query`,
+    /// drawn ONLY from `pool` (the user's security allow-list) and excluding
+    /// tools already active this turn. Restricting to `pool` is what keeps
+    /// `find_tools` from loading a tool outside the user's scope.
+    async fn expand(&self, query: &str, pool: &[String], already_active: &[String]) -> Vec<(String, String)>;
 }
 
 /// The `find_tools` tool spec injected into the model's tool list when adaptive

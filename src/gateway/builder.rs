@@ -1993,6 +1993,8 @@ fn build_tool_registry(
     registry.register(NowTool::new(auth.cloned()));
     registry.register(DateMathTool::new());
     registry.register(MathEvalTool::new());
+    // Built-in weather (keyless Open-Meteo by default; configurable provider).
+    registry.register(crate::tools::weather::WeatherTool::new(config.weather.clone()));
     registry.register(PdfExtractTool::new(data_dir.to_path_buf()));
     // MIRA self-knowledge: answer questions about MIRA's own features,
     // settings, limitations, and how-tos from the bundled mira-docs/.

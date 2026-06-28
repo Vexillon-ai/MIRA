@@ -170,6 +170,8 @@ pub async fn dispatch_inbound(
         // conversation's context on a cache miss (restart / idle eviction).
         // The conversation was already resolved above.
         conversation_id:   Some(conv.id.clone()),
+        // Email turns use a deliberate per-account allow-list — don't adapt it.
+        tools_flow_restricted: true,
     };
 
     // ── Run the agent ──────────────────────────────────────────────

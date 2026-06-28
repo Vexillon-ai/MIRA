@@ -90,6 +90,11 @@ pub struct TurnContext {
     // global `agent.disable_reasoning` config. Set by the web chat's
     // per-conversation toggle; channels leave it `None` (use the config default).
     pub disable_reasoning:      Option<bool>,
+    // True when `allowed_tool_names` is a deliberate *flow* restriction (e.g.
+    // the onboarding flow pins a tiny toolset) that adaptive tool selection
+    // must NOT touch. False (default) means any `allowed_tool_names` is a
+    // security/visibility allow-list that adaptive may narrow *within*.
+    pub tools_flow_restricted:  bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,12 +175,12 @@ pub struct AgentCore {
 // explicitly asked) and returns the best matches not already active.
 #[async_trait::async_trait]
 impl crate::agent::tool_select::ToolExpander for AgentCore {
-    async fn expand(&self, query: &str, already_active: &[String]) -> Vec<(String, String)> {
+    async fn expand(&self, query: &str, pool: &[String], already_active: &[String]) -> Vec<(String, String)> {
         let Some(q) = self.memory.embed(query).await else { return Vec::new() };
         let mut index = self.tool_index.lock().await;
         index.ensure_current(&self.tools, &self.memory).await;
-        let all = self.tools.list_tools();
-        crate::agent::tool_select::rank_for_expand(&all, &index, &q, already_active, 6)
+        // Rank only within the user's allow-list `pool` — never the full registry.
+        crate::agent::tool_select::rank_for_expand(pool, &index, &q, already_active, 6)
             .into_iter()
             .filter_map(|name| {
                 self.tools.get(&name).map(|t| {
@@ -244,22 +249,27 @@ impl AgentCore {
         input:    &str,
         messages: &[crate::types::ChatMessage],
         cfg:      &crate::config::ToolSelectionConfig,
+        pool:     &[String],
     ) -> Option<Vec<String>> {
+        // `pool` is the candidate set (the user's security allow-list, or all
+        // tools when unrestricted). Selection only ever narrows within it.
+        if pool.is_empty() {
+            return None;
+        }
         let query_emb = self.memory.embed(input).await?;
         let mut index = self.tool_index.lock().await;
         index.ensure_current(&self.tools, &self.memory).await;
         if index.is_empty() {
             return None; // no embeddings for any tool → send them all
         }
-        let all = self.tools.list_tools();
         // Conversation stickiness: keep tools used in recent turns of this
-        // conversation active (workflow continuity). Slice 3 (find_tools)
-        // also marks its results sticky.
+        // conversation active (workflow continuity). select_tools intersects
+        // sticky with `pool`, so it never widens beyond the allow-list.
         let sticky = crate::agent::tool_select::sticky_from_messages(messages, cfg.stickiness_turns);
-        let active = crate::agent::tool_select::select_tools(&all, &index, &query_emb, cfg, &sticky);
+        let active = crate::agent::tool_select::select_tools(pool, &index, &query_emb, cfg, &sticky);
         debug!(
-            "JIT tools: {} of {} tools active this turn ({} sticky, mode=adaptive)",
-            active.len(), all.len(), sticky.len()
+            "JIT tools: {} of {} candidate tools active this turn ({} sticky, mode=adaptive)",
+            active.len(), pool.len(), sticky.len()
         );
         Some(active)
     }
@@ -365,6 +375,8 @@ impl AgentCore {
             allowed_tool_names:     Some(guardian::tools_for_mode(gmode)),
             skip_memory_hooks:      true,
             skip_wiki_hooks:        true,
+            // Guardian pins its exact Ring-0/Ring-1 toolset — never adapt it.
+            tools_flow_restricted:  true,
             ..TurnContext::default()
         };
         let mut rx = self
@@ -871,31 +883,39 @@ impl AgentCore {
             user_id,
         };
 
-        // Just-in-Time Tools: when adaptive selection is on AND the caller
-        // hasn't already pinned a tool allowlist (constrained flows like
-        // guardian/onboarding do), narrow this turn to a relevant subset
-        // instead of sending every enabled tool. Falls back to all on any
-        // miss (embeddings unavailable / empty index).
-        // Read the hot-reloadable tool-selection config once for this turn.
+        // Just-in-Time Tools (hot-reloadable). When adaptive selection is on,
+        // narrow this turn to a relevant subset. Crucially this composes
+        // WITHIN any existing `allowed_tool_names` — which is the user's
+        // security/visibility allow-list (per-user MCP filter + RBAC), NOT a
+        // hard restriction — so the candidate pool is that allow-list (or all
+        // tools when nothing restricts them). Flow-restricted turns (the
+        // onboarding flow pins a tiny toolset) are left untouched. `find_tools`
+        // may later pull more tools, but only from this same pool.
         let ts_cfg = self.tool_selection_config().await;
+        let pool: Vec<String> = context.allowed_tool_names.clone()
+            .unwrap_or_else(|| self.tools.list_tools());
         let adaptive_allowed: Option<Vec<String>> =
-            if ts_cfg.mode == "adaptive" && context.allowed_tool_names.is_none() {
-                self.select_adaptive_tools(input, &messages, &ts_cfg).await
+            if ts_cfg.mode == "adaptive" && !context.tools_flow_restricted {
+                self.select_adaptive_tools(input, &messages, &ts_cfg, &pool).await
             } else {
                 None
             };
-        let allowed_for_turn: Option<&[String]> = context
-            .allowed_tool_names.as_deref()
-            .or(adaptive_allowed.as_deref());
+        // The adaptive subset when it ran, else the security allow-list as-is.
+        let allowed_for_turn: Option<&[String]> = adaptive_allowed
+            .as_deref()
+            .or(context.allowed_tool_names.as_deref());
 
         // Progressive disclosure: expose `find_tools` only when WE narrowed the
-        // toolset adaptively (not for constrained flows, and not in "all" mode).
+        // toolset adaptively. It draws from `pool` (the user's full allow-list),
+        // so it can never load a tool outside their security scope.
         let expander: Option<&dyn crate::agent::tool_select::ToolExpander> =
             if adaptive_allowed.is_some() && ts_cfg.expose_find_tools {
                 Some(self)
             } else {
                 None
             };
+        let expand_pool: Option<&[String]> =
+            if expander.is_some() { Some(&pool) } else { None };
 
         let (response_text, usage) = tool_loop::run_tool_loop_with_context(
             provider,
@@ -909,6 +929,7 @@ impl AgentCore {
             &context.inject_tool_args,
             event_ctx,
             expander,
+            expand_pool,
         ).await?;
 
         // ── 4. Emit Done ──────────────────────────────────────────────────────

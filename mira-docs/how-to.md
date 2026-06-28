@@ -72,6 +72,12 @@ Two independent settings on a Telegram account:
 ## Control model "thinking" (reasoning)
 - **See it:** when a reasoning model (gpt-oss, the qwen3 family, …) thinks, its chain-of-thought appears as a collapsed **Thinking** block above the reply — click to expand. (Reasoning streams over LM Studio's `reasoning` channel; MIRA captures it automatically.)
 - **Suppress it:** reasoning models can burn the per-round token budget thinking before they act, which stalls tool loops. Turn on **Disable model reasoning (`/no_think`)** on **Settings → Providers** (applies everywhere — chat, channels, tool loops), or use the **Thinking / No-think** toggle in the chat window to override it for one conversation.
+## Check the weather
+- Just ask — "what's the weather in Point Cook?", "will it rain tomorrow?", "weather this week". MIRA uses the built-in `weather` tool. If you don't name a place it uses your own location (from your timezone).
+- **Works out of the box, no setup:** the default provider is **Open-Meteo** — free, global, no API key, and it does its own geocoding (so no Google Maps key/billing needed).
+- **In your briefing:** with Presence/daily briefing on, the morning/evening briefing includes a short weather line for your location automatically.
+- **Switch providers (admin):** set `weather.provider = "openweathermap"` + `weather.api_key` for OpenWeatherMap, and `weather.units` to `metric` (default) or `imperial`.
+
 ## Use the calendar
 - The built-in calendar works on its own — no external service. Create events from the **Calendar** page or just ask MIRA ("add lunch with Dana Friday 1pm").
 - **Connect your own external calendar** (each user, from their Calendar page): Google/Outlook via "Connect", or CalDAV (e.g. Nextcloud) by entering your server URL + username + an **app password**. An admin sets the provider once in Settings → Calendar first.

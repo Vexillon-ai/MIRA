@@ -99,7 +99,7 @@ pub async fn run_tool_loop(
 ) -> Result<(String, TokenUsage), MiraError> {
     run_tool_loop_with_context(
         provider, tools, messages, options, mode, max_rounds, tx,
-        None, &serde_json::Map::new(), ToolEventCtx::NONE, None,
+        None, &serde_json::Map::new(), ToolEventCtx::NONE, None, None,
     ).await
 }
 
@@ -123,6 +123,9 @@ pub async fn run_tool_loop_with_context(
     // `find_tools` to pull more tools into the turn on demand. `None` disables
     // progressive disclosure (the loop sends exactly `allowed_tool_names`).
     expander:           Option<&dyn crate::agent::tool_select::ToolExpander>,
+    // Candidate pool `find_tools` may draw from (the user's security
+    // allow-list). `None` → the whole registry. Ignored unless `expander` is set.
+    expand_pool:        Option<&[String]>,
 ) -> Result<(String, TokenUsage), MiraError> {
 
     if *mode == ToolMode::Disabled || tools.is_empty() {
@@ -280,7 +283,7 @@ pub async fn run_tool_loop_with_context(
                     let _ = tx.send(StreamEvent::ToolCall {
                         name: tc.name.clone(), args: tc.arguments.to_string(), call_id: tc.call_id.clone(),
                     }).await;
-                    let output = run_find_tools(&query, expander, &mut active, &mut find_tools_calls, MAX_FIND_TOOLS_CALLS).await;
+                    let output = run_find_tools(&query, expander, expand_pool, &mut active, &mut find_tools_calls, MAX_FIND_TOOLS_CALLS).await;
                     let _ = tx.send(StreamEvent::ToolResult {
                         name: tc.name.clone(), output: output.clone(), success: true, call_id: tc.call_id.clone(),
                     }).await;
@@ -361,7 +364,7 @@ pub async fn run_tool_loop_with_context(
                         let _ = tx.send(StreamEvent::ToolCall {
                             name: tc.name.clone(), args: tc.arguments.to_string(), call_id: tc.call_id.clone(),
                         }).await;
-                        let output = run_find_tools(&query, expander, &mut active, &mut find_tools_calls, MAX_FIND_TOOLS_CALLS).await;
+                        let output = run_find_tools(&query, expander, expand_pool, &mut active, &mut find_tools_calls, MAX_FIND_TOOLS_CALLS).await;
                         let _ = tx.send(StreamEvent::ToolResult {
                             name: tc.name.clone(), output: output.clone(), success: true, call_id: tc.call_id.clone(),
                         }).await;
@@ -778,6 +781,7 @@ async fn replay_as_stream(content: &str, tx: &mpsc::Sender<StreamEvent>) {
 async fn run_find_tools(
     query:     &str,
     expander:  Option<&dyn crate::agent::tool_select::ToolExpander>,
+    pool:      Option<&[String]>,
     active:    &mut Option<Vec<String>>,
     calls:     &mut usize,
     max_calls: usize,
@@ -790,7 +794,8 @@ async fn run_find_tools(
         return "Tool search is unavailable right now.".to_string();
     };
     let already = active.as_deref().unwrap_or(&[]).to_vec();
-    let loaded = exp.expand(query, &already).await;
+    // Draw only from the user's allow-list pool (empty slice → none available).
+    let loaded = exp.expand(query, pool.unwrap_or(&[]), &already).await;
     if loaded.is_empty() {
         return "No additional tools matched that — the tools you already have are likely the relevant ones.".to_string();
     }
