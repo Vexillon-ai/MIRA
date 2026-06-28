@@ -33,6 +33,13 @@ _Agent reasoning and tool-calling behaviour._
 - **`agent.disable_reasoning`** (boolean) — Suppress model 'thinking' by appending the /no_think directive to the system prompt. Turn on when the active model is a reasoning model (e.g. the qwen3 family) — otherwise it can burn the per-round token budget on chain-of-thought before acting, stalling tool loops. The web chat can override this per-conversation. Default false.
 - **`agent.system_prompt_file`** (string) — Path to an agent.md persona file. If empty or the file is absent the built-in default MIRA prompt is used. Supports ~ expansion.
 - **`agent.tool_mode`** (string; one of: `auto`, `openai`, `react`, `disabled`) — Tool-calling protocol. 'auto' tries OpenAI structured tool_calls first and falls back to ReAct text parsing. 'openai' enforces structured format only. 'react' enforces text parsing only. 'disabled' disables all tool use.
+- **`agent.tool_selection`** (object) — Just-in-Time Tools — adaptive per-turn tool selection. When mode='adaptive', each turn carries only the tools it plausibly needs (core set + semantic top-K of the message + conversation-sticky tools) plus a find_tools meta-tool the model can call to load anything else on demand, instead of sending every enabled tool on every request. Default mode='all' preserves current behaviour.
+- **`agent.tool_selection.mode`** (string; one of: `all`, `adaptive`) — 'all' sends every enabled tool (current behaviour); 'adaptive' sends only the per-turn relevant subset. Default 'all'.
+- **`agent.tool_selection.core_tools`** (array) — Tools always included even when unmatched. Supports trailing-* globs (e.g. 'memory_*'). Keeps flow-critical/baseline tools present.
+- **`agent.tool_selection.top_k`** (integer) — Max number of semantically-matched tools to add per turn.
+- **`agent.tool_selection.min_similarity`** (number) — Minimum cosine similarity (0.0–1.0) for a tool to be included by semantic match.
+- **`agent.tool_selection.stickiness_turns`** (integer) — Tools used earlier in a conversation stay active for this many subsequent turns.
+- **`agent.tool_selection.expose_find_tools`** (boolean) — Expose the find_tools meta-tool so the model can pull in any tool on demand (progressive disclosure). Recommended on.
 - **`agent.tools`** (object) — Per-tool enable/disable switches. All tools are disabled by default for security.
 - **`agent.tools.filesystem`** (object) — File read/write tool. Disabled by default.
 - **`agent.tools.filesystem.enabled`** (boolean)

@@ -25,8 +25,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
+use futures_util::future::join_all;
 use tracing::{info, warn};
+
+/// Per-server connect budget. Stdio servers spawn a process and run a
+/// JSON-RPC handshake; a wedged server (spawns but never answers
+/// `initialize`) must not stall the whole registry, so each connect is
+/// bounded. Generous enough for a cold `npx`/`uvx` runtime download.
+const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::mcp::{
     McpClient, McpGetPromptTool, McpListPromptsTool,
@@ -206,23 +214,44 @@ impl McpServerRegistry {
             Err(_) => rows.clone(),
         };
 
-        // ── Pass 1: connect each enabled row. ───────────────────────────
-        // Track `(client_arc, owning_row)` so the collision pre-pass
-        // below can iterate them with both pieces of context.
+        // ── Pass 1: connect every enabled row CONCURRENTLY. ─────────────
+        // Each stdio server is a process spawn + JSON-RPC handshake; doing
+        // them serially made startup scale with the server count (~1s each,
+        // worse on Windows where process/`npx`/`uvx` cold-starts are slow).
+        // `join_all` runs them in parallel and preserves input order, so the
+        // collision pre-pass below stays deterministic ("first owner keeps
+        // the clean name"). Each connect is bounded by `MCP_CONNECT_TIMEOUT`
+        // so one wedged server can't stall the rest.
+        let connect_futs = rows.iter().map(|row| {
+            let provider = std::sync::Arc::clone(&provider);
+            async move {
+                let cfg = match row.to_config() {
+                    Ok(c)  => c,
+                    Err(e) => return (row, Err(format!("bad config: {e}"))),
+                };
+                match tokio::time::timeout(
+                    MCP_CONNECT_TIMEOUT,
+                    McpClient::connect(&cfg, &row.user_id, provider),
+                ).await {
+                    Ok(Ok(c))  => (row, Ok(c)),
+                    Ok(Err(e)) => (row, Err(e.to_string())),
+                    Err(_)     => (row, Err(format!(
+                        "connect timed out after {}s", MCP_CONNECT_TIMEOUT.as_secs()
+                    ))),
+                }
+            }
+        });
+        let connected = join_all(connect_futs).await;
+
+        // Track `(client_arc, owning_row)` so the collision pre-pass below
+        // can iterate them with both pieces of context. Built from the
+        // ordered results so naming stays deterministic.
         let mut clients: Vec<Arc<McpClient>> = Vec::new();
         let mut owners:  Vec<McpServerRow>   = Vec::new();
         let mut statuses: Vec<McpServerStatus> = Vec::new();
 
-        for row in &rows {
-            let cfg = match row.to_config() {
-                Ok(c)  => c,
-                Err(e) => {
-                    warn!("mcp: row '{}/{}': bad config: {e}", row.user_id, row.name);
-                    statuses.push(status_error(row, e.to_string()));
-                    continue;
-                }
-            };
-            match McpClient::connect(&cfg, &row.user_id, std::sync::Arc::clone(&provider)).await {
+        for (row, res) in connected {
+            match res {
                 Ok(c) => {
                     let n = c.tools.len();
                     info!(
@@ -237,7 +266,7 @@ impl McpServerRegistry {
                 }
                 Err(e) => {
                     warn!("mcp: '{}/{}' failed to connect: {e}", row.user_id, row.name);
-                    statuses.push(status_error(row, e.to_string()));
+                    statuses.push(status_error(row, e));
                 }
             }
         }

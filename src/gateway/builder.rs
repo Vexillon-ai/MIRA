@@ -807,7 +807,17 @@ impl GatewayBuilder {
         // exists so startup and hot-reload share one path.
         let tools = Arc::new(tool_registry);
         mcp_servers.attach_tool_registry(Arc::clone(&tools));
-        mcp_servers.reload().await;
+        // Connect MCP servers in the BACKGROUND so the HTTP server comes up
+        // immediately instead of blocking boot on N stdio handshakes (each a
+        // process spawn + JSON-RPC init — ~1s apiece, slower on Windows). The
+        // registry hot-swaps the tool surface via `set_mcp_tools` as servers
+        // connect, so MCP tools simply attach a beat after the UI is live;
+        // built-in tools are available from the first request. (`connect_state`
+        // also connects the servers concurrently + with a per-server timeout.)
+        {
+            let reg = Arc::clone(&mcp_servers);
+            tokio::spawn(async move { reg.reload().await; });
+        }
 
         // Phase B slice 2 — hand the tool registry to the named-agent
         // resolver now that it exists, so `named:<handle>` workers can run
@@ -946,6 +956,9 @@ impl GatewayBuilder {
         // live (validate → persist → broadcast) instead of needing a restart.
         if let Some(lc) = &live_config {
             let _ = settings_live_config.set(Arc::clone(lc));
+            // Also hand it to AgentCore so hot-reloadable per-turn settings
+            // (agent.tool_selection) pick up admin changes without a restart.
+            agent_core.set_live_config(Arc::clone(lc));
         }
 
         // hand an accepted inbound to the agent loop. Per-account

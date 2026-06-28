@@ -12,3 +12,4 @@
 .badge[data-channel="signal"]   { background: rgba(102,187,106,0.15); color: #66bb6a; }
 .badge[data-channel="tui"]      { background: rgba(171,71,188,0.15);  color: #ab47bc; }
 .badge[data-channel="web"]      { background: rgba(79,142,247,0.15);  color: #4f8ef7; }
+.badge[data-channel="mobile"]   { background: rgba(124,92,252,0.15);  color: #7c5cfc; }

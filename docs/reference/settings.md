@@ -42,6 +42,22 @@ You have three ways to work with settings:
 - A few **server-level features** (e.g. reasoning auto-routing) take effect after
   a service restart.
 
+## Reasoning visibility & control
+
+Some models "think" before answering — reasoning models (e.g. gpt-oss, the qwen3
+family) emit a chain-of-thought before their reply.
+
+- **See it.** When a model streams reasoning, MIRA shows it as a collapsible
+  **"Thinking"** block above the answer — expand it to follow the model's
+  working, or leave it folded away.
+- **Suppress it with `/no_think`.** Reasoning can be slow and can burn through the
+  tool-loop token budget (a model that keeps thinking may stall before it acts),
+  so you can turn it off two ways:
+  - **Globally** — *Settings → Providers* (admin), applied to every request.
+  - **Per conversation** — a toggle in the chat view, just for that thread.
+
+  Both take effect across chat, channels, and tool loops.
+
 ## The complete reference
 
 Every configuration key — its type, default, and description — is **generated

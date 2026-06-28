@@ -51,6 +51,11 @@ Two independent settings on a Telegram account:
 - **Runtimes are handled for you.** Most catalog servers run via `npx` (Node) or `uvx` (Python/uv). If that runtime isn't installed, MIRA **asks permission** ("This MCP server needs Node.js (~55 MB) — install it now?") and, on approval, downloads a pinned, checksum-verified copy into `~/.mira/deps/` and connects the server. Works on Linux, macOS, and **Windows** — including a Windows service running as LocalSystem, which can't see a user-only Node/uv install. No manual Node/Python setup. (0.280.0+.)
 - Admins can curate the catalog (add/edit/enable/disable entries).
 
+## Shrink the prompt with adaptive tool loading
+- If you have many tools/MCP servers, every chat sends *all* their schemas to the model — often 10k–25k tokens before you type. Turn on **Just-in-Time Tools** to send only the relevant subset per turn.
+- Admin: set `agent.tool_selection.mode = "adaptive"` in `mira_config.json` and restart. MIRA then sends a small core set + the semantic top-K for your message + tools you used recently, plus a `find_tools` tool the model calls to load anything else on demand (nothing is hidden). Tune `top_k`, `min_similarity`, `core_tools`, `stickiness_turns`.
+- Default is `mode = "all"` (send everything, unchanged). To see the effect, note the prompt-token count in the chat footer before/after. Quickest complementary win: disable MCP servers you don't use on the `/mcp` page.
+
 ## Make MIRA act in a browser
 - Add the **Puppeteer** MCP server from the catalog. Then ask MIRA to navigate, click, fill forms, or screenshot a page. Screenshots render inline.
 

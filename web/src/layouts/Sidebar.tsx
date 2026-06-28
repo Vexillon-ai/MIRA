@@ -23,6 +23,7 @@ import styles from './Sidebar.module.css'
 const CHANNEL_OPTIONS = [
   { value: 'all', label: 'All' },
   { value: 'web', label: 'Web' },
+  { value: 'mobile', label: 'MOB' },
   { value: 'tui', label: 'TUI' },
   { value: 'telegram', label: 'TG' },
   { value: 'signal', label: 'Sig' },

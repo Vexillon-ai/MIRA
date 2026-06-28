@@ -42,6 +42,7 @@ pub mod verify;
 pub mod stream;
 pub mod supervisor;
 pub mod tool_loop;
+pub mod tool_select;
 pub mod transport;
 
 pub use core::{AgentCore, DEFAULT_SYSTEM_PROMPT, TurnContext};

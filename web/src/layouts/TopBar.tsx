@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useEffect, useRef, useState } from 'react'
-import { Bell, ChevronDown, Monitor, MessageSquare, Radio, Menu } from 'lucide-react'
+import { Bell, ChevronDown, Monitor, MessageSquare, Radio, Menu, Smartphone } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { useNotificationStore } from '@/store/notificationStore'
@@ -16,6 +16,7 @@ import styles from './TopBar.module.css'
 
 const CHANNEL_ICONS: Record<string, React.ReactNode> = {
   web:      <Monitor size={13} />,
+  mobile:   <Smartphone size={13} />,
   signal:   <Radio size={13} />,
   telegram: <MessageSquare size={13} />,
   tui:      <Monitor size={13} />,
@@ -24,6 +25,7 @@ const CHANNEL_ICONS: Record<string, React.ReactNode> = {
 
 const CHANNEL_LABELS: Record<string, string> = {
   web:      'Web',
+  mobile:   'Mobile',
   signal:   'Signal',
   telegram: 'Telegram',
   tui:      'TUI',

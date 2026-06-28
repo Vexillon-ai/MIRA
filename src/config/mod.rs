@@ -1718,6 +1718,15 @@ pub struct AgentConfig {
     #[serde(default)]
     pub tools: ToolsConfig,
 
+    // Just-in-Time Tools (adaptive tool selection). When `mode="adaptive"`,
+    // each turn carries only the tools it plausibly needs (core set + semantic
+    // top-K of the message + conversation-sticky tools), plus a `find_tools`
+    // meta-tool the model can call to pull in anything else on demand — instead
+    // of sending every enabled tool's schema on every request. Default
+    // `mode="all"` preserves today's behaviour. See design-docs/just-in-time-tools.md.
+    #[serde(default)]
+    pub tool_selection: ToolSelectionConfig,
+
     // Reasoning-model auto-routing (roadmap #13). When enabled, MIRA inspects
     // each turn and routes "hard" ones to a stronger reasoning provider/model
     // instead of the default — so users don't flip a manual toggle.
@@ -1854,6 +1863,7 @@ impl Default for AgentConfig {
             disable_reasoning: false,
             max_context_turns: default_max_context_turns(),
             tools:             ToolsConfig::default(),
+            tool_selection:    ToolSelectionConfig::default(),
             reasoning:         ReasoningConfig::default(),
             avatar:            None,
             avatar_updated_at: None,
@@ -1886,6 +1896,54 @@ pub struct ToolsConfig {
 
     #[serde(default)]
     pub web_search: WebSearchConfig,
+}
+
+// Just-in-Time Tools — adaptive per-turn tool selection.
+// See design-docs/just-in-time-tools.md.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSelectionConfig {
+    /// "all" (default — send every enabled tool, today's behaviour) or
+    /// "adaptive" (semantic top-K + core set + stickiness + find_tools).
+    #[serde(default = "default_tool_selection_mode")]
+    pub mode: String,
+    /// Always-on tools, even when unmatched. Supports trailing-`*` globs
+    /// (e.g. "memory_*"). Keeps flow-critical/baseline tools present.
+    #[serde(default = "default_core_tools")]
+    pub core_tools: Vec<String>,
+    /// Max number of semantically-matched tools to add per turn.
+    #[serde(default = "default_tool_top_k")]
+    pub top_k: usize,
+    /// Minimum cosine similarity for a tool to be included by semantic match.
+    #[serde(default = "default_tool_min_similarity")]
+    pub min_similarity: f32,
+    /// Tools used earlier in a conversation stay active for this many turns.
+    #[serde(default = "default_tool_stickiness_turns")]
+    pub stickiness_turns: usize,
+    /// Expose the `find_tools` meta-tool so the model can pull in any tool
+    /// on demand (progressive disclosure). Strongly recommended on.
+    #[serde(default = "default_true")]
+    pub expose_find_tools: bool,
+}
+
+fn default_tool_selection_mode() -> String { "all".to_string() }
+fn default_core_tools() -> Vec<String> {
+    vec!["memory_*".to_string(), "wiki_*".to_string(), "now".to_string()]
+}
+fn default_tool_top_k() -> usize { 8 }
+fn default_tool_min_similarity() -> f32 { 0.30 }
+fn default_tool_stickiness_turns() -> usize { 6 }
+
+impl Default for ToolSelectionConfig {
+    fn default() -> Self {
+        Self {
+            mode:             default_tool_selection_mode(),
+            core_tools:       default_core_tools(),
+            top_k:            default_tool_top_k(),
+            min_similarity:   default_tool_min_similarity(),
+            stickiness_turns: default_tool_stickiness_turns(),
+            expose_find_tools: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

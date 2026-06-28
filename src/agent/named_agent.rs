@@ -154,6 +154,7 @@ impl WorkerTask for NamedAgentExecutor {
             allowed.as_deref(),
             &serde_json::Map::new(),
             ToolEventCtx::NONE,
+            None, // named agents use a fixed toolset; no progressive disclosure
         )
         .await;
 

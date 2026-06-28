@@ -115,6 +115,10 @@ pub struct AgentCore {
     // take a brief shared lock and clone the string — the prompt is
     // small (~1–2 KB) so this is cheap.
     system_prompt:     std::sync::RwLock<String>,
+    // Just-in-Time Tools — lazily-maintained name→embedding cache for the
+    // adaptive per-turn tool selector. Empty until the first adaptive turn;
+    // see src/agent/tool_select.rs + design-docs/just-in-time-tools.md.
+    tool_index:        tokio::sync::Mutex<crate::agent::tool_select::ToolIndex>,
     tool_mode:         ToolMode,
     max_tool_rounds:   usize,
     max_context_turns: usize,
@@ -156,6 +160,32 @@ pub struct AgentCore {
     // idle eviction). Absent in unit tests and channel-only builds — turns
     // then run with whatever the in-memory `SessionStore` holds (no seeding).
     history:           OnceLock<Arc<HistoryStore>>,
+    // Live config handle for hot-reloadable per-turn settings (tool_selection).
+    live_config:       OnceLock<Arc<crate::web::LiveConfig>>,
+}
+
+// Progressive disclosure for Just-in-Time Tools: lets the tool loop pull more
+// tools into a turn when the model calls `find_tools`. Ranks the FULL catalog
+// by semantic similarity to the query (no min-similarity gate — the model
+// explicitly asked) and returns the best matches not already active.
+#[async_trait::async_trait]
+impl crate::agent::tool_select::ToolExpander for AgentCore {
+    async fn expand(&self, query: &str, already_active: &[String]) -> Vec<(String, String)> {
+        let Some(q) = self.memory.embed(query).await else { return Vec::new() };
+        let mut index = self.tool_index.lock().await;
+        index.ensure_current(&self.tools, &self.memory).await;
+        let all = self.tools.list_tools();
+        crate::agent::tool_select::rank_for_expand(&all, &index, &q, already_active, 6)
+            .into_iter()
+            .filter_map(|name| {
+                self.tools.get(&name).map(|t| {
+                    // First line of the description, trimmed, for a compact menu.
+                    let desc = t.description().lines().next().unwrap_or("").trim().to_string();
+                    (name, desc)
+                })
+            })
+            .collect()
+    }
 }
 
 impl AgentCore {
@@ -188,6 +218,7 @@ impl AgentCore {
             tools,
             sessions,
             system_prompt: std::sync::RwLock::new(system_prompt),
+            tool_index: tokio::sync::Mutex::new(crate::agent::tool_select::ToolIndex::default()),
             tool_mode,
             max_tool_rounds: max_rounds,
             max_context_turns: max_turns,
@@ -199,7 +230,38 @@ impl AgentCore {
             reasoning_provider: OnceLock::new(),
             classifier_provider: OnceLock::new(),
             history: OnceLock::new(),
+            live_config: OnceLock::new(),
         }
+    }
+
+    // Just-in-Time Tools — compute the active tool subset for this turn, or
+    // `None` to fall back to sending all tools. Embeds the user's message
+    // (local fastembed, ~ms), keeps the tool-embedding index current, and
+    // runs the semantic + core selector. Returns `None` (→ all tools) when
+    // embeddings are unavailable so chat never breaks.
+    async fn select_adaptive_tools(
+        &self,
+        input:    &str,
+        messages: &[crate::types::ChatMessage],
+        cfg:      &crate::config::ToolSelectionConfig,
+    ) -> Option<Vec<String>> {
+        let query_emb = self.memory.embed(input).await?;
+        let mut index = self.tool_index.lock().await;
+        index.ensure_current(&self.tools, &self.memory).await;
+        if index.is_empty() {
+            return None; // no embeddings for any tool → send them all
+        }
+        let all = self.tools.list_tools();
+        // Conversation stickiness: keep tools used in recent turns of this
+        // conversation active (workflow continuity). Slice 3 (find_tools)
+        // also marks its results sticky.
+        let sticky = crate::agent::tool_select::sticky_from_messages(messages, cfg.stickiness_turns);
+        let active = crate::agent::tool_select::select_tools(&all, &index, &query_emb, cfg, &sticky);
+        debug!(
+            "JIT tools: {} of {} tools active this turn ({} sticky, mode=adaptive)",
+            active.len(), all.len(), sticky.len()
+        );
+        Some(active)
     }
 
     // Current system prompt. Cloned each call; cheap (a few KB).
@@ -251,6 +313,22 @@ impl AgentCore {
     // Called once by the Gateway. Optional — when absent, no seeding occurs.
     pub fn set_history(&self, history: Arc<HistoryStore>) {
         let _ = self.history.set(history);
+    }
+
+    // Install the live (hot-reloadable) config handle so settings read at turn
+    // time — e.g. `agent.tool_selection` — pick up admin changes without a
+    // restart. Optional; when absent the startup config snapshot is used.
+    pub fn set_live_config(&self, lc: Arc<crate::web::LiveConfig>) {
+        let _ = self.live_config.set(lc);
+    }
+
+    // Effective (hot-reloadable) tool-selection config: live when wired, else
+    // the startup snapshot.
+    async fn tool_selection_config(&self) -> crate::config::ToolSelectionConfig {
+        match self.live_config.get() {
+            Some(lc) => lc.get().await.agent.tool_selection.clone(),
+            None     => self.config.agent.tool_selection.clone(),
+        }
     }
 
     // Run a single **MIRA-Guardian** turn (built-in watchdog persona + Ring-0
@@ -793,6 +871,32 @@ impl AgentCore {
             user_id,
         };
 
+        // Just-in-Time Tools: when adaptive selection is on AND the caller
+        // hasn't already pinned a tool allowlist (constrained flows like
+        // guardian/onboarding do), narrow this turn to a relevant subset
+        // instead of sending every enabled tool. Falls back to all on any
+        // miss (embeddings unavailable / empty index).
+        // Read the hot-reloadable tool-selection config once for this turn.
+        let ts_cfg = self.tool_selection_config().await;
+        let adaptive_allowed: Option<Vec<String>> =
+            if ts_cfg.mode == "adaptive" && context.allowed_tool_names.is_none() {
+                self.select_adaptive_tools(input, &messages, &ts_cfg).await
+            } else {
+                None
+            };
+        let allowed_for_turn: Option<&[String]> = context
+            .allowed_tool_names.as_deref()
+            .or(adaptive_allowed.as_deref());
+
+        // Progressive disclosure: expose `find_tools` only when WE narrowed the
+        // toolset adaptively (not for constrained flows, and not in "all" mode).
+        let expander: Option<&dyn crate::agent::tool_select::ToolExpander> =
+            if adaptive_allowed.is_some() && ts_cfg.expose_find_tools {
+                Some(self)
+            } else {
+                None
+            };
+
         let (response_text, usage) = tool_loop::run_tool_loop_with_context(
             provider,
             &self.tools,
@@ -801,9 +905,10 @@ impl AgentCore {
             &self.tool_mode,
             self.max_tool_rounds,
             tx,
-            context.allowed_tool_names.as_deref(),
+            allowed_for_turn,
             &context.inject_tool_args,
             event_ctx,
+            expander,
         ).await?;
 
         // ── 4. Emit Done ──────────────────────────────────────────────────────

@@ -99,7 +99,7 @@ pub async fn run_tool_loop(
 ) -> Result<(String, TokenUsage), MiraError> {
     run_tool_loop_with_context(
         provider, tools, messages, options, mode, max_rounds, tx,
-        None, &serde_json::Map::new(), ToolEventCtx::NONE,
+        None, &serde_json::Map::new(), ToolEventCtx::NONE, None,
     ).await
 }
 
@@ -119,6 +119,10 @@ pub async fn run_tool_loop_with_context(
     allowed_tool_names: Option<&[String]>,
     inject_args:        &serde_json::Map<String, serde_json::Value>,
     event_ctx:          ToolEventCtx<'_>,
+    // Just-in-Time Tools: when present (adaptive selection), the model can call
+    // `find_tools` to pull more tools into the turn on demand. `None` disables
+    // progressive disclosure (the loop sends exactly `allowed_tool_names`).
+    expander:           Option<&dyn crate::agent::tool_select::ToolExpander>,
 ) -> Result<(String, TokenUsage), MiraError> {
 
     if *mode == ToolMode::Disabled || tools.is_empty() {
@@ -128,12 +132,22 @@ pub async fn run_tool_loop_with_context(
         return run_streaming_no_tools(provider, messages, options, tx).await;
     }
 
-    // Build OpenAI-format tool specs for every tool the model is allowed to
-    // call this turn, and inject them into `options`. Without this, providers
-    // send the chat-completions request with no `tools` field and the model
-    // can only "describe" tool use in prose — which is exactly what small
-    // local models (Qwen, Hermes, etc.) do when they don't get a schema.
-    let tool_specs = build_tool_specs(tools, allowed_tool_names);
+    // Owned, mutable active allowlist so the `find_tools` meta-tool can grow it
+    // mid-turn (progressive disclosure). `None` means "all tools" (no adaptive
+    // restriction). `find_tools` only makes sense when the surface is actually
+    // restricted AND an expander is wired — with every tool already present
+    // there's nothing to discover.
+    let mut active: Option<Vec<String>> = allowed_tool_names.map(|s| s.to_vec());
+    let find_tools_on = expander.is_some() && active.is_some();
+    if find_tools_on {
+        if let Some(a) = active.as_mut() {
+            let name = crate::agent::tool_select::FIND_TOOLS_NAME;
+            if !a.iter().any(|n| n == name) { a.push(name.to_string()); }
+        }
+    }
+    // Cap `find_tools` invocations per turn so a confused model can't loop on it.
+    let mut find_tools_calls = 0usize;
+    const MAX_FIND_TOOLS_CALLS: usize = 4;
 
     // Cross-round duplicate tracking. LM Studio's sampling switch (qwen
     // distills, Hermes) forces ONE `<tool_call>` per response, so models
@@ -176,6 +190,15 @@ pub async fn run_tool_loop_with_context(
         //
         // Non-onboarding tool flows were already fine on `"auto"`, so we
         // unify the behaviour.
+        // Build OpenAI-format tool specs for the tools active *this round*
+        // (rebuilt per round so tools loaded by `find_tools` appear next
+        // round). Without this, providers send no `tools` field and the model
+        // can only "describe" tool use in prose — which small local models do.
+        let mut tool_specs = build_tool_specs(tools, active.as_deref());
+        if find_tools_on {
+            tool_specs.push(crate::agent::tool_select::find_tools_spec());
+        }
+
         let mut opts_with_tools = options.clone();
         if !tool_specs.is_empty() {
             opts_with_tools.tools = Some(tool_specs.clone());
@@ -250,6 +273,20 @@ pub async fn run_tool_loop_with_context(
             });
 
             for tc in &tool_calls {
+                // Progressive disclosure: `find_tools` is handled here, not via
+                // the registry — it loads more tools into the active set.
+                if find_tools_on && tc.name == crate::agent::tool_select::FIND_TOOLS_NAME {
+                    let query = tc.arguments.get("query").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let _ = tx.send(StreamEvent::ToolCall {
+                        name: tc.name.clone(), args: tc.arguments.to_string(), call_id: tc.call_id.clone(),
+                    }).await;
+                    let output = run_find_tools(&query, expander, &mut active, &mut find_tools_calls, MAX_FIND_TOOLS_CALLS).await;
+                    let _ = tx.send(StreamEvent::ToolResult {
+                        name: tc.name.clone(), output: output.clone(), success: true, call_id: tc.call_id.clone(),
+                    }).await;
+                    messages.push(ChatMessage::tool(output, tc.call_id.clone()));
+                    continue;
+                }
                 let merged = merge_injected_args(tc.arguments.clone(), inject_args);
                 let _ = tx.send(StreamEvent::ToolCall {
                     name:    tc.name.clone(),
@@ -258,7 +295,7 @@ pub async fn run_tool_loop_with_context(
                 }).await;
 
                 let (output, success) = dispatch_tool_call(
-                    tools, &tc.name, merged, allowed_tool_names, &mut seen_calls,
+                    tools, &tc.name, merged, active.as_deref(), &mut seen_calls,
                     event_ctx,
                 ).await;
 
@@ -317,6 +354,24 @@ pub async fn run_tool_loop_with_context(
                 });
 
                 for tc in &tool_calls {
+                    // Progressive disclosure: `find_tools` loads more tools
+                    // into the active set rather than dispatching to a tool.
+                    if find_tools_on && tc.name == crate::agent::tool_select::FIND_TOOLS_NAME {
+                        let query = tc.arguments.get("query").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                        let _ = tx.send(StreamEvent::ToolCall {
+                            name: tc.name.clone(), args: tc.arguments.to_string(), call_id: tc.call_id.clone(),
+                        }).await;
+                        let output = run_find_tools(&query, expander, &mut active, &mut find_tools_calls, MAX_FIND_TOOLS_CALLS).await;
+                        let _ = tx.send(StreamEvent::ToolResult {
+                            name: tc.name.clone(), output: output.clone(), success: true, call_id: tc.call_id.clone(),
+                        }).await;
+                        let wrapped = format!(
+                            "<tool_response>{}</tool_response>",
+                            serde_json::json!({ "name": tc.name, "content": output }),
+                        );
+                        messages.push(ChatMessage::user(wrapped));
+                        continue;
+                    }
                     let merged = merge_injected_args(tc.arguments.clone(), inject_args);
                     let _ = tx.send(StreamEvent::ToolCall {
                         name:    tc.name.clone(),
@@ -325,7 +380,7 @@ pub async fn run_tool_loop_with_context(
                     }).await;
 
                     let (output, success) = dispatch_tool_call(
-                        tools, &tc.name, merged, allowed_tool_names, &mut seen_calls,
+                        tools, &tc.name, merged, active.as_deref(), &mut seen_calls,
                         event_ctx,
                     ).await;
 
@@ -370,7 +425,7 @@ pub async fn run_tool_loop_with_context(
                 }).await;
 
                 let (output, success) = dispatch_tool_call(
-                    tools, &tool_name, merged, allowed_tool_names, &mut seen_calls,
+                    tools, &tool_name, merged, active.as_deref(), &mut seen_calls,
                     event_ctx,
                 ).await;
 
@@ -714,6 +769,38 @@ async fn replay_as_stream(content: &str, tx: &mpsc::Sender<StreamEvent>) {
         let _ = tx.send(StreamEvent::Token(piece.to_owned())).await;
         tokio::task::yield_now().await;
     }
+}
+
+// Handle a `find_tools(query)` call (progressive disclosure): run the expander
+// over the full catalog, add the matches to the turn's `active` allowlist so
+// they're callable next round, and return a human/model-readable result. Capped
+// per turn so a confused model can't loop on it.
+async fn run_find_tools(
+    query:     &str,
+    expander:  Option<&dyn crate::agent::tool_select::ToolExpander>,
+    active:    &mut Option<Vec<String>>,
+    calls:     &mut usize,
+    max_calls: usize,
+) -> String {
+    *calls += 1;
+    if *calls > max_calls {
+        return "Tool-search limit reached for this turn — work with the tools already loaded.".to_string();
+    }
+    let Some(exp) = expander else {
+        return "Tool search is unavailable right now.".to_string();
+    };
+    let already = active.as_deref().unwrap_or(&[]).to_vec();
+    let loaded = exp.expand(query, &already).await;
+    if loaded.is_empty() {
+        return "No additional tools matched that — the tools you already have are likely the relevant ones.".to_string();
+    }
+    if let Some(a) = active.as_mut() {
+        for (n, _) in &loaded {
+            if !a.iter().any(|x| x == n) { a.push(n.clone()); }
+        }
+    }
+    let list = loaded.iter().map(|(n, d)| format!("- {n}: {d}")).collect::<Vec<_>>().join("\n");
+    format!("Loaded {} tool(s) — now available to call:\n{list}", loaded.len())
 }
 
 // Generate and stream tokens directly when no tools are involved (or after

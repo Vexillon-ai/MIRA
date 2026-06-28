@@ -1301,6 +1301,41 @@
           "type": "integer",
           "minimum": 256
         },
+        "tool_selection": {
+          "description": "Just-in-Time Tools — adaptive per-turn tool selection. When mode='adaptive', each turn carries only the tools it plausibly needs (core set + semantic top-K of the message + conversation-sticky tools) plus a find_tools meta-tool the model can call to load anything else on demand, instead of sending every enabled tool on every request. Default mode='all' preserves current behaviour.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "description": "'all' (send every enabled tool — current behaviour) or 'adaptive' (semantic top-K + core set + stickiness + find_tools).",
+              "type": "string",
+              "enum": ["all", "adaptive"]
+            },
+            "core_tools": {
+              "description": "Tools always included even when unmatched. Supports trailing-* globs (e.g. 'memory_*'). Keeps flow-critical/baseline tools present.",
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "top_k": {
+              "description": "Max number of semantically-matched tools to add per turn.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "min_similarity": {
+              "description": "Minimum cosine similarity (0.0-1.0) for a tool to be included by semantic match.",
+              "type": "number"
+            },
+            "stickiness_turns": {
+              "description": "Tools used earlier in a conversation stay active for this many subsequent turns.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "expose_find_tools": {
+              "description": "Expose the find_tools meta-tool so the model can pull in any tool on demand (progressive disclosure). Recommended on.",
+              "type": "boolean"
+            }
+          }
+        },
         "tools": {
           "description": "Per-tool enable/disable switches. All tools are disabled by default for security.",
           "type": "object",

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::Json,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Sse},
     Extension,
 };
@@ -77,10 +77,26 @@ pub async fn chat_handler(
     Extension(preamble): Extension<Arc<ProfilePreambleCache>>,
     Extension(data_dir): Extension<DataDir>,
     Extension(mcp_servers): Extension<Arc<crate::mcp::McpServerRegistry>>,
+    headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> axum::response::Response {
     // ── Resolve or create conversation ────────────────────────────────────────
     let config = live_cfg.get().await;
+
+    // Channel tag for conversations created from this turn. Native clients
+    // send `X-Mira-Client: android` (any non-"web" value is treated as a
+    // mobile/native client); absent → "web" (backward-compatible). Per-
+    // conversation channel, so tagging at creation is sufficient. We honour
+    // the header (what the Android app sends today) rather than a body field.
+    let new_channel: &str = match headers
+        .get("x-mira-client")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        None | Some("") | Some("web") => "web",
+        Some(_) => "mobile",
+    };
     let model = req.model_override
         .clone()
         .unwrap_or_else(|| config.providers.lmstudio.default_model.clone());
@@ -106,7 +122,7 @@ pub async fn chat_handler(
             let title = derive_title_from_message(&req.message);
             match history.create_conversation(NewConversation {
                 user_id:          user.id.clone(),
-                channel:          "web".to_owned(),
+                channel:          new_channel.to_owned(),
                 title:            Some(title),
                 model:            Some(model.clone()),
                 provider:         None,

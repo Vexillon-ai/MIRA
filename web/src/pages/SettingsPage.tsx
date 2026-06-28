@@ -1732,6 +1732,46 @@ function AgentTab({
         </Field>
       </Section>
 
+      <Section title="Tool selection (Just-in-Time Tools)">
+        <p className={styles.sectionDesc}>
+          With many tools/MCP servers installed, sending every tool's schema on every
+          request bloats the prompt. <strong>Adaptive</strong> mode sends only a small core
+          set plus the tools most relevant to each message (and ones used recently), and lets
+          the model pull in anything else on demand via <code>find_tools</code>. Applies live —
+          no restart.
+        </p>
+        <Field label="Mode" desc="'All' sends every enabled tool (default). 'Adaptive' sends only the per-turn relevant subset.">
+          <SelectInput
+            value={str('agent.tool_selection.mode', 'all')}
+            onChange={(v) => set('agent.tool_selection.mode', v)}
+            options={[
+              { value: 'all',      label: 'All tools (default)' },
+              { value: 'adaptive', label: 'Adaptive (Just-in-Time)' },
+            ]}
+          />
+        </Field>
+        <Field label="Top-K semantic matches" desc="Max number of message-relevant tools to add per turn (adaptive mode).">
+          <NumberInput value={num('agent.tool_selection.top_k', 8)} onChange={(v) => set('agent.tool_selection.top_k', v)} min={0} max={64} />
+        </Field>
+        <Field label="Min similarity" desc="Minimum cosine similarity (0–1) for a tool to be matched. Higher = stricter / fewer tools.">
+          <NumberInput value={num('agent.tool_selection.min_similarity', 0.30)} onChange={(v) => set('agent.tool_selection.min_similarity', v)} min={0} max={1} step={0.05} />
+        </Field>
+        <Field label="Stickiness turns" desc="Tools used earlier in a conversation stay available for this many later turns.">
+          <NumberInput value={num('agent.tool_selection.stickiness_turns', 6)} onChange={(v) => set('agent.tool_selection.stickiness_turns', v)} min={0} max={50} />
+        </Field>
+        <Field label="Core tools (always loaded)" desc="Comma-separated tool names; trailing * is a prefix glob (e.g. memory_*). Kept available every turn.">
+          <TextInput
+            value={str('agent.tool_selection.core_tools', 'memory_*, wiki_*, now')}
+            onChange={(v) => set('agent.tool_selection.core_tools', v.split(',').map((s) => s.trim()).filter(Boolean))}
+            placeholder="memory_*, wiki_*, now"
+            mono
+          />
+        </Field>
+        <Field label="Expose find_tools" desc="Let the model load additional tools on demand (progressive disclosure). Recommended on so no capability is ever hidden.">
+          <Toggle value={bool('agent.tool_selection.expose_find_tools', true)} onChange={(v) => set('agent.tool_selection.expose_find_tools', v)} />
+        </Field>
+      </Section>
+
       <Section title="Tools">
         <p className={styles.sectionDesc}>
           Individual tool toggles, limits, and the shared HTTP policy live on the dedicated <strong>Tools</strong> tab.

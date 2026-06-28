@@ -7,6 +7,7 @@ const LABELS: Record<string, string> = {
   signal:   'SG',
   tui:      'TUI',
   web:      'WEB',
+  mobile:   'MOB',
 }
 
 export default function ChannelBadge({ channel }: { channel: string }) {
