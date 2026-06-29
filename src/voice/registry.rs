@@ -55,6 +55,13 @@ impl ChannelRegistry {
                 display_name: "Signal".into(),
                 supports_voice: true,
             },
+            ChannelDescriptor {
+                id: "mobile".into(),
+                display_name: "Mobile app".into(),
+                // The native mobile app plays synthesized audio inline (it uses
+                // the same /api/tts endpoints as web). → true.
+                supports_voice: true,
+            },
             // The newer channels. `supports_voice` is HONEST per channel —
             // the UI hides voice controls when it's false, so these don't
             // show a toggle that would silently do nothing. Only channels
@@ -141,7 +148,7 @@ mod tests {
         let r = ChannelRegistry::builtin();
         let ids: Vec<String> = r.list().into_iter().map(|d| d.id).collect();
         assert_eq!(ids, vec![
-            "discord", "email", "matrix", "signal",
+            "discord", "email", "matrix", "mobile", "signal",
             "slack", "telegram", "tui", "web", "whatsapp",
         ]); // BTreeMap order
     }
@@ -150,7 +157,7 @@ mod tests {
     fn voice_capability_is_honest_per_channel() {
         let r = ChannelRegistry::builtin();
         // Channels that actually deliver synthesized audio today.
-        for id in ["web", "tui", "telegram", "signal"] {
+        for id in ["web", "tui", "telegram", "signal", "mobile"] {
             assert!(r.get(id).unwrap().supports_voice, "{id} should support voice");
         }
         // Text-only channels — the UI must not show a no-op voice toggle.

@@ -57,7 +57,8 @@ Two independent settings on a Telegram account:
 - Default is `mode = "all"` (send everything, unchanged). To see the effect, note the prompt-token count in the chat footer before/after. Quickest complementary win: disable MCP servers you don't use on the `/mcp` page.
 
 ## Make MIRA act in a browser
-- Add the **Puppeteer** MCP server from the catalog. Then ask MIRA to navigate, click, fill forms, or screenshot a page. Screenshots render inline.
+- Add the **Puppeteer** MCP server from the catalog. On first connect MIRA downloads a managed Chrome (~150 MB) into `~/.mira/deps/puppeteer/` in the background and points the server at it — so it works on Linux, macOS and Windows (including when MIRA runs as a Windows service) with no system Chrome and no `unzip`/Node browser-download step. Browser tools light up once the download finishes (a few minutes the first time); until then you may see a "couldn't find Chrome" error. To use your own browser instead, set `PUPPETEER_EXECUTABLE_PATH` in the server's environment on the `/mcp` page.
+- Then ask MIRA to navigate, click, fill forms, or screenshot a page. Screenshots render inline.
 
 ## Schedule something
 - Ask MIRA to "remind me / check X every morning at 8" — it creates an automation (cron). View/cancel your schedules via the automations tools or the Automations page.

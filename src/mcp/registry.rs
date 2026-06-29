@@ -24,7 +24,8 @@
 //! names per user so the agent always sees the right set.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
 use futures_util::future::join_all;
@@ -124,6 +125,12 @@ pub struct McpServerRegistry {
     // surface in via `set_mcp_tools`. Attached after construction (the
     // tool registry Arc is built slightly later in the gateway).
     tools: RwLock<Option<Arc<ToolRegistry>>>,
+    // Weak self-handle so a background browser-provisioning task can call
+    // `reload()` once Chrome is downloaded. Set via [`Self::attach_self`]
+    // right after the `Arc` is built; unset → self-reconnect is skipped.
+    self_ref: OnceLock<Weak<Self>>,
+    // Guards against spawning more than one Chrome download at a time.
+    chrome_provisioning: AtomicBool,
 }
 
 impl McpServerRegistry {
@@ -136,6 +143,8 @@ impl McpServerRegistry {
             provider:  None,
             artifacts: None,
             tools:     RwLock::new(None),
+            self_ref:  OnceLock::new(),
+            chrome_provisioning: AtomicBool::new(false),
         }
     }
 
@@ -154,6 +163,8 @@ impl McpServerRegistry {
             provider: Some(provider),
             artifacts,
             tools:    RwLock::new(None),
+            self_ref: OnceLock::new(),
+            chrome_provisioning: AtomicBool::new(false),
         }
     }
 
@@ -163,6 +174,13 @@ impl McpServerRegistry {
         if let Ok(mut g) = self.tools.write() {
             *g = Some(tools);
         }
+    }
+
+    // Record a weak handle to the owning `Arc<Self>` so background tasks (e.g.
+    // Chrome provisioning for the Puppeteer server) can trigger a reconnect.
+    // Call once, right after building the `Arc`.
+    pub fn attach_self(&self, me: Weak<Self>) {
+        let _ = self.self_ref.set(me);
     }
 
     // Reconnect every enabled server from the store, rebuild the per-user
@@ -185,6 +203,54 @@ impl McpServerRegistry {
         }
         info!("mcp: registry reloaded ({} connected client(s))",
             self.state.read().map(|s| s.clients.len()).unwrap_or(0));
+
+        // If a Puppeteer server is configured but managed Chrome isn't ready
+        // yet, download it in the background then reconnect (so the server
+        // respawns with PUPPETEER_EXECUTABLE_PATH). Runs once — guarded.
+        self.maybe_provision_browser_deps();
+    }
+
+    // Kick a one-time background Chrome download for the Puppeteer MCP server
+    // when needed, reconnecting on completion. No-op when: no Puppeteer server
+    // is enabled, Chrome is already provisioned, a download is already in
+    // flight, or there's no self-handle to reconnect with.
+    fn maybe_provision_browser_deps(&self) {
+        let Some(store) = self.store.as_ref() else { return };
+        let needs_browser = store
+            .list_all_enabled()
+            .map(|rows| rows.iter().any(|r| {
+                r.to_config()
+                    .map(|c| crate::mcp::browser::server_uses_puppeteer(
+                        c.command.as_deref(), &c.args, &c.env))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if !needs_browser || crate::mcp::browser::chrome_path().is_some() {
+            return;
+        }
+        // Claim the provisioning slot; bail if one's already running.
+        if self.chrome_provisioning.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(weak) = self.self_ref.get().and_then(|w| w.upgrade()) else {
+            // Can't reconnect without a self-handle — release the slot so a
+            // later reload can retry once `attach_self` has been called.
+            self.chrome_provisioning.store(false, Ordering::SeqCst);
+            return;
+        };
+        tokio::spawn(async move {
+            match crate::mcp::browser::ensure_chrome(false).await {
+                Ok(p) => {
+                    info!("mcp/puppeteer: Chrome ready at {} — reconnecting browser server", p.display());
+                    weak.chrome_provisioning.store(false, Ordering::SeqCst);
+                    weak.reload().await;
+                }
+                Err(e) => {
+                    warn!("mcp/puppeteer: Chrome provisioning failed — browser tools unavailable: {e}");
+                    weak.chrome_provisioning.store(false, Ordering::SeqCst);
+                }
+            }
+        });
     }
 
     // Connect to every enabled row across every user, resolve

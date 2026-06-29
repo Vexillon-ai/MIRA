@@ -63,7 +63,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tracing::{debug, warn};
 
 use crate::agent::protocol::Event;
@@ -369,7 +368,20 @@ impl WorkerTask for OpenCodeAdapter {
         assignment: WorkerAssignment,
         ctx:        WorkerContext,
     ) -> Result<WorkerComplete, WorkerFailure> {
-        let mut cmd = Command::new(&self.config.binary);
+        // Resolve the CLI fresh at spawn (PATH + common install dirs + MIRA's
+        // managed npm install under ~/.mira/deps) so a CLI installed *after*
+        // boot via the one-click skill install works without a restart — but
+        // ONLY when the binary is still the bare default. An explicitly
+        // configured path (the builder's boot-time resolution, or a test's fake
+        // binary) always wins. The helper augments the child PATH for the CLI's
+        // own node subprocess and routes Windows `.cmd` shims through `cmd /C`.
+        let binary = if self.config.binary == std::path::Path::new("opencode") {
+            crate::install::deps::resolve_external_cli("opencode")
+                .unwrap_or_else(|| self.config.binary.clone())
+        } else {
+            self.config.binary.clone()
+        };
+        let mut cmd = crate::install::deps::external_cli_command(&binary);
         cmd.arg("run")
             .arg("--format").arg("json")
             .stdin(Stdio::null())

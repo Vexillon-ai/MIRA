@@ -222,6 +222,15 @@ export const skillsApi = {
     return data
   },
 
+  /** Admin: one-click install of a coding-agent skill's CLI (Claude Code /
+   *  OpenCode) via the managed Node's npm. Idempotent; no restart needed. */
+  async installCli(skillId: string): Promise<{ ok: boolean; path?: string; error?: string }> {
+    const { data } = await api.post<{ ok: boolean; path?: string; error?: string }>(
+      `/api/admin/skills/${encodeURIComponent(skillId)}/install-cli`,
+    )
+    return data
+  },
+
   /** Admin: re-extract bundled skills onto disk. */
   async refreshBundled(opts: { force?: boolean; id?: string } = {}): Promise<RefreshBundledResponse> {
     const { data } = await api.post<RefreshBundledResponse>(

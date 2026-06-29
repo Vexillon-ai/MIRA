@@ -19,6 +19,7 @@
 //! to be revisited.
 
 pub mod adapter;
+pub mod browser;
 pub mod catalog;
 pub mod client;
 pub mod handler;

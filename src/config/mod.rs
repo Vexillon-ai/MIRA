@@ -2854,6 +2854,9 @@ pub struct TtsRoutingConfig {
     pub telegram: String,
     #[serde(default = "default_tts_route")]
     pub signal: String,
+    // Native mobile app (channel id `mobile`). 0.287.x+.
+    #[serde(default = "default_tts_route")]
+    pub mobile: String,
 }
 
 impl Default for TtsRoutingConfig {
@@ -2863,6 +2866,7 @@ impl Default for TtsRoutingConfig {
             tui:      default_tts_route(),
             telegram: default_tts_route(),
             signal:   default_tts_route(),
+            mobile:   default_tts_route(),
         }
     }
 }

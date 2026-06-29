@@ -439,6 +439,226 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Extra directories where third-party CLIs (Claude Code, OpenCode, …) are
+/// commonly installed but which a **service** PATH usually omits — the same
+/// class of problem as `npx` not being on a Windows-service PATH. Searched (and
+/// prepended to a spawned CLI's PATH) in addition to the process `PATH`. Best-
+/// effort: non-existent dirs are harmless. Includes the MIRA-managed Node/uv
+/// bins so a CLI's own `node`/`npm` subprocess resolves too.
+pub fn external_cli_search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let home = dirs::home_dir();
+
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(&appdata).join("npm")); // npm global shims
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let local = PathBuf::from(local);
+            dirs.push(local.join("Microsoft").join("WinGet").join("Links"));
+            dirs.push(local.join("Programs").join("opencode"));
+            dirs.push(local.join("Programs").join("claude"));
+        }
+        if let Some(h) = home.as_ref() {
+            dirs.push(h.join("scoop").join("shims"));
+            dirs.push(h.join(".bun").join("bin"));
+            dirs.push(h.join(".opencode").join("bin"));
+            dirs.push(h.join(".local").join("bin"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(h) = home.as_ref() {
+            dirs.push(h.join(".local").join("bin"));
+            dirs.push(h.join(".npm-global").join("bin"));
+            dirs.push(h.join(".bun").join("bin"));
+            dirs.push(h.join(".opencode").join("bin"));
+        }
+        dirs.push(PathBuf::from("/usr/local/bin"));
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    }
+
+    // MIRA-managed runtimes last (so a system install wins), so a CLI's child
+    // `node`/`npm`/`uv` still resolves when nothing else provides them.
+    dirs.extend(managed_runtime_bin_dirs());
+    dirs
+}
+
+/// Path to a CLI MIRA installed via `ensure_cli_via_npm` (an `npm i -g
+/// --prefix ~/.mira/deps/<name>` install), if present. npm puts the launcher
+/// shim at `<prefix>/bin/<name>` on Unix and `<prefix>/<name>.cmd` on Windows.
+pub fn managed_npm_cli_path(name: &str) -> Option<PathBuf> {
+    let prefix = dep_install_dir(name).ok()?;
+    #[cfg(windows)]
+    let cands = [prefix.join(format!("{name}.cmd")), prefix.join(format!("{name}.exe")), prefix.join(name)];
+    #[cfg(not(windows))]
+    let cands = [prefix.join("bin").join(name)];
+    cands.into_iter().find(|p| p.is_file())
+}
+
+/// Resolve an external CLI (`claude`, `opencode`, …) to an absolute path.
+/// Checks, in order: a MIRA-managed npm install under `~/.mira/deps/<name>`,
+/// the process `PATH`, then [`external_cli_search_dirs`]. Adds `.exe`/`.cmd`/
+/// `.bat` probes on Windows so npm/scoop shims resolve. Returns the path
+/// *including* any matched extension, so callers spawn the real shim.
+pub fn resolve_external_cli(name: &str) -> Option<PathBuf> {
+    if let Some(p) = managed_npm_cli_path(name) {
+        return Some(p);
+    }
+    if let Some(p) = which_on_path(name) {
+        return Some(p);
+    }
+    #[cfg(windows)]
+    let exts: &[&str] = &["", ".exe", ".cmd", ".bat"];
+    #[cfg(not(windows))]
+    let exts: &[&str] = &[""];
+    for dir in external_cli_search_dirs() {
+        for ext in exts {
+            let cand = dir.join(format!("{name}{ext}"));
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+/// Build a `tokio::process::Command` to launch a resolved external CLI, with
+/// the search dirs prepended to `PATH` (so the CLI's own `node`/`npm`
+/// subprocesses resolve) and Windows `.cmd`/`.bat` shims routed through
+/// `cmd /C` (which `CreateProcess` can't execute directly). Callers append
+/// their own args/env/cwd afterwards. Mirrors the MCP client's spawn path.
+pub fn external_cli_command(binary: &Path) -> tokio::process::Command {
+    #[cfg(windows)]
+    let mut cmd = {
+        let lower = binary.to_string_lossy().to_ascii_lowercase();
+        if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+            let mut c = tokio::process::Command::new("cmd");
+            c.arg("/C").arg(binary);
+            c
+        } else {
+            tokio::process::Command::new(binary)
+        }
+    };
+    #[cfg(not(windows))]
+    let mut cmd = tokio::process::Command::new(binary);
+
+    // Prepend the extra search dirs to PATH for the child.
+    let extra = external_cli_search_dirs();
+    if !extra.is_empty() {
+        let base = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = extra;
+        paths.extend(std::env::split_paths(&base));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            cmd.env("PATH", joined);
+        }
+    }
+    cmd
+}
+
+/// Resolve the `npm` launcher from the MIRA-managed Node (preferred) or PATH,
+/// plus the runtime bin dirs to put on the child's PATH so `npm` finds `node`.
+fn resolve_npm() -> (PathBuf, Vec<PathBuf>) {
+    let dirs = managed_runtime_bin_dirs();
+    #[cfg(windows)]
+    let names: &[&str] = &["npm.cmd", "npm.exe", "npm"];
+    #[cfg(not(windows))]
+    let names: &[&str] = &["npm"];
+    for d in &dirs {
+        for n in names {
+            let c = d.join(n);
+            if c.is_file() {
+                return (c, dirs.clone());
+            }
+        }
+    }
+    (PathBuf::from("npm"), dirs)
+}
+
+/// Install (or no-op if already present) a CLI distributed as an npm package
+/// into `~/.mira/deps/<bin_name>` via the MIRA-managed Node's `npm`, returning
+/// the launcher path. Used for the optional coding-agent skills (Claude Code,
+/// OpenCode) so enabling a skill can offer one-click install — same consent
+/// model as the managed MCP runtimes. Provisions the managed Node first if
+/// it isn't installed yet. Cross-platform (handles the Windows `npm.cmd` shim).
+pub async fn ensure_cli_via_npm(pkg: &str, bin_name: &str) -> Result<PathBuf, String> {
+    if let Some(p) = managed_npm_cli_path(bin_name) {
+        return Ok(p);
+    }
+    // npm needs Node — provision the managed runtime if neither managed nor
+    // system Node is available.
+    if managed_dep_path("node").is_none() && which_on_path("node").is_none() {
+        // Map the non-Send `Box<dyn Error>` to a String *inside* the blocking
+        // closure so the JoinHandle's value is Send.
+        tokio::task::spawn_blocking(|| install_named("node", false).map_err(|e| e.to_string()))
+            .await
+            .map_err(|e| format!("node install thread panicked: {e}"))?
+            .map_err(|e| format!("install managed Node: {e}"))?;
+    }
+
+    let prefix = dep_install_dir(bin_name).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&prefix).map_err(|e| format!("create install dir: {e}"))?;
+    let (npm, runtime_dirs) = resolve_npm();
+    let prefix_str = prefix.to_string_lossy().into_owned();
+    let npm_args = ["install", "-g", pkg, "--prefix", prefix_str.as_str()];
+
+    tracing::info!("skills: installing {pkg} via npm into {}…", prefix.display());
+
+    // Windows `npm` is an `npm.cmd` shim CreateProcess can't run directly.
+    #[cfg(windows)]
+    let mut cmd = {
+        let lower = npm.to_string_lossy().to_ascii_lowercase();
+        if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+            let mut c = tokio::process::Command::new("cmd");
+            c.arg("/C").arg(&npm).args(npm_args);
+            c
+        } else {
+            let mut c = tokio::process::Command::new(&npm);
+            c.args(npm_args);
+            c
+        }
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new(&npm);
+        c.args(npm_args);
+        c
+    };
+
+    let path_var = {
+        let mut dirs = runtime_dirs;
+        if let Some(existing) = std::env::var_os("PATH") {
+            dirs.extend(std::env::split_paths(&existing));
+        }
+        std::env::join_paths(dirs).unwrap_or_default()
+    };
+    cmd.env("PATH", &path_var)
+        .env("npm_config_prefix", &prefix) // belt-and-suspenders for npm prefix
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output())
+        .await
+        .map_err(|_| "npm install timed out after 300s".to_string())?
+        .map_err(|e| format!("spawn npm: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "npm install {pkg} failed ({}); {}",
+            output.status,
+            stderr.lines().rev().take(4).collect::<Vec<_>>().join(" | ")
+        ));
+    }
+
+    managed_npm_cli_path(bin_name).ok_or_else(|| format!(
+        "npm install {pkg} completed but the {bin_name} launcher wasn't found under {}",
+        prefix.display()
+    ))
+}
+
 /// Install the full Signal runtime on demand: signal-cli, plus the
 /// bundled JRE on every platform that needs one (all except
 /// linux-x86_64, which uses the native build). Idempotent — already-
@@ -706,5 +926,34 @@ mod tests {
             "/sentinel/should-not-clobber"
         );
         unsafe { std::env::remove_var("ORT_DYLIB_PATH"); }
+    }
+
+    #[test]
+    fn external_cli_search_dirs_is_populated() {
+        let dirs = external_cli_search_dirs();
+        assert!(!dirs.is_empty(), "should offer at least some search dirs");
+        // A bogus binary name never resolves anywhere.
+        assert!(resolve_external_cli("definitely-not-a-real-cli-xyzzy").is_none());
+    }
+
+    // Full chain: provision managed Node if needed, `npm i -g opencode-ai` into
+    // a temp ~/.mira/deps, then resolve + run the launcher. Hits the network +
+    // writes tens of MB, so `#[ignore]`. Run with:
+    //   cargo test --lib install::deps::tests::npm_installs_cli -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn npm_installs_and_resolves_cli() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded ignored test; redirect HOME so the install
+        // lands under a throwaway ~/.mira/deps and doesn't touch the real one.
+        unsafe { std::env::set_var("HOME", tmp.path()); }
+
+        let path = ensure_cli_via_npm("opencode-ai", "opencode").await.expect("npm install");
+        assert!(path.is_file(), "launcher should exist at {}", path.display());
+        // Resolver now finds the managed install.
+        assert_eq!(resolve_external_cli("opencode").as_deref(), Some(path.as_path()));
+        // Idempotent: second call is a no-op returning the same path.
+        let again = ensure_cli_via_npm("opencode-ai", "opencode").await.expect("idempotent");
+        assert_eq!(again, path);
     }
 }

@@ -212,7 +212,7 @@ interface Config {
     }
     elevenlabs?: { api_key?: string | null; model?: string; default_voice_id?: string }
     cartesia?:   { api_key?: string | null; model?: string; default_voice_id?: string }
-    routing?: { web?: string; tui?: string; telegram?: string; signal?: string }
+    routing?: { web?: string; tui?: string; telegram?: string; signal?: string; mobile?: string }
   }
   // MCP servers moved to the dedicated `/mcp` page in 0.157.0; the
   // top-level `mcp` config block (if present) is kept as a one-shot

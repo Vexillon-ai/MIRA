@@ -807,6 +807,9 @@ impl GatewayBuilder {
         // exists so startup and hot-reload share one path.
         let tools = Arc::new(tool_registry);
         mcp_servers.attach_tool_registry(Arc::clone(&tools));
+        // Weak self-handle so background browser (Chrome) provisioning can
+        // reconnect the Puppeteer server once the download finishes.
+        mcp_servers.attach_self(Arc::downgrade(&mcp_servers));
         // Connect MCP servers in the BACKGROUND so the HTTP server comes up
         // immediately instead of blocking boot on N stdio handshakes (each a
         // process spawn + JSON-RPC init — ~1s apiece, slower on Windows). The
@@ -2714,10 +2717,16 @@ fn build_skill_resolver(
     }
 
     // ── com.mira.claudecode ─────────────────────────────────────────────
-    // Look for `claude` on PATH; skip registration silently when it's
-    // not there so installations without claude-code still boot.
-    if which_on_path("claude").is_some() {
+    // Registered UNCONDITIONALLY so the skill is enableable + offers one-click
+    // install even when `claude` isn't on the box yet; the adapter resolves the
+    // CLI lazily at spawn (PATH + common install dirs + MIRA-managed npm
+    // install under ~/.mira/deps), so a freshly-installed CLI works without a
+    // restart. We still seed `config.binary` with whatever resolves now.
+    {
         let mut cc = ClaudeCodeConfig::new();
+        if let Some(claude_bin) = crate::install::deps::resolve_external_cli("claude") {
+            cc = cc.with_binary(claude_bin);
+        }
         cc = cc.with_skip_permissions(true); // headless subagent
         cc = cc.with_bare(true);             // no operator's CLAUDE.md
         // Standard coding toolset. Without --allowedTools the headless
@@ -2737,20 +2746,21 @@ fn build_skill_resolver(
             "com.mira.claudecode",
             adapter as Arc<dyn crate::agent::WorkerTask>,
         );
-    } else {
-        info!("com.mira.claudecode adapter NOT registered — `claude` CLI not on PATH");
     }
 
     // ── com.mira.opencode ───────────────────────────────────────────────
     // Same shape as claudecode but pointed at the `opencode` CLI from
-    // sst/opencode. The OpenCode adapter (slice C3) handles its
-    // distinct NDJSON output format and per-step cost accounting; here
-    // we just register it under the right skill id with the secrets
-    // vault wired in. `with_skip_permissions(true)` is required for
-    // unattended runs — there's no human to approve permission prompts
-    // when MIRA spawns the subagent in the background.
-    if which_on_path("opencode").is_some() {
+    // sst/opencode. The OpenCode adapter (slice C3) handles its distinct
+    // NDJSON output format and per-step cost accounting. Registered
+    // unconditionally (lazy CLI resolve at spawn) so one-click install works
+    // without a restart. `with_skip_permissions(true)` is required for
+    // unattended runs — there's no human to approve permission prompts when
+    // MIRA spawns the subagent in the background.
+    {
         let mut oc = OpenCodeConfig::new();
+        if let Some(opencode_bin) = crate::install::deps::resolve_external_cli("opencode") {
+            oc = oc.with_binary(opencode_bin);
+        }
         oc = oc.with_skip_permissions(true);
         let mut adapter = OpenCodeAdapter::new(oc);
         if let Some(store) = secrets.as_ref() {
@@ -2760,25 +2770,9 @@ fn build_skill_resolver(
             "com.mira.opencode",
             adapter as Arc<dyn crate::agent::WorkerTask>,
         );
-    } else {
-        info!("com.mira.opencode adapter NOT registered — `opencode` CLI not on PATH");
     }
 
     resolver
-}
-
-// Tiny `which`-style helper. Returns the absolute path of `bin` if it
-// exists on `PATH`, else `None`. Intentionally minimal — full `which`
-// crate would be overkill for one optional discovery.
-fn which_on_path(bin: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(bin);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 // One-shot startup sweep of `agent.worker.completed` subscriptions whose

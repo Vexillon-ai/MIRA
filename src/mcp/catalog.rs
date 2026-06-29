@@ -365,7 +365,7 @@ fn default_catalog() -> Vec<McpCatalogEntry> {
             "stdio", Some("mira"), &["tts", "mcp-serve"], &[], None,
             false, "https://github.com/tarekedOz"),
         entry("puppeteer", "Puppeteer (browser)",
-            "Headless-browser automation: navigate, screenshot, click, fill, evaluate JS. First use downloads Chromium (~150 MB). Launch args preset for WSL2/containers (--no-sandbox); drop them in the env if your host runs Chrome's sandbox.",
+            "Headless-browser automation: navigate, screenshot, click, fill, evaluate JS. MIRA provisions a managed Chrome (~150 MB) into ~/.mira/deps/puppeteer on first connect and points the server at it — so it works on Linux, macOS and Windows (incl. as a service) without a system Chrome. The download runs in the background; browser tools become available once it finishes (a few minutes on first use). Set PUPPETEER_EXECUTABLE_PATH in the env to use your own Chrome instead. Launch args preset for WSL2/containers (--no-sandbox).",
             "stdio", Some("npx"), &["-y", "@modelcontextprotocol/server-puppeteer"],
             &[
                 ("PUPPETEER_LAUNCH_OPTIONS", "{\"headless\":true,\"args\":[\"--no-sandbox\",\"--disable-dev-shm-usage\"]}"),

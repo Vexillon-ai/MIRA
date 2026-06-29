@@ -361,7 +361,26 @@ impl McpClient {
                 let resolved = crate::install::deps::resolve_mcp_command(cmd_str);
                 let runtime_dirs = crate::install::deps::managed_runtime_bin_dirs();
                 let args = cfg.args.clone();
-                let env  = cfg.env.clone();
+                let mut env  = cfg.env.clone();
+
+                // Puppeteer browser server: point it at MIRA's managed Chrome
+                // (provisioned under ~/.mira/deps/puppeteer) so browser
+                // automation works on a Windows service where Puppeteer's own
+                // self-download lands in an unreadable cache. A user-set value
+                // always wins. If Chrome isn't provisioned yet the registry
+                // kicks a background download + reconnect (see registry.rs); the
+                // server still spawns now (cache dir set), gaining the executable
+                // path on the reconnect.
+                if crate::mcp::browser::server_uses_puppeteer(cfg.command.as_deref(), &args, &env) {
+                    if let Some(dir) = crate::mcp::browser::cache_dir() {
+                        env.entry("PUPPETEER_CACHE_DIR".to_string())
+                            .or_insert_with(|| dir.to_string_lossy().into_owned());
+                    }
+                    if let Some(chrome) = crate::mcp::browser::chrome_path() {
+                        env.entry("PUPPETEER_EXECUTABLE_PATH".to_string())
+                            .or_insert_with(|| chrome.to_string_lossy().into_owned());
+                    }
+                }
 
                 // On Windows the common MCP launchers (`npx`, `uvx`, `pnpm`,
                 // `yarn`, `bunx`) are `.cmd`/`.bat` shims, which `CreateProcess`

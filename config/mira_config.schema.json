@@ -2311,11 +2311,15 @@
             "signal": {
               "description": "Backend used for Signal voice messages.",
               "type": "string"
+            },
+            "mobile": {
+              "description": "Backend used for the native mobile app's voice playback.",
+              "type": "string"
             }
           }
         },
         "voice_prefs": {
-          "description": "Server-default per-channel voice prefs (response policy + voice id). Each user can override per-channel from their profile. Keys are channel ids (web, tui, telegram, signal, or any plugin-registered channel). Missing channels fall back to 'never' / no voice id.",
+          "description": "Server-default per-channel voice prefs (response policy + voice id). Each user can override per-channel from their profile. Keys are channel ids (web, tui, telegram, signal, mobile, or any plugin-registered channel). Missing channels fall back to 'never' / no voice id.",
           "type": "object",
           "additionalProperties": {
             "type": "object",

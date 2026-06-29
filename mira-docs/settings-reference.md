@@ -531,6 +531,7 @@ _Text-to-Speech subsystem._
 - **`tts.openai_compat.volume`** (number) — Web playback gain. 1.0 = unaltered, 2.0 = doubled.
 - **`tts.request_timeout_secs`** (integer) — Per-request timeout in seconds.
 - **`tts.routing`** (object) — Per-channel backend pinning. Each value is a backend id or 'internal'.
+- **`tts.routing.mobile`** (string) — Backend used for the native mobile app's voice playback.
 - **`tts.routing.signal`** (string) — Backend used for Signal voice messages.
 - **`tts.routing.telegram`** (string) — Backend used for Telegram voice notes.
 - **`tts.routing.tui`** (string) — Backend used for /speak in the terminal UI.

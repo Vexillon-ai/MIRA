@@ -927,6 +927,10 @@ pub fn build_router(
             // configured env. Returns ok/error + latency_ms.
             .route("/api/admin/skills/{id}/probe",
                    post(crate::server::handlers::skills::probe_skill))
+            // One-click install of a coding-agent skill's CLI (Claude Code /
+            // OpenCode) via the managed Node's npm — consent-driven, no restart.
+            .route("/api/admin/skills/{id}/install-cli",
+                   post(crate::server::handlers::skills::install_skill_cli))
             // Re-extract bundled skills onto disk. Body shape (optional):
             // {"force": true, "id": "com.mira.claudecode"}
             .route("/api/admin/skills/refresh-bundled",

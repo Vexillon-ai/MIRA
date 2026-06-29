@@ -98,6 +98,20 @@ a project folder and a brief, let it work, and verify the result before reportin
 back. This lets MIRA orchestrate real coding tasks using purpose-built tools
 while keeping the same spawn-and-report-back model as any other sub-agent.
 
+These adapters need the agent's CLI (`claude` / `opencode`) installed on the
+server. You don't have to install it by hand: on the skill's page, **Install
+CLI** fetches it via MIRA's managed Node (`npm`) into `~/.mira/deps/` — the same
+consent-driven, no-restart flow used for MCP runtimes. The skill works on the
+next task immediately.
+
+MIRA also finds an already-installed CLI on `PATH` **and** in the usual install
+locations (npm-global, scoop, `~/.local/bin`, `~/.opencode/bin`, MIRA's managed
+deps, …) — so a CLI installed for your user is found even when MIRA runs as a
+service with a minimal `PATH` (a common gotcha on Windows). The **Test
+Connection** button reports exactly what's wrong (CLI missing, not logged in,
+etc.). If your CLI lives somewhere unusual, add its folder to the service's
+`PATH`.
+
 ## See also
 
 - [Named agents & workflows](../guides/named-agents-and-workflows.md) — the

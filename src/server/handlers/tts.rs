@@ -14,7 +14,7 @@
 use std::convert::Infallible;
 
 use axum::extract::Query;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
@@ -84,19 +84,42 @@ pub struct SpeakRequest {
     #[serde(default)] pub speed:   Option<f32>,
     #[serde(default)] pub format:  Option<String>,
     #[serde(default)] pub backend: Option<String>,
-    // Optional channel hint (`web` | `tui` | `telegram` | `signal`) so the
-    // router applies per-channel pinning. Defaults to `web`.
+    // Optional channel hint (`web` | `tui` | `telegram` | `signal` | `mobile`)
+    // so the router applies per-channel pinning + voice. When omitted, the
+    // channel is inferred from the `X-Mira-Client` header (so the native mobile
+    // app gets its own routing/voice without sending a body field); absent →
+    // `web`.
     #[serde(default)] pub channel: Option<String>,
+}
+
+// Resolve the effective channel id for a TTS request: an explicit body
+// `channel` wins; otherwise mirror the chat handler and read `X-Mira-Client`
+// (any non-"web" native client → `mobile`); default `web`.
+fn effective_channel(req_channel: Option<&str>, headers: &HeaderMap) -> String {
+    if let Some(c) = req_channel.map(str::trim).filter(|s| !s.is_empty()) {
+        return c.to_ascii_lowercase();
+    }
+    match headers
+        .get("x-mira-client")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        None | Some("") | Some("web") => "web".to_string(),
+        Some(_) => "mobile".to_string(),
+    }
 }
 
 pub async fn speak(
     AuthUser(user):   AuthUser,
     Extension(svc):   Extension<TtsService>,
     Extension(auth):  Extension<Arc<LocalAuthService>>,
+    headers:          HeaderMap,
     Json(req):        Json<SpeakRequest>,
 ) -> Response {
     let fmt     = req.format.as_deref().and_then(OutputFormat::parse);
-    let channel = req.channel.as_deref().unwrap_or("web");
+    let channel = effective_channel(req.channel.as_deref(), &headers);
+    let channel = channel.as_str();
     let voice   = resolve_request_voice(&svc, auth.as_ref(), &user.id, channel, req.voice.as_deref());
     let buf = match svc.speak(
         &req.text,
@@ -145,10 +168,12 @@ pub async fn speak_stream(
     AuthUser(user):   AuthUser,
     Extension(svc):   Extension<TtsService>,
     Extension(auth):  Extension<Arc<LocalAuthService>>,
+    headers:          HeaderMap,
     Json(req):        Json<SpeakRequest>,
 ) -> Response {
     let fmt     = req.format.as_deref().and_then(OutputFormat::parse);
-    let channel = req.channel.as_deref().unwrap_or("web");
+    let channel = effective_channel(req.channel.as_deref(), &headers);
+    let channel = channel.as_str();
     let voice   = resolve_request_voice(&svc, auth.as_ref(), &user.id, channel, req.voice.as_deref());
     let stream = match svc.speak_stream(
         &req.text,

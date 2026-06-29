@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import {
   Boxes, ShieldCheck, ShieldAlert, FileSignature,
-  Upload, Trash2, AlertTriangle, X, KeyRound, RefreshCw, Plug,
+  Upload, Trash2, AlertTriangle, X, KeyRound, RefreshCw, Plug, Download,
 } from 'lucide-react'
 import { skillsApi, type SkillSummary, type SkillPermissions, type PreviewResponse } from '@/api/skills'
 import { providersApi } from '@/api/providers'
@@ -692,6 +692,27 @@ function SecretsSection({ skill }: { skill: SkillSummary }) {
     },
   })
 
+  // One-click install of the skill's CLI (Claude Code / OpenCode) via the
+  // managed Node's npm — same consent model as the MCP runtimes. The adapter
+  // resolves the CLI lazily at spawn, so it works immediately (no restart);
+  // we re-run the probe on success to confirm.
+  const installCli = useMutation({
+    mutationFn: () => skillsApi.installCli(skill.id),
+    onSuccess: (r) => {
+      if (r.ok) {
+        toast.success('CLI installed — verifying…')
+        probe.mutate()
+      } else {
+        toast.error(`Install failed: ${r.error ?? 'unknown error'}`, { duration: 9000 })
+      }
+    },
+    onError: (e: unknown) => {
+      const msg = (e as { response?: { data?: { error?: string } } }).response?.data?.error
+        ?? (e as Error).message
+      toast.error(`Install failed: ${msg}`, { duration: 9000 })
+    },
+  })
+
   // Probe button only shown for skills that have a probe wired
   // server-side. com.mira.claudecode runs `claude --print ping`;
   // com.mira.opencode runs `opencode run --format json "ping"`.
@@ -707,7 +728,19 @@ function SecretsSection({ skill }: { skill: SkillSummary }) {
           Secrets <span style={{ opacity: 0.6, fontWeight: 400 }}>(encrypted at rest)</span>
         </div>
         <ScopeTabs scope={scope} onChange={setScope} hasUser={!!me?.id} />
-        <div style={{ marginLeft: 'auto' }}>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          {hasProbe && (
+            <button
+              type="button"
+              className={styles.installBtnSecondary}
+              disabled={installCli.isPending}
+              onClick={() => installCli.mutate()}
+              style={{ padding: '4px 10px', fontSize: 12 }}
+              title="Install the required CLI (Claude Code / OpenCode) via MIRA's managed Node — no restart needed"
+            >
+              <Download size={13} /> {installCli.isPending ? 'Installing…' : 'Install CLI'}
+            </button>
+          )}
           {hasProbe && (
             <button
               type="button"

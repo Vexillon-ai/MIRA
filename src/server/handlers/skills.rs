@@ -880,23 +880,56 @@ pub async fn probe_skill(
     }
 }
 
+/// `POST /api/admin/skills/{id}/install-cli` — one-click install of the CLI a
+/// coding-agent skill needs (Claude Code, OpenCode), via the MIRA-managed Node's
+/// npm into `~/.mira/deps/`. Same consent model as the managed MCP runtimes.
+/// The skill adapter resolves the CLI lazily at spawn, so the skill becomes
+/// usable immediately — no restart. Idempotent (no-op if already installed).
+pub async fn install_skill_cli(
+    AdminUser(admin): AdminUser,
+    Path(skill_id):   Path<String>,
+) -> impl IntoResponse {
+    let (pkg, bin) = match skill_id.as_str() {
+        "com.mira.claudecode" => ("@anthropic-ai/claude-code", "claude"),
+        "com.mira.opencode"   => ("opencode-ai", "opencode"),
+        _ => return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(error(&format!("skill {skill_id:?} has no installable CLI"))),
+        ).into_response(),
+    };
+    info!("skill CLI install via API: skill={skill_id} pkg={pkg} (admin={:?})", admin.id);
+    match crate::install::deps::ensure_cli_via_npm(pkg, bin).await {
+        Ok(path) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "skill_id": skill_id, "path": path.to_string_lossy() })),
+        ).into_response(),
+        Err(e) => {
+            warn!("skill CLI install failed for {skill_id} ({pkg}): {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "skill_id": skill_id, "error": e })),
+            ).into_response()
+        }
+    }
+}
+
 /// Run `claude --print "ping"` with whatever env the vault returns.
 /// Bounded at 10s — long enough for a real network round-trip,
 /// short enough that a wedged claude binary doesn't hang the
 /// admin UI.
 async fn probe_claude_code(env: std::collections::HashMap<String, String>) -> ProbeResult {
     let start = std::time::Instant::now();
-    if which_on_path("claude").is_none() {
+    let Some(binary) = crate::install::deps::resolve_external_cli("claude") else {
         return ProbeResult {
             ok: false,
-            message: "`claude` CLI not on the server's PATH — install it first".into(),
+            message: "`claude` CLI not found on the server's PATH or the common install dirs (npm-global, scoop, ~/.local/bin). Install it on the server, or add its folder to the service PATH.".into(),
             latency_ms: start.elapsed().as_millis(),
         };
-    }
+    };
     // Use stream-json so the same NDJSON parser shape claude_code.rs
     // already understands surfaces auth/login errors as structured
     // `result` events; pick_error_message below knows that format.
-    let mut cmd = tokio::process::Command::new("claude");
+    let mut cmd = crate::install::deps::external_cli_command(&binary);
     cmd.arg("--print").arg("--output-format").arg("stream-json").arg("--verbose").arg("ping");
     cmd.arg("--bare").arg("--dangerously-skip-permissions");
     for (k, v) in env { cmd.env(k, v); }
@@ -943,15 +976,15 @@ async fn probe_claude_code(env: std::collections::HashMap<String, String>) -> Pr
 /// at 15s — model providers can be slow on cold-cache requests.
 async fn probe_opencode(mut env: std::collections::HashMap<String, String>) -> ProbeResult {
     let start = std::time::Instant::now();
-    if which_on_path("opencode").is_none() {
+    let Some(binary) = crate::install::deps::resolve_external_cli("opencode") else {
         return ProbeResult {
             ok: false,
-            message: "`opencode` CLI not on the server's PATH — install it first".into(),
+            message: "`opencode` CLI not found on the server's PATH or the common install dirs (npm-global, scoop, ~/.local/bin, ~/.opencode/bin). Install it on the server, or add its folder to the service PATH.".into(),
             latency_ms: start.elapsed().as_millis(),
         };
-    }
+    };
     let model_override = env.remove("OPENCODE_MODEL");
-    let mut cmd = tokio::process::Command::new("opencode");
+    let mut cmd = crate::install::deps::external_cli_command(&binary);
     cmd.arg("run").arg("--format").arg("json").arg("--dangerously-skip-permissions");
     if let Some(m) = model_override.as_deref() { cmd.arg("--model").arg(m); }
     cmd.arg("ping");
@@ -1054,18 +1087,6 @@ fn pick_error_message(stdout: &str, stderr: &str) -> Option<String> {
     // Pass 3: stdout last non-empty line.
     if let Some(line) = stdout.lines().rev().find(|l| !l.trim().is_empty()) {
         return Some(line.trim().to_string());
-    }
-    None
-}
-
-/// Tiny `which`-style helper; mirrors the one in gateway/builder.rs but
-/// kept local so the handler doesn't reach into another module's
-/// private surface.
-fn which_on_path(bin: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(bin);
-        if candidate.is_file() { return Some(candidate); }
     }
     None
 }

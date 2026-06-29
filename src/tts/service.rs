@@ -263,8 +263,8 @@ impl TtsService {
     pub fn cache(&self) -> Option<Arc<TtsCache>> { self.snapshot().cache.clone() }
 
     // Per-channel routing override. Returns the configured backend id for a
-    // channel (`"web"`, `"tui"`, `"telegram"`, `"signal"`) or an empty
-    // string when no override is set. Channel adapters use this to decide
+    // channel (`"web"`, `"tui"`, `"telegram"`, `"signal"`, `"mobile"`) or an
+    // empty string when no override is set. Channel adapters use this to decide
     // whether to attempt outbound voice synthesis at all.
     pub fn routing_for(&self, channel: &str) -> String {
         let snap = self.snapshot();
@@ -274,6 +274,7 @@ impl TtsService {
             "tui"      => r.tui.clone(),
             "telegram" => r.telegram.clone(),
             "signal"   => r.signal.clone(),
+            "mobile"   => r.mobile.clone(),
             _          => String::new(),
         }
     }
@@ -312,6 +313,7 @@ impl TtsService {
                 "tui"      => &r.tui,
                 "telegram" => &r.telegram,
                 "signal"   => &r.signal,
+                "mobile"   => &r.mobile,
                 _          => "",
             };
             if !route.is_empty() {
