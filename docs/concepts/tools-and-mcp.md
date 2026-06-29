@@ -17,8 +17,12 @@ how MCP lets you add more.
 Every MIRA instance ships with a core set of tools the agent can reach for:
 
 - **Web search & fetch** — search the web, and fetch or preview a URL.
-- **Sandboxed code execution** — run code in an isolated environment to compute,
-  transform data, or test an idea.
+- **Sandboxed code execution** — run short Python in an isolated environment to
+  compute, transform data, or test an idea. Works on Linux, macOS, and Windows
+  (a bundled WASM runtime auto-provisions on first use). With the optional
+  **scientific Python** backend enabled (`sandbox.pyodide.enabled`), scripts can
+  `import numpy`, `pandas`, `matplotlib`, `scipy`, and friends — and a chart
+  saved to `/tmp/output/` renders inline in chat.
 - **Calendar** — create, list, update, and delete events.
 - **PDF extraction** — pull text out of a PDF you share.
 - **Summarise & recall** — condense a long conversation, and recall earlier

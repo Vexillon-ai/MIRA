@@ -367,6 +367,12 @@ _nginx reverse proxy configuration. When enabled, MIRA generates an nginx.conf, 
 
 _Tier 4 sandboxed code execution. Disabled by default. Requires a prebaked rootfs (see `mira sandbox install python`)._
 
+- **`sandbox.backend`** (string; one of: ``, `auto`, `namespace`, `wasm`, `pyodide`) — Code-execution backend. '' / 'auto' uses Linux namespaces+seccomp when a rootfs is installed, otherwise the cross-platform WASM/WASI backend. 'namespace' forces the Linux backend; 'wasm' forces WASM (works on Windows/macOS too; the WASI Python auto-provisions on first use); 'pyodide' makes the scientific Python (Pyodide-on-Node) backend the primary for all calls.
+- **`sandbox.wasm`** (object) — WASM/WASI sandbox settings (cross-platform code_run).
+- **`sandbox.wasm.python_path`** (string) — Override path for the WASI CPython module. Empty = use the managed copy under <data_dir>/deps/wasm/.
+- **`sandbox.pyodide`** (object) — Pyodide-on-Node scientific Python backend (numpy/pandas/matplotlib). When enabled, calls whose code imports a scientific package route here; plain scripts stay on the primary namespace/WASM backend.
+- **`sandbox.pyodide.enabled`** (boolean) — Enable the Pyodide scientific backend. Off by default. First enable triggers a background download of the Pyodide distribution (~6 MB) plus the pre-warm wheels; available after the next restart.
+- **`sandbox.pyodide.prewarm`** (array) — Packages to pre-warm into the on-disk wheel cache at provision time (offline-fast first run). Empty = the default trio: numpy, pandas, matplotlib.
 - **`sandbox.code_run`** (object) — Settings for the `code_run` agent tool.
 - **`sandbox.code_run.allowed_languages`** (array) — Languages the tool will accept. Iteration B ships `python` only.
 - **`sandbox.code_run.enabled`** (boolean) — Enable the `code_run` tool. Both this and `sandbox.enabled` must be true.

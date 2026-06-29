@@ -2365,6 +2365,58 @@ pub struct SandboxConfig {
     // default location under `<data_dir>/sandbox/rootfs/...`.
     #[serde(default)]
     pub python: PythonRootfsConfig,
+
+    // Code-execution backend: "" / "auto" (namespace on Linux when a rootfs is
+    // installed, else the cross-platform WASM backend), "namespace" (Linux
+    // only), or "wasm" (WASM/WASI everywhere). 0.284.x+.
+    #[serde(default)]
+    pub backend: String,
+
+    // WASM/WASI backend (cross-platform code_run).
+    #[serde(default)]
+    pub wasm: WasmRootfsConfig,
+
+    // Pyodide-on-Node backend — scientific Python (numpy/pandas/matplotlib).
+    // 0.286.x+.
+    #[serde(default)]
+    pub pyodide: PyodideConfig,
+}
+
+// WASM/WASI sandbox settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WasmRootfsConfig {
+    // Optional override for the WASI CPython module path. Empty = use the
+    // managed copy under `<data_dir>/deps/wasm/python-<ver>.wasm`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub python_path: String,
+}
+
+// Pyodide-on-Node sandbox settings. Pyodide is CPython-on-emscripten run by
+// the Node runtime MIRA already provisions for MCP; it brings the full
+// scientific stack (numpy/pandas/matplotlib) with on-demand wheel loading —
+// things the pure-WASI backend can't do. Python still runs in wasm (V8): no
+// syscalls, no host FS except a single granted scratch dir, no network from
+// user code. The Node *host* process is privileged, so this is a weaker
+// isolation boundary than wasmtime — fine for semi-trusted code.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PyodideConfig {
+    // Enable the Pyodide backend. Off by default; auto-selected by the
+    // "auto" backend router when a script imports a scientific package or
+    // `code_run(packages=...)` is given and Pyodide is provisioned.
+    #[serde(default)]
+    pub enabled: bool,
+
+    // Packages to pre-warm into the local wheel cache at provision time so
+    // the first scientific run is offline-fast. Empty = use the built-in
+    // default trio (numpy, pandas, matplotlib).
+    #[serde(default)]
+    pub prewarm: Vec<String>,
+}
+
+impl Default for PyodideConfig {
+    fn default() -> Self {
+        Self { enabled: false, prewarm: Vec::new() }
+    }
 }
 
 // Wire format for `[sandbox] seccomp_mode`. Mirrors `sandbox::SeccompMode`

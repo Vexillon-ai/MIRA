@@ -2,7 +2,7 @@
 name = "mira"
 # First public release: 0.272.0 = "public beta 1" (tag v0.272.0; GitHub release
 # marked pre-release). Post-beta fixes continue from 0.272.1.
-version = "0.284.0"
+version = "0.286.0"
 edition = "2024"
 description = "Multi-tasking Intelligent Responsive Assistant - A personal AI agent framework"
 authors = ["Tarek El Diab"]
@@ -263,6 +263,13 @@ ogg  = "0.9"
 # metrics, `disk` = free-space; everything else (network/components/users) off.
 sysinfo = { version = "0.36", default-features = false, features = ["system", "disk"] }
 
+# Cross-platform code-execution sandbox (WASM/WASI via Wasmtime). Optional,
+# behind the `sandbox-wasm` feature (heavy compile). Brings secure `code_run`
+# to Windows/macOS with one capability-based model. See
+# design-docs/just-in-time-tools.md + memory project_code_execution_sandbox.
+wasmtime = { version = "27", optional = true, default-features = false, features = ["cranelift", "runtime"] }
+wasmtime-wasi = { version = "27", optional = true }
+
 # Sandbox (Phase 7a-4) — seccomp-bpf filter compiler. Only pulled in on Linux
 # when the `sandbox-linux` feature is on; other platforms fall back to the
 # stub backend that returns SandboxError::Unsupported.
@@ -277,10 +284,14 @@ seccompiler = { version = "0.5", optional = true }
 windows-service = "0.8"
 
 [features]
-default = ["sandbox-linux"]
+default = ["sandbox-linux", "sandbox-wasm"]
 # Level A sandbox (Linux namespaces + seccomp). Default-on on Linux; no-op
 # (stub impl) on non-Linux targets even with the flag set.
 sandbox-linux = ["dep:seccompiler"]
+# Cross-platform sandbox (WASM/WASI via Wasmtime). Off by default (heavy
+# compile + WASI-Python provisioning still landing); becomes the default
+# code_run backend on Windows/macOS once stable. Enable with `--features sandbox-wasm`.
+sandbox-wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
 # K1 (Q2 #10) — native in-process Kokoro TTS backend via the kokoroxide
 # crate (ort ONNX runtime, auto-downloaded native lib; espeak-ng for
 # G2P — same runtime dep MIRA's eSpeak fallback already needs).

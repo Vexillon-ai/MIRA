@@ -2334,6 +2334,28 @@ fn build_tool_registry(
         use crate::sandbox::{default_backend, rootfs::RootfsManager, SeccompMode};
         use crate::config::SeccompModeConfig;
 
+        let seccomp_mode = match config.sandbox.seccomp_mode {
+            SeccompModeConfig::Denylist  => SeccompMode::Denylist,
+            SeccompModeConfig::Allowlist => SeccompMode::Allowlist,
+        };
+        let artifacts = match crate::artifacts::ArtifactStore::new(data_dir) {
+            Ok(s)  => Arc::new(s),
+            Err(e) => {
+                warn!("code_run not registered — cannot init artifact store at {}/artifacts: {e}", data_dir.display());
+                return registry;
+            }
+        };
+
+        // Backend selection: "namespace" (Linux seccomp/namespaces), "wasm"
+        // (cross-platform WASM/WASI), or "pyodide" (scientific Python on Node).
+        // "auto"/"" prefers namespace when its rootfs is installed (best
+        // fidelity on Linux), else WASM. Independently, the Pyodide backend is
+        // attached as a *secondary* "scientific" route on top of the primary
+        // namespace/WASM backend when enabled — so `import numpy` works while
+        // plain scripts stay on the lighter primary backend.
+        let want = config.sandbox.backend.trim().to_ascii_lowercase();
+
+        // Resolve the Linux namespace rootfs (if any).
         let manager = RootfsManager::new(data_dir);
         let configured = config.sandbox.python.rootfs_path.trim();
         let pivot = if configured.is_empty() {
@@ -2341,42 +2363,122 @@ fn build_tool_registry(
         } else {
             std::path::PathBuf::from(crate::config::expand_path(configured))
         };
+        let namespace_ok = pivot.is_dir() && default_backend().supported();
 
-        if !pivot.is_dir() {
-            warn!(
-                "code_run not registered — rootfs missing at {}. \
-                 Run `mira sandbox install python` to provision it.",
-                pivot.display()
-            );
-        } else {
-            let seccomp_mode = match config.sandbox.seccomp_mode {
-                SeccompModeConfig::Denylist  => SeccompMode::Denylist,
-                SeccompModeConfig::Allowlist => SeccompMode::Allowlist,
-            };
-            let backend: Arc<dyn crate::sandbox::CodeSandbox> = Arc::from(default_backend());
-            let artifacts = match crate::artifacts::ArtifactStore::new(data_dir) {
-                Ok(s)  => Arc::new(s),
-                Err(e) => {
-                    warn!(
-                        "code_run not registered — cannot init artifact store at {}/artifacts: {e}",
-                        data_dir.display(),
-                    );
-                    return registry;
+        // Optional Pyodide scientific backend (numpy/pandas/matplotlib). Enabled
+        // via [sandbox.pyodide] enabled=true, or implied when backend="pyodide".
+        // Feature-gated; None on builds without `sandbox-wasm`.
+        #[cfg(feature = "sandbox-wasm")]
+        let pyodide_backend: Option<Arc<dyn crate::sandbox::CodeSandbox>> = {
+            let pyo_enabled = config.sandbox.pyodide.enabled || want == "pyodide";
+            if pyo_enabled {
+                if crate::sandbox::pyodide::is_provisioned(data_dir) {
+                    info!("code_run: Pyodide scientific backend available (numpy/pandas/matplotlib)");
+                    Some(Arc::new(crate::sandbox::pyodide::PyodideSandbox::new(data_dir)))
+                } else {
+                    // Auto-provision (download dist + pre-warm) in the background;
+                    // available after the next restart.
+                    let dd = data_dir.to_path_buf();
+                    let prewarm = config.sandbox.pyodide.prewarm.clone();
+                    tokio::spawn(async move {
+                        match crate::sandbox::pyodide::ensure_pyodide(&dd, &prewarm).await {
+                            Ok(()) => info!("pyodide ready — scientific code_run available after restart"),
+                            Err(e) => warn!("pyodide provisioning failed: {e}"),
+                        }
+                    });
+                    warn!("code_run: Pyodide downloading in the background; scientific Python available after restart");
+                    None
                 }
-            };
-            registry.register(CodeRunTool::new(
-                backend,
-                pivot.clone(),
-                config.sandbox.code_run.clone(),
-                seccomp_mode,
-                artifacts,
-            ));
-            info!(
-                "Tool registered: code_run (admin-only, rootfs={}, seccomp={:?})",
-                pivot.display(),
-                config.sandbox.seccomp_mode,
-            );
+            } else {
+                None
+            }
+        };
+        #[cfg(not(feature = "sandbox-wasm"))]
+        let pyodide_backend: Option<Arc<dyn crate::sandbox::CodeSandbox>> = None;
+
+        let use_namespace = match want.as_str() {
+            "namespace"        => true,
+            "wasm" | "pyodide" => false,
+            _                  => namespace_ok, // auto
+        };
+
+        #[allow(unused_mut, unused_assignments)]
+        let mut registered = false;
+
+        // Explicit "pyodide" primary backend: every call runs in Pyodide.
+        #[cfg(feature = "sandbox-wasm")]
+        if !registered && want == "pyodide" {
+            if let Some(sb) = pyodide_backend.clone() {
+                registry.register(CodeRunTool::new(
+                    sb, pivot.clone(), config.sandbox.code_run.clone(), seccomp_mode, artifacts.clone(),
+                ));
+                info!("Tool registered: code_run (pyodide primary — scientific Python)");
+                registered = true;
+            } else {
+                warn!("code_run (pyodide) requested but not yet provisioned — downloading; available after restart");
+            }
         }
+
+        if !registered && use_namespace {
+            if namespace_ok {
+                let backend: Arc<dyn crate::sandbox::CodeSandbox> = Arc::from(default_backend());
+                registry.register(CodeRunTool::new(
+                    backend, pivot.clone(), config.sandbox.code_run.clone(), seccomp_mode, artifacts.clone(),
+                ).with_scientific(pyodide_backend.clone()));
+                info!("Tool registered: code_run (namespace, rootfs={}, seccomp={:?}{})",
+                      pivot.display(), config.sandbox.seccomp_mode,
+                      if pyodide_backend.is_some() { ", +pyodide scientific" } else { "" });
+                registered = true;
+            } else {
+                warn!("code_run (namespace) requested but rootfs missing at {} — run `mira sandbox install python`", pivot.display());
+            }
+        }
+
+        // Cross-platform WASM backend (Windows/macOS, or when selected/forced).
+        #[cfg(feature = "sandbox-wasm")]
+        if !registered {
+            use crate::sandbox::wasm::{managed_python_wasm_path, WasmSandbox};
+            let wcfg = config.sandbox.wasm.python_path.trim();
+            let wpath = if wcfg.is_empty() {
+                managed_python_wasm_path(data_dir)
+            } else {
+                std::path::PathBuf::from(crate::config::expand_path(wcfg))
+            };
+            if wpath.is_file() {
+                let backend: Arc<dyn crate::sandbox::CodeSandbox> = Arc::new(WasmSandbox::new(Some(wpath.clone())));
+                if backend.supported() {
+                    // `rootfs_path` is passed through to limits.rootfs, which the
+                    // WASM backend ignores (it uses its own scratch preopen).
+                    registry.register(CodeRunTool::new(
+                        backend, wpath.clone(), config.sandbox.code_run.clone(), seccomp_mode, artifacts.clone(),
+                    ).with_scientific(pyodide_backend.clone()));
+                    info!("Tool registered: code_run (wasm, module={}{})", wpath.display(),
+                          if pyodide_backend.is_some() { ", +pyodide scientific" } else { "" });
+                    registered = true;
+                } else {
+                    warn!("code_run (wasm) — module at {} failed to compile", wpath.display());
+                }
+            } else {
+                // Auto-provision the WASI Python in the background so code_run
+                // is available after the next restart.
+                let dd = data_dir.to_path_buf();
+                tokio::spawn(async move {
+                    match crate::sandbox::wasm::ensure_python_wasm(&dd).await {
+                        Ok(p)  => info!("wasm python ready at {} — code_run available after restart", p.display()),
+                        Err(e) => warn!("wasm python provisioning failed: {e}"),
+                    }
+                });
+                warn!("code_run (wasm) — Python runtime downloading in the background; available after restart");
+            }
+        }
+
+        #[cfg(not(feature = "sandbox-wasm"))]
+        if !registered && !use_namespace {
+            warn!("code_run not registered — 'wasm'/'pyodide' backend requested but this build lacks the sandbox-wasm feature");
+        }
+
+        let _ = registered;
+        let _ = &pyodide_backend;
     }
 
     // ── Skills (slice A3.5 + A5 from design-docs/skills-and-agents.md) ──────────

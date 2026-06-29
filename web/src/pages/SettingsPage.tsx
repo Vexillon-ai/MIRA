@@ -176,13 +176,16 @@ interface Config {
   sandbox?: {
     enabled?:      boolean
     seccomp_mode?: 'denylist' | 'allowlist'
+    backend?:      '' | 'auto' | 'namespace' | 'wasm' | 'pyodide'
     code_run?: {
       enabled?:                boolean
       allowed_languages?:      string[]
       max_wall_clock_seconds?: number
       max_memory_mb?:          number
     }
-    python?: { rootfs_path?: string }
+    python?:  { rootfs_path?: string }
+    wasm?:    { python_path?: string }
+    pyodide?: { enabled?: boolean; prewarm?: string[] }
   }
   tts?: {
     enabled?:               boolean
@@ -2122,12 +2125,24 @@ function SandboxTab({
     <div className={styles.tabBody}>
       <Section title="Tier 4 sandbox">
         <p className={styles.sectionDesc}>
-          Isolated execution backend for the <code>code_run</code> tool. Linux-only — uses user / mount / pid namespaces, a pivoted rootfs and a seccomp-bpf filter. Disabled by default; install a rootfs first with <code>mira sandbox install python</code>.
+          Isolated execution backend for the <code>code_run</code> tool. Works on Linux, macOS and Windows: the cross-platform <strong>WASM/WASI</strong> backend (Wasmtime + a bundled WASI CPython) auto-provisions on first use, while Linux can use the higher-fidelity <strong>namespace</strong> backend (user / mount / pid namespaces + pivoted rootfs + seccomp-bpf) when a rootfs is installed via <code>mira sandbox install python</code>. Disabled by default.
         </p>
         <Field label="Enabled" desc="Master switch. When off, no Tier 4 tool is registered regardless of per-tool toggles below.">
           <Toggle value={sandboxOn} onChange={(v) => set('sandbox.enabled', v)} />
         </Field>
-        <Field label="Seccomp filter" desc="Which syscall filter the backend installs per call. 'Allowlist' is stricter — only the syscalls a Python interpreter needs are permitted; 'denylist' blocks the known escape primitives only.">
+        <Field label="Backend" desc="Which isolation backend runs code. 'Auto' uses Linux namespaces when a rootfs is installed, otherwise the cross-platform WASM backend. Force 'WASM' for the portable runtime, or 'Pyodide' to make scientific Python the primary for every call.">
+          <SelectInput
+            value={str('sandbox.backend', 'auto')}
+            onChange={(v) => set('sandbox.backend', v)}
+            options={[
+              { value: 'auto',      label: 'Auto (namespace on Linux, else WASM)' },
+              { value: 'namespace', label: 'Namespace (Linux only, needs rootfs)' },
+              { value: 'wasm',      label: 'WASM/WASI (cross-platform)' },
+              { value: 'pyodide',   label: 'Pyodide (scientific Python, primary)' },
+            ]}
+          />
+        </Field>
+        <Field label="Seccomp filter" desc="Which syscall filter the namespace backend installs per call. 'Allowlist' is stricter — only the syscalls a Python interpreter needs are permitted; 'denylist' blocks the known escape primitives only. (Namespace backend only; ignored by WASM/Pyodide.)">
           <SelectInput
             value={str('sandbox.seccomp_mode', 'allowlist')}
             onChange={(v) => set('sandbox.seccomp_mode', v)}
@@ -2185,6 +2200,23 @@ function SandboxTab({
             value={str('sandbox.python.rootfs_path')}
             onChange={(v) => set('sandbox.python.rootfs_path', v)}
             placeholder="leave blank for default"
+            mono
+          />
+        </Field>
+      </Section>
+
+      <Section title="Scientific Python (Pyodide)">
+        <p className={styles.sectionDesc}>
+          Adds <strong>numpy, pandas, matplotlib, scipy</strong> and friends via Pyodide-on-Node, with on-demand wheel loading. When enabled, scripts that <code>import</code> a scientific package route to Pyodide automatically while plain scripts stay on the lighter backend above; a chart saved to <code>/tmp/output/</code> renders inline in chat. First enable downloads the Pyodide distribution (~6&nbsp;MB) plus the pre-warm wheels in the background — available after the next restart. Note: user code runs in WebAssembly but the Node host process is privileged, so this is a weaker isolation boundary than WASM/WASI — intended for semi-trusted code.
+        </p>
+        <Field label="Enabled" desc="Turn on the scientific Python backend. Off by default.">
+          <Toggle value={bool('sandbox.pyodide.enabled', false)} onChange={(v) => set('sandbox.pyodide.enabled', v)} />
+        </Field>
+        <Field label="Pre-warm packages" desc="Comma-separated packages to download into the local wheel cache at provision time so the first scientific run is offline-fast. Leave blank for the default trio (numpy, pandas, matplotlib).">
+          <TextInput
+            value={arrVal('sandbox.pyodide.prewarm').join(', ')}
+            onChange={(v) => setArr('sandbox.pyodide.prewarm', v)}
+            placeholder="numpy, pandas, matplotlib"
             mono
           />
         </Field>

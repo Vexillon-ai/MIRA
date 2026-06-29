@@ -1955,6 +1955,38 @@
               "type": "string"
             }
           }
+        },
+        "backend": {
+          "description": "Code-execution backend: '' or 'auto' (namespace on Linux when a rootfs is installed, else the cross-platform WASM backend), 'namespace' (Linux seccomp/namespaces only), 'wasm' (WASM/WASI on all platforms incl. Windows/macOS), or 'pyodide' (scientific Python on Node as the primary backend).",
+          "type": "string",
+          "enum": ["", "auto", "namespace", "wasm", "pyodide"]
+        },
+        "wasm": {
+          "description": "WASM/WASI sandbox settings (cross-platform code_run).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "python_path": {
+              "description": "Override path for the WASI CPython module. Empty = use the managed copy under <data_dir>/deps/wasm/.",
+              "type": "string"
+            }
+          }
+        },
+        "pyodide": {
+          "description": "Pyodide-on-Node scientific Python backend (numpy/pandas/matplotlib). When enabled, calls whose code imports a scientific package route here; plain scripts stay on the primary namespace/WASM backend.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable the Pyodide scientific backend. Off by default. First enable triggers a background download of the Pyodide distribution (~6 MB) plus the pre-warm wheels; available after the next restart.",
+              "type": "boolean"
+            },
+            "prewarm": {
+              "description": "Packages to pre-warm into the on-disk wheel cache at provision time (offline-fast first run). Empty = the default trio: numpy, pandas, matplotlib.",
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
         }
       }
     },

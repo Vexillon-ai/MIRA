@@ -41,6 +41,16 @@ pub mod linux;
 #[cfg(any(not(target_os = "linux"), not(feature = "sandbox-linux")))]
 pub mod stub;
 
+// Cross-platform WASM/WASI backend (Linux/macOS/Windows). Built only with the
+// `sandbox-wasm` feature.
+#[cfg(feature = "sandbox-wasm")]
+pub mod wasm;
+
+// Scientific-Python backend (Pyodide-on-Node). Shares the `sandbox-wasm`
+// feature + the deps layout; full numpy/pandas/matplotlib stack.
+#[cfg(feature = "sandbox-wasm")]
+pub mod pyodide;
+
 pub use error::SandboxError;
 pub use language::Language;
 pub use limits::{ResourceLimits, SeccompMode};

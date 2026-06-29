@@ -30,7 +30,7 @@ An honest list so MIRA can set expectations rather than over-promise.
 
 ## Platform
 - On **WSL2 (NAT mode)**, MIRA can't reach the Windows host by its LAN IP — only via the `windows-host` alias (set up by `sudo mira wsl-host-alias-install`) or by switching WSL to mirrored networking. MIRA detects misrouted Windows-host URLs and offers a one-click fix, but the alias setup itself needs root (one time).
-- Sandboxing for code execution is Linux-only (a no-op stub elsewhere); a pre-baked rootfs is not yet shipped, so sandboxed code can still see the host filesystem.
+- Code execution (`code_run`) is sandboxed on **all platforms** via the WASM/WASI backend (Wasmtime + bundled WASI CPython); the Linux namespace+seccomp backend is the higher-fidelity default where a rootfs is installed. Caveats: the **scientific Python** backend (Pyodide-on-Node, opt-in via `sandbox.pyodide.enabled`) runs the user code in wasm but the **Node host process is privileged** — a weaker boundary than wasmtime, so it's for semi-trusted code. The Linux namespace backend without a provisioned rootfs still shares the host filesystem (run `mira sandbox install python`, or use the WASM backend, for full FS isolation).
 - Native plugin **egress filtering** needs the privileged helper (one-time `sudo mira helper-install`). Without it, a native plugin that declares an egress allowlist runs with **no network at all** (fail-closed), not filtered. The container-tier fallback proxy is **HTTP/S-only** — non-HTTP egress through it is denied.
 - Email webhook ingest does not verify per-provider HMAC signatures (the path secret is the authenticator); Mailgun multipart routes are unsupported (use the URL-encoded forward route).
 

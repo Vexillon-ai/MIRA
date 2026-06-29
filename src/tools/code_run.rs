@@ -75,8 +75,104 @@ const MAX_STDIN_BYTES: usize = 64 * 1024;
 // short enough that we don't risk PATH_MAX issues at the kernel boundary.
 const MAX_WORKING_DIR_LEN: usize = 256;
 
+// Packages that, when imported, route a call to the scientific backend
+// (Pyodide). They need native/binary wheels Pyodide ships but the pure-WASI /
+// namespace-stdlib backends can't import, so the default backend would fail.
+// Matched as whole words against import targets — a cheap heuristic, not a real
+// parser. Kept here (always-compiled) so routing works regardless of the
+// `sandbox-wasm` feature gate on the pyodide module.
+//
+// `import X` exposes the *import* name (e.g. `sklearn`, `cv2`, `PIL`, `skimage`,
+// `bs4`), not the pip name — list both where they differ.
+const SCIENTIFIC_PACKAGES: &[&str] = &[
+    "numpy", "pandas", "matplotlib", "scipy",
+    "sklearn", "scikit-learn", "skimage", "scikit-image",
+    "sympy", "statsmodels", "networkx",
+    "PIL", "pillow", "cv2", "opencv-python", "opencv",
+    "shapely", "geopandas", "lxml",
+    "seaborn", "plotly", "bokeh", "altair",
+    "numba", "xarray", "h5py",
+];
+
+// Substrings that, anywhere in the code, signal Pyodide is needed regardless of
+// the import shape: `micropip` only exists inside Pyodide, and a `savefig` call
+// implies matplotlib output even if the import was dynamic.
+const SCIENTIFIC_STRONG_SIGNALS: &[&str] = &["micropip", ".savefig("];
+
+// Pull the candidate module token(s) out of a single source line that performs
+// an import — static (`import x`, `import x.y as z`, `from x.y import z`) or
+// dynamic (`importlib.import_module("x")`, `__import__('x')`). Returns the names
+// lowercased-as-written for whole-word comparison. Cheap and forgiving: it errs
+// toward yielding a token rather than missing one.
+fn import_targets(line: &str) -> Vec<String> {
+    let t = line.trim_start();
+    let mut out = Vec::new();
+
+    // Dynamic imports: grab whatever's inside the first quoted string.
+    if t.contains("import_module(") || t.contains("__import__(") {
+        if let Some(name) = quoted_arg(t) {
+            // For "a.b.c" the top package is what gets resolved/installed.
+            out.push(name.split('.').next().unwrap_or(&name).to_string());
+        }
+    }
+
+    // Static imports.
+    let rest = if let Some(r) = t.strip_prefix("from ") {
+        // `from pkg.sub import x` → first token before whitespace.
+        r.split_whitespace().next().map(str::to_string)
+    } else if let Some(r) = t.strip_prefix("import ") {
+        // `import a, b.c as d` → each comma group's first dotted root.
+        for grp in r.split(',') {
+            if let Some(tok) = grp.split_whitespace().next() {
+                out.push(tok.split('.').next().unwrap_or(tok).to_string());
+            }
+        }
+        None
+    } else {
+        None
+    };
+    if let Some(r) = rest {
+        out.push(r.split('.').next().unwrap_or(&r).to_string());
+    }
+    out
+}
+
+// First single- or double-quoted substring on a line, if any.
+fn quoted_arg(line: &str) -> Option<String> {
+    for q in ['"', '\''] {
+        if let Some(start) = line.find(q) {
+            if let Some(len) = line[start + 1..].find(q) {
+                return Some(line[start + 1..start + 1 + len].to_string());
+            }
+        }
+    }
+    None
+}
+
+// True when the script wants the scientific stack — used to route to the
+// scientific backend when one is wired. Looks at static + dynamic import
+// targets (whole-word match against the package list) plus strong signals like
+// `micropip` / `savefig`.
+fn wants_scientific(code: &str) -> bool {
+    if SCIENTIFIC_STRONG_SIGNALS.iter().any(|s| code.contains(s)) {
+        return true;
+    }
+    for line in code.lines() {
+        for target in import_targets(line) {
+            if SCIENTIFIC_PACKAGES.iter().any(|p| p.eq_ignore_ascii_case(&target)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub struct CodeRunTool {
     sandbox:      Arc<dyn CodeSandbox>,
+    // Optional second backend for scientific Python (Pyodide). When present and
+    // the script imports a scientific package, the call routes here instead of
+    // `sandbox`. None on builds/hosts without it — routing then no-ops.
+    scientific:   Option<Arc<dyn CodeSandbox>>,
     rootfs_path:  PathBuf,
     cfg:          CodeRunConfig,
     seccomp_mode: SeccompMode,
@@ -98,7 +194,24 @@ impl CodeRunTool {
         seccomp_mode: SeccompMode,
         artifacts:    Arc<ArtifactStore>,
     ) -> Self {
-        Self { sandbox, rootfs_path, cfg, seccomp_mode, artifacts }
+        Self { sandbox, scientific: None, rootfs_path, cfg, seccomp_mode, artifacts }
+    }
+
+    // Attach a scientific (Pyodide) backend. Calls whose code imports a
+    // scientific package route here; everything else stays on the primary
+    // backend. `None` is a no-op (keeps the call sites tidy).
+    pub fn with_scientific(mut self, backend: Option<Arc<dyn CodeSandbox>>) -> Self {
+        self.scientific = backend;
+        self
+    }
+
+    // Pick the backend for this call: the scientific one when it's wired and
+    // the script wants it, otherwise the primary backend.
+    fn select_backend(&self, code: &str) -> &Arc<dyn CodeSandbox> {
+        match &self.scientific {
+            Some(sci) if wants_scientific(code) => sci,
+            _ => &self.sandbox,
+        }
     }
 
     fn parse_language(&self, raw: &str) -> Result<Language, String> {
@@ -117,14 +230,28 @@ impl CodeRunTool {
         }
     }
 
+    // Only the Linux "namespace" backend pivots into a host rootfs; the WASM
+    // and Pyodide backends isolate differently (capability preopen / wasm-in-V8)
+    // and have no rootfs to pivot into. Used to skip the rootfs-dir pre-flight
+    // and `limits.rootfs` for those backends.
+    fn backend_needs_rootfs(name: &str) -> bool {
+        name == "namespace"
+    }
+
     fn build_limits(
         &self,
+        backend_name:           &str,
         requested_timeout_secs: Option<u64>,
         working_dir:            Option<PathBuf>,
         host_output_dir:        Option<PathBuf>,
     ) -> ResourceLimits {
         let mut limits = ResourceLimits::default();
-        limits.rootfs = Some(self.rootfs_path.clone());
+        // Namespace backend pivots into the rootfs; WASM/Pyodide ignore it.
+        limits.rootfs = if Self::backend_needs_rootfs(backend_name) {
+            Some(self.rootfs_path.clone())
+        } else {
+            None
+        };
 
         let cap_secs = self.cfg.max_wall_clock_seconds.max(1);
         let chosen   = requested_timeout_secs.unwrap_or(cap_secs).min(cap_secs).max(1);
@@ -176,7 +303,12 @@ impl Tool for CodeRunTool {
     // True only when the rootfs path actually exists. Lets the tools page
     // badge a "rootfs not installed" state without unregistering the tool.
     fn enabled(&self) -> bool {
-        self.rootfs_path.is_dir()
+        // A non-namespace primary backend (WASM) needs no rootfs; the namespace
+        // backend needs its rootfs installed. A wired scientific backend also
+        // makes the tool useful on its own.
+        !Self::backend_needs_rootfs(self.sandbox.name())
+            || self.rootfs_path.is_dir()
+            || self.scientific.is_some()
     }
 
     fn args_schema(&self) -> Value {
@@ -255,10 +387,16 @@ impl Tool for CodeRunTool {
             Err(e) => return Ok(ToolResult::failure(format!("code_run: {e}"))),
         };
 
-        // Defensive: the tool may have been registered when the rootfs was
-        // present, then uninstalled mid-process. Surface that as a clean
-        // failure instead of letting pre_exec EINVAL out.
-        if !self.rootfs_path.is_dir() {
+        // Route the call: scientific backend (Pyodide) when the script imports a
+        // scientific package and one is wired, else the primary backend.
+        let backend = self.select_backend(code);
+        let backend_name = backend.name();
+
+        // Defensive: the namespace tool may have been registered when the rootfs
+        // was present, then uninstalled mid-process. Surface that as a clean
+        // failure instead of letting pre_exec EINVAL out. Only applies to the
+        // namespace backend — WASM/Pyodide have no rootfs.
+        if Self::backend_needs_rootfs(backend_name) && !self.rootfs_path.is_dir() {
             return Ok(ToolResult::failure(format!(
                 "code_run: rootfs missing at {} — run `mira sandbox install python`",
                 self.rootfs_path.display()
@@ -279,9 +417,9 @@ impl Tool for CodeRunTool {
         };
         let host_output = scratch.path().to_path_buf();
 
-        let limits = self.build_limits(timeout_secs, working_dir, Some(host_output.clone()));
+        let limits = self.build_limits(backend_name, timeout_secs, working_dir, Some(host_output.clone()));
 
-        let result = self.sandbox.run(language, code, stdin, &limits).await;
+        let result = backend.run(language, code, stdin, &limits).await;
 
         match result {
             Ok(out) => {
@@ -486,7 +624,9 @@ mod tests {
             ));
             Ok(self.out.clone())
         }
-        fn name(&self)      -> &'static str { "stub" }
+        // Stands in for the namespace backend in the rootfs-related tests, so
+        // report "namespace" — that's the only backend that needs a rootfs.
+        fn name(&self)      -> &'static str { "namespace" }
         fn supported(&self) -> bool         { true }
     }
 
@@ -699,6 +839,75 @@ mod tests {
         }
         fn name(&self) -> &'static str { "drop" }
         fn supported(&self) -> bool { true }
+    }
+
+    #[test]
+    fn wants_scientific_matches_import_lines_only() {
+        assert!(wants_scientific("import numpy as np\nprint(np.pi)"));
+        assert!(wants_scientific("from pandas import DataFrame"));
+        assert!(wants_scientific("import matplotlib.pyplot as plt"));
+        assert!(wants_scientific("import os, numpy")); // multi-import line
+        assert!(wants_scientific("from scipy.stats import norm")); // dotted from
+        assert!(wants_scientific("    import cv2")); // indented, import-name form
+        // Plain stdlib / arithmetic stays on the primary backend.
+        assert!(!wants_scientific("print(6*7)"));
+        assert!(!wants_scientific("import json\nimport math"));
+        // A bare mention in a string/comment (not an import line) doesn't route.
+        assert!(!wants_scientific("x = 'numpy is great'  # pandas too"));
+        // A substring of a non-scientific module must NOT false-positive.
+        assert!(!wants_scientific("import numpydoc_stub")); // not "numpy"
+    }
+
+    #[test]
+    fn wants_scientific_catches_dynamic_imports_and_strong_signals() {
+        assert!(wants_scientific("mod = importlib.import_module('pandas')"));
+        assert!(wants_scientific("np = __import__(\"numpy\")"));
+        // micropip only exists inside Pyodide.
+        assert!(wants_scientific("import micropip\nawait micropip.install('foo')"));
+        // savefig implies matplotlib output even with a dynamic import.
+        assert!(wants_scientific("plt.savefig('/tmp/output/c.png')"));
+        // Dynamic import of a stdlib module does not route.
+        assert!(!wants_scientific("importlib.import_module('json')"));
+    }
+
+    // A scientific import routes to the wired scientific backend; plain code
+    // stays on the primary one. Both stubs report distinct stdout so we can
+    // tell which actually ran.
+    #[tokio::test]
+    async fn routes_scientific_imports_to_scientific_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Scientific code → scientific backend.
+        let primary = StubSandbox::ok("PRIMARY\n");
+        let sci     = StubSandbox::ok("SCI\n");
+        let (st, _sd) = store();
+        let tool = CodeRunTool::new(
+            primary.clone(), tmp.path().to_path_buf(), cfg(), SeccompMode::Allowlist, st,
+        ).with_scientific(Some(sci.clone()));
+        let r = tool.execute(json!({
+            "language": "python",
+            "code": "import numpy as np\nprint(np.pi)",
+        })).await.unwrap();
+        assert!(r.success, "got {r:?}");
+        assert!(r.output.contains("SCI"), "scientific backend should run, got: {}", r.output);
+        assert!(sci.last.lock().unwrap().is_some(), "scientific backend should have run");
+        assert!(primary.last.lock().unwrap().is_none(), "primary should NOT have run");
+
+        // Plain code → primary backend.
+        let primary2 = StubSandbox::ok("PRIMARY\n");
+        let sci2     = StubSandbox::ok("SCI\n");
+        let (st2, _sd2) = store();
+        let tool2 = CodeRunTool::new(
+            primary2.clone(), tmp.path().to_path_buf(), cfg(), SeccompMode::Allowlist, st2,
+        ).with_scientific(Some(sci2.clone()));
+        let r2 = tool2.execute(json!({
+            "language": "python",
+            "code": "print(6*7)",
+        })).await.unwrap();
+        assert!(r2.success, "got {r2:?}");
+        assert!(r2.output.contains("PRIMARY"), "primary backend should run, got: {}", r2.output);
+        assert!(primary2.last.lock().unwrap().is_some(), "primary should have run");
+        assert!(sci2.last.lock().unwrap().is_none(), "scientific should NOT have run");
     }
 
     #[tokio::test]
