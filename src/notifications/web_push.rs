@@ -125,6 +125,23 @@ impl WebPushService {
         self.store.upsert_fcm(user_id, token, platform, device_name)
     }
 
+    /// Register (or refresh) a generic **HTTP push endpoint** (PUSH-NOTIFICATIONS
+    /// Part C) — the mechanism-agnostic transport. `endpoint_url` is the
+    /// FCM-relay `push_url` (push.vexillon.ai) or a UnifiedPush distributor URL;
+    /// `auth_secret`, when present, is sent as `Authorization: Bearer …`. MIRA
+    /// holds no Google credentials — it just POSTs the §4 envelope to this URL.
+    /// Deduped by endpoint URL (re-registering the same URL refreshes the row).
+    pub fn subscribe_http(
+        &self,
+        user_id:      &str,
+        endpoint_url: &str,
+        auth_secret:  Option<&str>,
+        platform:     Option<&str>,
+        device_name:  Option<&str>,
+    ) -> Result<String, MiraError> {
+        self.store.upsert_http(user_id, endpoint_url, auth_secret.unwrap_or(""), platform, device_name)
+    }
+
     /// Whether the FCM transport is configured + enabled.
     pub fn fcm_enabled(&self) -> bool {
         self.fcm.is_some()
@@ -176,6 +193,20 @@ impl WebPushService {
                         }
                     }
                 }
+                // Generic HTTP push endpoint (FCM relay / UnifiedPush). POST the
+                // envelope to the endpoint URL with an optional bearer secret;
+                // a 410 means the endpoint is dead → prune (PUSH-NOTIFICATIONS
+                // Part C). MIRA never touches Google/Firebase here.
+                "http" => match self.send_http(&sub, &body).await {
+                    Ok(()) => delivered += 1,
+                    Err(WebPushSendError::Gone) => {
+                        debug!("http push: endpoint gone (410) for sub {} — removing", sub.id);
+                        let _ = self.store.delete(&sub.id, user_id);
+                    }
+                    Err(WebPushSendError::Other(e)) => {
+                        warn!("http push: send to {} failed: {e}", sub.id);
+                    }
+                },
                 // Web Push (VAPID) — the default for browser subscriptions.
                 _ => match self.send_one(&sub, &body).await {
                     Ok(()) => delivered += 1,
@@ -245,6 +276,40 @@ impl WebPushService {
         }
         let body_txt = resp.text().await.unwrap_or_default();
         Err(WebPushSendError::Other(format!("HTTP {status}: {body_txt}")))
+    }
+
+    /// POST the envelope to a generic HTTP push endpoint (FCM relay /
+    /// UnifiedPush). Sends `Authorization: Bearer <auth>` when the subscription
+    /// carries a secret. Per the Part C contract, a **410 Gone** (and we also
+    /// fold in 404) means the endpoint is dead → surface `Gone` so the caller
+    /// prunes the subscription.
+    async fn send_http(
+        &self,
+        sub:  &PushSubscription,
+        body: &[u8],
+    ) -> Result<(), WebPushSendError> {
+        let mut req = self.http
+            .request(reqwest::Method::POST, &sub.endpoint)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_vec());
+        if !sub.auth.is_empty() {
+            req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", sub.auth));
+        }
+        let resp = req.send().await
+            // `without_url()` keeps the endpoint (which embeds the push_id) out
+            // of logged errors.
+            .map_err(|e| WebPushSendError::Other(format!("send: {}", e.without_url())))?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        if status == reqwest::StatusCode::GONE || status == reqwest::StatusCode::NOT_FOUND {
+            return Err(WebPushSendError::Gone);
+        }
+        let body_txt = resp.text().await.unwrap_or_default();
+        Err(WebPushSendError::Other(format!(
+            "HTTP {status}: {}", body_txt.chars().take(200).collect::<String>()
+        )))
     }
 }
 
@@ -431,6 +496,50 @@ impl WebPushStore {
         Ok(id)
     }
 
+    /// Upsert a generic HTTP push-endpoint subscription (Part C), deduped by
+    /// endpoint URL (stored in the `endpoint` column). The bearer secret lives
+    /// in the `auth` column (empty when none); `p256dh` is unused.
+    fn upsert_http(
+        &self,
+        user_id:      &str,
+        endpoint_url: &str,
+        auth_secret:  &str,
+        platform:     Option<&str>,
+        device_name:  Option<&str>,
+    ) -> Result<String, MiraError> {
+        let conn = self.conn.lock().expect("web push store poisoned");
+        let now = chrono::Utc::now().timestamp_millis();
+        let existing: Option<String> = conn.query_row(
+            "SELECT id FROM web_push_subscriptions WHERE endpoint = ?1",
+            params![endpoint_url],
+            |r| r.get(0),
+        ).ok();
+        let id = match existing {
+            Some(id) => {
+                conn.execute(
+                    "UPDATE web_push_subscriptions
+                     SET user_id = ?2, kind = 'http', auth = ?3, platform = ?4,
+                         device_name = ?5, updated_at = ?6
+                     WHERE id = ?1",
+                    params![id, user_id, auth_secret, platform, device_name, now],
+                ).map_err(|e| MiraError::ConfigError(format!("http push update: {e}")))?;
+                id
+            }
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                conn.execute(
+                    "INSERT INTO web_push_subscriptions
+                       (id, user_id, endpoint, p256dh, auth, user_agent,
+                        created_at, updated_at, kind, platform, device_name)
+                     VALUES (?1, ?2, ?3, '', ?4, NULL, ?5, ?5, 'http', ?6, ?7)",
+                    params![id, user_id, endpoint_url, auth_secret, now, platform, device_name],
+                ).map_err(|e| MiraError::ConfigError(format!("http push insert: {e}")))?;
+                id
+            }
+        };
+        Ok(id)
+    }
+
     fn delete(&self, sub_id: &str, user_id: &str) -> Result<(), MiraError> {
         let conn = self.conn.lock().expect("web push store poisoned");
         conn.execute(
@@ -548,5 +657,82 @@ mod tests {
         // Owner can.
         svc.unsubscribe(&id, "alice").unwrap();
         assert!(svc.list_for_user("alice").unwrap().is_empty());
+    }
+
+    // ── Part C — generic HTTP push endpoint ──
+
+    #[test]
+    fn http_subscribe_dedups_by_url_and_stores_secret() {
+        let dir = tempdir().unwrap();
+        let svc = WebPushService::open(dir.path(), &dir.path().join("wp.db"), None).unwrap();
+        let url = "https://push.vexillon.ai/v1/p/abc";
+        let id1 = svc.subscribe_http("alice", url, Some("sek"), Some("android"), Some("Pixel 8")).unwrap();
+        let id2 = svc.subscribe_http("alice", url, Some("rotated"), Some("android"), Some("Pixel 8")).unwrap();
+        assert_eq!(id1, id2, "same endpoint URL refreshes the row");
+        let list = svc.list_for_user("alice").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].kind, "http");
+        assert_eq!(list[0].endpoint, url);
+        assert_eq!(list[0].auth, "rotated", "secret refreshed on re-subscribe");
+        assert_eq!(list[0].device_name.as_deref(), Some("Pixel 8"));
+    }
+
+    /// Accept one connection, capture the raw request, reply with `status_line`.
+    async fn oneshot_server(status_line: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/p/test");
+        let handle = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let resp = format!("HTTP/1.1 {status_line}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.flush().await;
+            req
+        });
+        (url, handle)
+    }
+
+    fn sample_envelope() -> NotificationEnvelope {
+        crate::notifications::Notification {
+            kind:    crate::notifications::NotificationKind::ConversationUpdated,
+            message: Some("hi".into()),
+            channel: Some("web".into()),
+            ..Default::default()
+        }.to_envelope()
+    }
+
+    #[tokio::test]
+    async fn http_dispatch_posts_envelope_with_bearer() {
+        let (url, handle) = oneshot_server("200 OK").await;
+        let dir = tempdir().unwrap();
+        let svc = WebPushService::open(dir.path(), &dir.path().join("wp.db"), None).unwrap();
+        svc.subscribe_http("alice", &url, Some("secret-xyz"), None, None).unwrap();
+
+        let delivered = svc.send_to_user("alice", &sample_envelope()).await.unwrap();
+        assert_eq!(delivered, 1);
+
+        let req = handle.await.unwrap().to_lowercase();
+        assert!(req.contains("authorization: bearer secret-xyz"), "missing bearer; req:\n{req}");
+        assert!(req.contains("\"type\""), "envelope JSON should be in the body");
+        // A success leaves the subscription in place.
+        assert_eq!(svc.list_for_user("alice").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn http_dispatch_prunes_on_410() {
+        let (url, handle) = oneshot_server("410 Gone").await;
+        let dir = tempdir().unwrap();
+        let svc = WebPushService::open(dir.path(), &dir.path().join("wp.db"), None).unwrap();
+        svc.subscribe_http("bob", &url, None, None, None).unwrap();
+
+        let delivered = svc.send_to_user("bob", &sample_envelope()).await.unwrap();
+        assert_eq!(delivered, 0, "410 is not a delivery");
+        let _ = handle.await;
+        // Contract: 410 → prune the dead endpoint.
+        assert!(svc.list_for_user("bob").unwrap().is_empty(), "410 should prune the subscription");
     }
 }

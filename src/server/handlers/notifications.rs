@@ -74,7 +74,9 @@ pub async fn push_public_key(
 
 #[derive(Debug, Deserialize)]
 pub struct SubscribeRequest {
-    /// Transport: "webpush" (default, browser) or "fcm" (native app).
+    /// Transport: "webpush" (default, browser), "http" (FCM relay /
+    /// UnifiedPush endpoint — PUSH-NOTIFICATIONS Part C), or "fcm" (legacy
+    /// direct FCM token; superseded by "http").
     #[serde(default)]
     pub kind:       Option<String>,
     // ── Web Push fields ──
@@ -88,6 +90,12 @@ pub struct SubscribeRequest {
     pub platform:   Option<String>,
     /// Human device label for the "Registered devices" list.
     pub device_name: Option<String>,
+    // ── HTTP push-endpoint fields (Part C) ──
+    /// The relay/distributor URL MIRA POSTs the envelope to (e.g.
+    /// `https://push.vexillon.ai/v1/p/<push_id>`).
+    pub endpoint_url: Option<String>,
+    /// Optional bearer secret sent as `Authorization: Bearer <…>`.
+    pub auth_secret:  Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +130,23 @@ pub async fn push_subscribe(
             }
             svc.subscribe_fcm(&me.id, token, body.platform.as_deref(), body.device_name.as_deref())
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("subscribe: {e}")))?
+        }
+        // Part C — generic HTTP push endpoint (FCM relay / UnifiedPush). MIRA
+        // just POSTs the envelope to `endpoint_url` with the optional bearer
+        // secret; no Firebase credentials or `fcm_enabled` gate needed.
+        "http" => {
+            let endpoint_url = body.endpoint_url.as_deref()
+                // tolerate `endpoint` as an alias for the URL
+                .or(body.endpoint.as_deref())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| err(StatusCode::BAD_REQUEST, "endpoint_url required for kind=http"))?;
+            svc.subscribe_http(
+                &me.id,
+                endpoint_url,
+                body.auth_secret.as_deref().filter(|s| !s.is_empty()),
+                body.platform.as_deref(),
+                body.device_name.as_deref(),
+            ).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("subscribe: {e}")))?
         }
         "webpush" => {
             let endpoint = body.endpoint.as_deref().unwrap_or("");

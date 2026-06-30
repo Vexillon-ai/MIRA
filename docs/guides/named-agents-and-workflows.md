@@ -33,6 +33,20 @@ Named agents are **admin-managed** and live server-wide. You build them on the
      stops itself.
 4. Save. The agent is now reusable anywhere on the instance.
 
+### Or just ask MIRA to create it
+
+You don't have to build the profile by hand — **describe the agent in chat and
+MIRA creates it for you**. For example:
+
+> *"Create a MasterResearcher agent that searches multiple sources, pools the
+> findings, and writes a cited report with tables and charts."*
+
+MIRA saves the profile for you (turning a friendly name like *MasterResearcher*
+into a handle such as `@masterresearcher`), picks a sensible tool allowlist, and
+tells you how to invoke it. The result is a normal named agent — it appears on
+the **Named Agents** page, where you can review or fine-tune the persona, tools,
+model, and budget afterwards.
+
 ## Use a named agent
 
 Once saved, an agent can be invoked two ways:
@@ -81,6 +95,14 @@ In the step editor you can mark a step as:
   Use this to gate a step that sends an email or spends real money.
 
 You can also set a per-step **budget**, the same as for a standalone agent.
+
+### Or ask MIRA to build the workflow
+
+As with named agents, you can **describe a workflow in chat and MIRA assembles
+it** — *"build a workflow that researches a topic with `@masterresearcher`, then
+has a writer agent turn the findings into a one-page brief"*. MIRA creates the
+steps (target, brief, and dependencies), saves the workflow, and you can run it
+straight away or open it on the **Workflows** page to review and adjust the DAG.
 
 ## Run a workflow
 

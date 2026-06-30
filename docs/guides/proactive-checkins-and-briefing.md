@@ -138,7 +138,8 @@ The daily briefing is a single morning summary, assembled from:
 
 - your **calendar** — what's coming up today,
 - recent **wiki** updates — notes you've added or changed,
-- recent **activity** — automation runs and the like.
+- recent **activity** — automation runs and the like,
+- **pending approvals** — anything waiting on your sign-off (see below).
 
 To enable it:
 
@@ -148,6 +149,30 @@ To enable it:
 
 The briefing arrives on your connected channel. If your host was asleep or
 restarting at the scheduled time, the briefing catches up later the same day.
+
+## Stay on top of pending approvals
+
+Some things MIRA proposes wait for your explicit sign-off before they take
+effect — for example a **schedule the agent created for you** (when the approval
+gate is on) or a **wiki edit** sitting in the review queue. Left alone, these can
+quietly pile up.
+
+So MIRA reminds you: when anything is awaiting approval, your **daily briefing**
+and your **companion check-ins** include a short nudge — *"you have 2 schedules
+and 1 wiki edit waiting for your approval"*. (A briefing with nothing else going
+on will still send when approvals are pending, so they don't slip through.)
+
+You can act on them right there by **replying** — no need to open the dashboard:
+
+- *"summarise what's pending"* → MIRA lists each item (what the schedule does,
+  what the wiki edit changes).
+- *"approve all"*, or *"approve the backup schedule"* → MIRA approves what you
+  named (or everything).
+
+The reminder is just a reminder: **MIRA only approves when you tell it to** — it
+never approves on its own, and never inside the proactive message itself. The
+human-in-the-loop review stays with you. (You can still approve from the
+**Automations** and **Wiki review** pages in the UI if you prefer.)
 
 ## Test it right now
 
