@@ -54,6 +54,12 @@ pub struct BriefingSnapshot {
     pub events_tomorrow:      Vec<EventEntry>,
     pub wiki_recent_updates:  Vec<WikiEntry>,
     pub automation_runs:      Vec<RunEntry>,
+    /// Count of agent-created schedules awaiting the user's approval. When
+    /// >0 the briefing should remind the user (they pile up otherwise) and
+    /// offer to summarise or approve them — see the `pending_approvals` tool.
+    pub pending_schedule_approvals: usize,
+    /// Count of wiki edits sitting in the review queue awaiting approval.
+    pub pending_wiki_approvals: usize,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -92,6 +98,10 @@ impl BriefingSnapshot {
             && self.events_tomorrow.is_empty()
             && self.wiki_recent_updates.is_empty()
             && self.automation_runs.is_empty()
+            // Pending approvals are newsworthy on their own — a briefing with
+            // nothing else should still fire to nudge the user to action them.
+            && self.pending_schedule_approvals == 0
+            && self.pending_wiki_approvals == 0
     }
 }
 
@@ -160,9 +170,14 @@ pub fn gather_snapshot(
 
     // ── Wiki recently-updated pages ──────────────────────────────────────────
     let mut wiki_recent_updates = Vec::new();
+    let mut pending_wiki_approvals = 0usize;
     if let Some(reg) = wiki_reg {
         match reg.for_user(user_id) {
             Ok(wiki) => {
+                // Edits in the review queue awaiting approval.
+                pending_wiki_approvals = wiki.list_pending_ops()
+                    .map(|ops| ops.len())
+                    .unwrap_or(0);
                 let cutoff = (now - chrono::Duration::hours(24))
                     .with_timezone(&Utc);
                 let pages = wiki.store().list_pages().unwrap_or_default();
@@ -190,6 +205,16 @@ pub fn gather_snapshot(
                 }
             }
             Err(e) => warn!("briefing: wiki for '{user_id}' failed to open: {e}"),
+        }
+    }
+
+    // ── Pending agent-created schedules awaiting approval ─────────────────────
+    let mut pending_schedule_approvals = 0usize;
+    if let Some(store) = automations {
+        if let Ok(schedules) = store.list_schedules(Some(user_id)) {
+            pending_schedule_approvals = schedules.iter()
+                .filter(|s| matches!(s.status, crate::automations::types::ScheduleStatus::PendingApproval))
+                .count();
         }
     }
 
@@ -238,6 +263,8 @@ pub fn gather_snapshot(
         events_tomorrow,
         wiki_recent_updates,
         automation_runs,
+        pending_schedule_approvals,
+        pending_wiki_approvals,
     }
 }
 
@@ -258,8 +285,16 @@ informative summary (2-3 short paragraphs, max ~150 words) that:\n\
   - Surfaces what actually matters today (don't read every event verbatim — \
     summarise; call out anything important by name)\n\
   - Previews tomorrow only if useful (e.g. early start, travel)\n\
-  - Mentions wiki updates only if they're load-bearing\n\
+  - Mentions wiki updates only if they're load-bearing — and treat them as \
+    notes you recorded ABOUT the user/their projects, never as work YOU did to \
+    their files/projects. Don't claim you built, changed, or updated a project, \
+    and don't invent recent activity or dates for it.\n\
   - Flags automation failures if any are present\n\
+  - If pending_schedule_approvals or pending_wiki_approvals is > 0, give the \
+    user a brief, friendly nudge that they have that many schedule(s) and/or \
+    wiki edit(s) waiting for their approval, and offer to summarise or approve \
+    them (they can just reply, e.g. \"summarise them\" or \"approve all\"). Do \
+    NOT approve anything yourself here — this is only a reminder.\n\
   - Sounds like you, not a template. If the snapshot is empty, say so warmly \
     in a sentence rather than padding with filler\n\
 \n\
@@ -320,8 +355,27 @@ mod tests {
             events_tomorrow: Vec::new(),
             wiki_recent_updates: Vec::new(),
             automation_runs: Vec::new(),
+            pending_schedule_approvals: 0,
+            pending_wiki_approvals: 0,
         };
         assert!(s.is_empty());
+    }
+
+    #[test]
+    fn pending_approvals_make_snapshot_non_empty() {
+        // A snapshot with nothing but pending approvals should still fire — the
+        // whole point is to nudge the user so they don't pile up.
+        let s = BriefingSnapshot {
+            date_local: "today".to_string(),
+            timezone:   "UTC".to_string(),
+            events_today: Vec::new(),
+            events_tomorrow: Vec::new(),
+            wiki_recent_updates: Vec::new(),
+            automation_runs: Vec::new(),
+            pending_schedule_approvals: 2,
+            pending_wiki_approvals: 0,
+        };
+        assert!(!s.is_empty());
     }
 
     #[test]
@@ -335,6 +389,8 @@ mod tests {
             events_tomorrow: Vec::new(),
             wiki_recent_updates: Vec::new(),
             automation_runs: Vec::new(),
+            pending_schedule_approvals: 0,
+            pending_wiki_approvals: 0,
         };
         assert!(!s.is_empty());
     }

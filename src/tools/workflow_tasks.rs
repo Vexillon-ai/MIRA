@@ -18,8 +18,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
-use super::{Tier, Tool, ToolArgs, ToolResult};
-use crate::agent::{Orchestrator, WorkflowStore};
+use super::{Tier, Tool, ToolArgs, ToolResult, ToolVisibility};
+use crate::agent::{NewWorkflowDefinition, Orchestrator, WorkflowStep, WorkflowStore};
 use crate::automations::{
     agent_gate::gate_create_event_subscription, Action, AutomationStatus, AutomationsStore,
     NewEventSubscription, OwnerKind,
@@ -229,5 +229,148 @@ impl Tool for ListWorkflowsTool {
             })).collect::<Vec<_>>(),
         })).collect();
         Ok(ToolResult::success(json!({ "workflows": workflows }).to_string()))
+    }
+}
+
+// ── create_workflow ──────────────────────────────────────────────────────────
+
+/// Lets the model save a new multi-step workflow (a DAG over named agents /
+/// skills) on the user's request.
+pub struct CreateWorkflowTool {
+    store: Option<Arc<WorkflowStore>>,
+}
+
+impl CreateWorkflowTool {
+    pub fn new(store: Option<Arc<WorkflowStore>>) -> Self { Self { store } }
+}
+
+#[async_trait]
+impl Tool for CreateWorkflowTool {
+    fn name(&self) -> &str { "create_workflow" }
+
+    fn description(&self) -> &str {
+        "Create a new saved **workflow** — a multi-step pipeline (DAG) that \
+         chains named agents and/or built-in skills, runnable later with \
+         `run_workflow`. Use when the user asks you to build/save a workflow. \
+         `name` is a slug (lowercase letters, digits, dashes; auto-slugified). \
+         `steps` is an array; each step needs a unique `id` (slug) and exactly \
+         one of `agent` (a named-agent handle, see `list_named_agents`) or \
+         `skill` (e.g. com.mira.research). `brief` is the step's instruction and \
+         may interpolate `{{input}}` and `{{steps.<id>.output}}` from steps it \
+         `depends_on`. Steps with no shared dependency run in parallel. Optional \
+         per step: `depends_on` (array of step ids), `budget_usd`, \
+         `continue_on_error`, `requires_approval` (pause for human OK). Returns \
+         the created workflow name."
+    }
+
+    fn visibility(&self) -> ToolVisibility { ToolVisibility::User }
+    fn tier(&self) -> Tier { Tier::Pure }
+
+    fn args_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["name", "steps"],
+            "properties": {
+                "name":        { "type": "string", "description": "Workflow slug. Lowercase letters, digits, dashes; auto-slugified." },
+                "description": { "type": "string", "description": "One-line summary." },
+                "steps": {
+                    "type": "array",
+                    "description": "Ordered DAG of steps.",
+                    "items": {
+                        "type": "object",
+                        "required": ["id", "brief"],
+                        "properties": {
+                            "id":          { "type": "string", "description": "Unique step slug; referenced by depends_on and {{steps.<id>.output}}." },
+                            "agent":       { "type": "string", "description": "Named-agent handle to run this step (exactly one of agent/skill)." },
+                            "skill":       { "type": "string", "description": "Built-in skill id to run this step (exactly one of agent/skill)." },
+                            "brief":       { "type": "string", "description": "Instruction for this step; may use {{input}} and {{steps.<dep>.output}}." },
+                            "depends_on":  { "type": "array", "items": { "type": "string" }, "description": "Step ids that must finish first." },
+                            "budget_usd":  { "type": "number" },
+                            "continue_on_error": { "type": "boolean" },
+                            "requires_approval": { "type": "boolean", "description": "Pause for human approval before this step runs." }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: ToolArgs) -> Result<ToolResult, MiraError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(ToolResult::failure(
+                "workflows are not available on this host (no workflow store)",
+            ));
+        };
+        let raw_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if raw_name.is_empty() {
+            return Ok(ToolResult::failure("create_workflow: `name` is required"));
+        }
+        let name = super::agent_tasks::slugify_handle(raw_name);
+
+        let steps_val = args.get("steps").cloned().unwrap_or(Value::Null);
+        let steps: Vec<WorkflowStep> = match serde_json::from_value(steps_val) {
+            Ok(s) => s,
+            Err(e) => return Ok(ToolResult::failure(format!(
+                "create_workflow: could not parse `steps`: {e}"
+            ))),
+        };
+        if steps.is_empty() {
+            return Ok(ToolResult::failure("create_workflow: at least one step is required"));
+        }
+
+        let new = NewWorkflowDefinition {
+            name: name.clone(),
+            description: args.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            steps,
+            enabled: true,
+        };
+        match store.create(new) {
+            Ok(def) => {
+                info!("workflow created via tool: {} ({} step(s))", def.name, def.steps.len());
+                Ok(ToolResult::success(json!({
+                    "created":     true,
+                    "name":        def.name,
+                    "id":          def.id,
+                    "step_count":  def.steps.len(),
+                    "run_hint":    format!("run_workflow with name=\"{}\"", def.name),
+                }).to_string()))
+            }
+            Err(e) => Ok(ToolResult::failure(format!("create_workflow: {e}"))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn create_workflow_round_trip() {
+        let store = Arc::new(WorkflowStore::open_memory().unwrap());
+        let tool = CreateWorkflowTool::new(Some(store.clone()));
+        let r = tool.execute(json!({
+            "name": "Renewables Brief",
+            "description": "Research then summarise",
+            "steps": [
+                { "id": "research", "skill": "com.mira.research", "brief": "Research {{input}}" },
+                { "id": "summary",  "skill": "com.mira.research", "brief": "Summarise {{steps.research.output}}", "depends_on": ["research"] }
+            ]
+        })).await.unwrap();
+        assert!(r.success, "got {r:?}");
+        assert!(r.output.contains("\"name\":\"renewables-brief\""), "{}", r.output);
+        assert!(r.output.contains("\"step_count\":2"));
+        assert!(store.get_by_name("renewables-brief").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn create_workflow_rejects_empty_and_no_store() {
+        let store = Arc::new(WorkflowStore::open_memory().unwrap());
+        let tool = CreateWorkflowTool::new(Some(store));
+        let r = tool.execute(json!({"name": "x", "steps": []})).await.unwrap();
+        assert!(!r.success);
+
+        let none = CreateWorkflowTool::new(None);
+        let r = none.execute(json!({"name": "x", "steps": [{"id":"a","skill":"s","brief":"b"}]})).await.unwrap();
+        assert!(!r.success);
     }
 }

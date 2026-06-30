@@ -48,7 +48,13 @@ message tailored to what you know about them from the wiki (style, \
 likes, routines). Keep it natural — share something small or ask a \
 gentle question. One message; let them reply when they're ready. \
 Do not refer to this prompt or to the scheduler. Do not call any \
-tools — just write the opening message.]";
+tools — just write the opening message. \
+IMPORTANT: the wiki is background knowledge about the user and their \
+projects, not a record of things you did. Do NOT claim you worked on, \
+updated, built, or changed any of their projects/files/repos, and do NOT \
+invent recent activity or dates (\"I updated X yesterday\"). If you mention a \
+project, frame it as interest or a question (\"how's Neon Pong going?\"), never \
+as work you performed.]";
 
 // One-time care-net disclosure, woven into a check-in the first time a
 // monitored arrangement is active. Keeps MIRA transparent — the person always
@@ -249,6 +255,25 @@ impl CompanionDispatcher {
         self
     }
 
+    // Count pending approvals for the user: (agent-created schedules awaiting
+    // approval, wiki edits in the review queue). Best-effort — a store error
+    // counts as zero so a check-in never fails over this. Drives the gentle
+    // pending-approval nudge in the check-in cue.
+    fn pending_approval_counts(&self, user_id: &str) -> (usize, usize) {
+        let sched = self.automations.as_ref()
+            .and_then(|s| s.list_schedules(Some(user_id)).ok())
+            .map(|rows| rows.iter()
+                .filter(|s| matches!(s.status, crate::automations::types::ScheduleStatus::PendingApproval))
+                .count())
+            .unwrap_or(0);
+        let wiki = self.wiki.as_ref()
+            .and_then(|reg| reg.for_user(user_id).ok())
+            .and_then(|w| w.list_pending_ops().ok())
+            .map(|ops| ops.len())
+            .unwrap_or(0);
+        (sched, wiki)
+    }
+
     // Send one check-in to `user_id`. On success, stamps
     // `last_checkin_at` in the settings store; on failure, leaves it
     // untouched (so the scheduler's policy will let us retry).
@@ -340,6 +365,27 @@ impl CompanionDispatcher {
                 cue.push_str("\n\n");
                 cue.push_str(digest);
             }
+        }
+        // Pending-approval nudge: if schedules or wiki edits are waiting for the
+        // user's approval, weave a gentle reminder in so they don't pile up. The
+        // check-in only mentions them — approval happens when the user replies
+        // (via the `pending_approvals` tool in normal chat).
+        let (pending_sched, pending_wiki) = self.pending_approval_counts(user_id);
+        if pending_sched > 0 || pending_wiki > 0 {
+            let mut bits = Vec::new();
+            if pending_sched > 0 {
+                bits.push(format!("{pending_sched} schedule{}", if pending_sched == 1 { "" } else { "s" }));
+            }
+            if pending_wiki > 0 {
+                bits.push(format!("{pending_wiki} wiki edit{}", if pending_wiki == 1 { "" } else { "s" }));
+            }
+            cue.push_str(&format!(
+                "\n\n[Heads-up to weave in briefly and warmly (don't make it the \
+                 whole message): they have {} waiting for their approval. Offer to \
+                 summarise or approve them — they can just reply (e.g. \"summarise\" \
+                 or \"approve all\"). Do NOT approve anything yourself here.]",
+                bits.join(" and "),
+            ));
         }
 
         let mut rx = match self.agent

@@ -2283,6 +2283,27 @@ fn build_tool_registry(
         warn!("automations agent tools skipped (store unavailable)");
     }
 
+    // Pending-approval tools — let the user summarise + approve agent-created
+    // schedules and wiki review-queue edits right in chat (check-ins/briefings
+    // nudge them; these action it). Registered whenever either backing store
+    // exists; they degrade gracefully when one is absent.
+    {
+        let wiki_for_approvals = if config.wiki.enabled {
+            Some(Arc::clone(&wiki_registry))
+        } else {
+            None
+        };
+        if automations.is_some() || wiki_for_approvals.is_some() {
+            registry.register(crate::tools::approvals::PendingApprovalsTool::new(
+                automations.clone(), wiki_for_approvals.clone(),
+            ));
+            registry.register(crate::tools::approvals::ApprovePendingTool::new(
+                automations.clone(), wiki_for_approvals,
+            ));
+            info!("Tool registered: pending_approvals, approve_pending");
+        }
+    }
+
     // ──  / agent task lifecycle ───────────────────────────────────
     // `spawn_background_task` + `get_task_result` — the primitives that
     // turn the multi-agent runtime into something a chat-tier LLM can
@@ -2312,7 +2333,10 @@ fn build_tool_registry(
     registry.register(crate::tools::agent_tasks::ListNamedAgentsTool::new(
         agent_defs.clone(),
     ));
-    info!("Tool registered: agent_tasks (spawn_background_task, get_task_result, list_named_agents)");
+    registry.register(crate::tools::agent_tasks::CreateNamedAgentTool::new(
+        agent_defs.clone(),
+    ));
+    info!("Tool registered: agent_tasks (spawn_background_task, get_task_result, list_named_agents, create_named_agent)");
 
     // Phase C — workflow orchestration tools. Registered only when the
     // orchestrator + store are wired; `list_workflows` is always registered
@@ -2327,7 +2351,10 @@ fn build_tool_registry(
     registry.register(crate::tools::workflow_tasks::ListWorkflowsTool::new(
         workflow_store.clone(),
     ));
-    info!("Tool registered: workflow_tasks (run_workflow, list_workflows)");
+    registry.register(crate::tools::workflow_tasks::CreateWorkflowTool::new(
+        workflow_store.clone(),
+    ));
+    info!("Tool registered: workflow_tasks (run_workflow, list_workflows, create_workflow)");
 
     // ── Tier 4 — sandboxed code execution ────────────────────────────────────
     // Disabled unless the operator opts in via [sandbox] in the config.

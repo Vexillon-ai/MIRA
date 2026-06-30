@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
-use super::{Tier, Tool, ToolArgs, ToolResult};
+use super::{Tier, Tool, ToolArgs, ToolResult, ToolVisibility};
 use crate::agent::{
     Agent, AgentId, AgentRegistry, Supervisor,
 };
@@ -761,6 +761,124 @@ impl Tool for ListNamedAgentsTool {
     }
 }
 
+// ── create_named_agent ────────────────────────────────────────────────────────
+
+/// Turn a friendly name into a valid handle slug: lowercase, spaces/underscores
+/// → dashes, drop other invalid chars, collapse repeats, ensure it starts with
+/// a letter. `validate_name` in the store is the final gate.
+pub(crate) fn slugify_handle(raw: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in raw.trim().chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            out.push(c);
+            prev_dash = false;
+        } else if (c == ' ' || c == '_' || c == '-') && !out.is_empty() && !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    // Must start with a letter — strip leading digits/dashes.
+    trimmed.trim_start_matches(|c: char| !c.is_ascii_lowercase()).to_string()
+}
+
+/// Lets the model save a new reusable named agent on the user's request.
+pub struct CreateNamedAgentTool {
+    agent_defs: Option<Arc<crate::agent::AgentDefinitionStore>>,
+}
+
+impl CreateNamedAgentTool {
+    pub fn new(agent_defs: Option<Arc<crate::agent::AgentDefinitionStore>>) -> Self {
+        Self { agent_defs }
+    }
+}
+
+#[async_trait]
+impl Tool for CreateNamedAgentTool {
+    fn name(&self) -> &str { "create_named_agent" }
+
+    fn description(&self) -> &str {
+        "Create a new reusable **named agent** (a saved persona + tool set + \
+         model) that can later be invoked by handle via `spawn_background_task` \
+         (`agent: \"<handle>\"`) or referenced in a workflow. Use this when the \
+         user asks you to create or save an agent. `name` becomes the handle — \
+         use a short slug (lowercase letters, digits, dashes); a friendlier name \
+         is auto-slugified (e.g. \"MasterResearcher\" → \"masterresearcher\"). \
+         Write a clear `system_prompt` describing the agent's role, method, and \
+         output format. `allowed_tools` is the list of tool names it may use \
+         (e.g. web_search, web_fetch, url_preview, code_run, and any \
+         `mcp__puppeteer__*` browser tools) — leave empty to inherit MIRA's \
+         default toolset. Optional `model_alias` (primary/coding/research/cheap) \
+         and `budget_usd` per run. Returns the created handle; tell the user how \
+         to invoke it."
+    }
+
+    fn visibility(&self) -> ToolVisibility { ToolVisibility::User }
+    fn tier(&self) -> Tier { Tier::Pure }
+
+    fn args_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["name", "system_prompt"],
+            "properties": {
+                "name":          { "type": "string", "description": "Handle/slug for the agent. Lowercase letters, digits, dashes; auto-slugified from a friendlier name." },
+                "description":   { "type": "string", "description": "One-line summary shown in the agents list." },
+                "system_prompt": { "type": "string", "description": "The persona / instructions the agent runs with — role, method, and desired output format." },
+                "allowed_tools": { "type": "array", "items": { "type": "string" }, "description": "Tool names the agent may use. Empty = inherit MIRA's default toolset." },
+                "model_alias":   { "type": "string", "description": "Optional LLM alias: primary | coding | research | cheap. Omit for the default." },
+                "budget_usd":    { "type": "number", "description": "Optional per-run USD cap." }
+            }
+        })
+    }
+
+    async fn execute(&self, args: ToolArgs) -> Result<ToolResult, MiraError> {
+        let Some(store) = self.agent_defs.as_ref() else {
+            return Ok(ToolResult::failure(
+                "named agents are not available on this host (no definitions store)",
+            ));
+        };
+        let raw_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if raw_name.is_empty() {
+            return Ok(ToolResult::failure("create_named_agent: `name` is required"));
+        }
+        let system_prompt = args.get("system_prompt").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if system_prompt.is_empty() {
+            return Ok(ToolResult::failure("create_named_agent: `system_prompt` is required"));
+        }
+        let handle = slugify_handle(raw_name);
+        let allowed_tools: Vec<String> = args.get("allowed_tools").and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let model_alias = args.get("model_alias").and_then(|v| v.as_str())
+            .map(str::to_string).filter(|s| !s.is_empty());
+        let budget_usd = args.get("budget_usd").and_then(|v| v.as_f64());
+
+        let new = crate::agent::NewAgentDefinition {
+            name: handle.clone(),
+            description: args.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            system_prompt: system_prompt.to_string(),
+            allowed_tools,
+            model_alias,
+            budget_usd,
+            enabled: true,
+        };
+        match store.create(new) {
+            Ok(def) => {
+                info!("named agent created via tool: @{} ({})", def.name, def.id);
+                Ok(ToolResult::success(json!({
+                    "created": true,
+                    "handle":  def.name,
+                    "id":      def.id,
+                    "invoke_hint": format!("@{} <your request>", def.name),
+                }).to_string()))
+            }
+            Err(e) => Ok(ToolResult::failure(format!("create_named_agent: {e}"))),
+        }
+    }
+}
+
 fn status_str(s: crate::agent::AgentStatus) -> &'static str {
     use crate::agent::AgentStatus::*;
     match s {
@@ -781,6 +899,52 @@ mod tests {
         WorkerAssignment, WorkerComplete, WorkerContext, WorkerFailure, WorkerTask,
     };
     use crate::automations::AutomationsStore;
+
+    #[test]
+    fn slugify_handle_cases() {
+        assert_eq!(slugify_handle("MasterResearcher"), "masterresearcher");
+        assert_eq!(slugify_handle("Master Researcher"), "master-researcher");
+        assert_eq!(slugify_handle("code_reviewer"), "code-reviewer");
+        assert_eq!(slugify_handle("  Trends 2024  "), "trends-2024");
+        // Must start with a letter — leading digits stripped.
+        assert_eq!(slugify_handle("2fast"), "fast");
+    }
+
+    #[tokio::test]
+    async fn create_named_agent_round_trip() {
+        let store = std::sync::Arc::new(crate::agent::AgentDefinitionStore::open_memory().unwrap());
+        let tool = CreateNamedAgentTool::new(Some(store.clone()));
+        let r = tool.execute(serde_json::json!({
+            "name": "MasterResearcher",
+            "description": "Multi-source researcher",
+            "system_prompt": "You research topics and write cited reports.",
+            "allowed_tools": ["web_search", "web_fetch"],
+        })).await.unwrap();
+        assert!(r.success, "got {r:?}");
+        assert!(r.output.contains("\"handle\":\"masterresearcher\""), "{}", r.output);
+        // Persisted + invocable by handle.
+        assert!(store.get_by_name("masterresearcher").unwrap().is_some());
+        // Duplicate is a clean failure, not a panic.
+        let dup = tool.execute(serde_json::json!({
+            "name": "masterresearcher", "system_prompt": "x",
+        })).await.unwrap();
+        assert!(!dup.success);
+        assert!(dup.error.unwrap().contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn create_named_agent_requires_prompt_and_store() {
+        // No store → clean failure.
+        let none = CreateNamedAgentTool::new(None);
+        let r = none.execute(serde_json::json!({"name": "x", "system_prompt": "y"})).await.unwrap();
+        assert!(!r.success);
+        // Missing system_prompt → clean failure.
+        let store = std::sync::Arc::new(crate::agent::AgentDefinitionStore::open_memory().unwrap());
+        let tool = CreateNamedAgentTool::new(Some(store));
+        let r = tool.execute(serde_json::json!({"name": "researcher"})).await.unwrap();
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("system_prompt"));
+    }
 
     // ── 0.112.0 — notification heuristic ───────────────────────────
 

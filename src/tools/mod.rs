@@ -31,6 +31,7 @@ pub mod automations;
 pub mod agent_tasks;
 pub mod workflow_tasks;
 pub mod wiki;
+pub mod approvals;
 pub mod companion;
 pub mod mira_help;
 pub mod guardian_inspect;
