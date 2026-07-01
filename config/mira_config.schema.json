@@ -2715,6 +2715,105 @@
           "enum": ["metric", "imperial"]
         }
       }
+    },
+    "image": {
+      "description": "Image-generation backends for the image_generate tool. The OpenAI backend uses providers.openai; local Automatic1111 / ComfyUI are configured here.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default_backend": {
+          "description": "Default backend. '' or 'auto' = first enabled (local preferred). One of: openai | automatic1111 | comfyui.",
+          "type": "string"
+        },
+        "openai": {
+          "description": "OpenAI Images backend. Key + endpoint come from providers.openai; this picks the model.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "default_model": { "description": "Default image model, e.g. dall-e-3 or gpt-image-1.", "type": "string" }
+          }
+        },
+        "automatic1111": {
+          "description": "Local Automatic1111 / Stable Diffusion WebUI backend (/sdapi/v1/txt2img).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled":  { "description": "Enable the Automatic1111 backend.", "type": "boolean" },
+            "base_url": { "description": "WebUI base URL, e.g. http://127.0.0.1:7860.", "type": "string" },
+            "model":    { "description": "Optional checkpoint to switch to per call (override_settings.sd_model_checkpoint). Empty = leave the WebUI's current model.", "type": "string" },
+            "steps":    { "description": "Sampling steps.", "type": "integer" },
+            "sampler":  { "description": "Sampler name, e.g. 'Euler a'.", "type": "string" },
+            "width":    { "description": "Default image width.", "type": "integer" },
+            "height":   { "description": "Default image height.", "type": "integer" },
+            "cfg_scale":{ "description": "CFG scale (prompt adherence).", "type": "number" },
+            "negative_prompt": { "description": "Default negative prompt when a call doesn't pass one.", "type": "string" }
+          }
+        },
+        "comfyui": {
+          "description": "Local ComfyUI backend (POST /prompt → poll /history → fetch /view).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled":  { "description": "Enable the ComfyUI backend.", "type": "boolean" },
+            "base_url": { "description": "ComfyUI base URL, e.g. http://127.0.0.1:8188.", "type": "string" },
+            "workflow_json": { "description": "Optional ComfyUI API-format workflow with placeholder tokens ({{prompt}} {{negative}} {{seed}} {{width}} {{height}} {{steps}} {{cfg}} {{ckpt}}). Empty = built-in default SD txt2img workflow.", "type": "string" },
+            "model":    { "description": "Checkpoint filename for the default workflow's {{ckpt}}. Empty = auto-pick the first available.", "type": "string" },
+            "steps":    { "description": "Sampling steps.", "type": "integer" },
+            "width":    { "description": "Default image width.", "type": "integer" },
+            "height":   { "description": "Default image height.", "type": "integer" },
+            "cfg_scale":{ "description": "CFG scale.", "type": "number" },
+            "negative_prompt": { "description": "Default negative prompt.", "type": "string" }
+          }
+        }
+      }
+    },
+    "video": {
+      "description": "Video-generation backends for the video_generate tool: OpenAI Videos / Sora, local ComfyUI (a video workflow), or local WAN2GP.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default_backend": {
+          "description": "Default backend. '' / 'auto' = first enabled (local preferred). One of: openai | comfyui | wan2gp.",
+          "type": "string"
+        },
+        "openai": {
+          "description": "OpenAI Videos (Sora) settings. Key + endpoint from providers.openai.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "default_model":   { "description": "Default video model, e.g. sora-2 or sora-2-pro.", "type": "string" },
+            "default_size":    { "description": "Default frame size WIDTHxHEIGHT (larger sizes need sora-2-pro).", "type": "string" },
+            "default_seconds": { "description": "Default clip length in seconds.", "type": "integer" }
+          }
+        },
+        "comfyui": {
+          "description": "Local ComfyUI video backend. Requires a video workflow (no universal default).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled":       { "description": "Enable the ComfyUI video backend.", "type": "boolean" },
+            "base_url":      { "description": "ComfyUI base URL, e.g. http://127.0.0.1:8188.", "type": "string" },
+            "workflow_json": { "description": "REQUIRED video workflow (API format) with tokens {{prompt}} {{negative}} {{seed}} {{width}} {{height}} {{frames}} {{fps}} {{steps}} {{cfg}} {{ckpt}}.", "type": "string" },
+            "model":         { "description": "Checkpoint/model for {{ckpt}} (workflow-dependent).", "type": "string" },
+            "steps":         { "description": "Sampling steps.", "type": "integer" },
+            "width":         { "description": "Default width.", "type": "integer" },
+            "height":        { "description": "Default height.", "type": "integer" },
+            "fps":           { "description": "Frames per second; {{frames}} = seconds × fps.", "type": "integer" },
+            "cfg_scale":     { "description": "CFG scale.", "type": "number" },
+            "negative_prompt": { "description": "Default negative prompt.", "type": "string" }
+          }
+        },
+        "wan2gp": {
+          "description": "Local WAN2GP (Gradio) video backend.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled":  { "description": "Enable the WAN2GP backend.", "type": "boolean" },
+            "base_url": { "description": "Gradio app base URL, e.g. http://127.0.0.1:7862.", "type": "string" },
+            "api_name": { "description": "Gradio API endpoint name to call (e.g. /generate_video), from the app's /config.", "type": "string" }
+          }
+        }
+      }
     }
   }
 }

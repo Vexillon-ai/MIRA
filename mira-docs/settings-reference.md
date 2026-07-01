@@ -558,6 +558,31 @@ _Rich terminal UI (TUI) appearance and layout defaults. All settings can be chan
 - **`weather.api_key`** (string) — API key for keyed providers (openweathermap). Secret — redacted on config read. Null for keyless Open-Meteo.
 - **`weather.units`** (string; one of: `metric`, `imperial`) — 'metric' (°C, mm, km/h — default) or 'imperial' (°F, in, mph).
 
+## image
+
+_Image-generation backends for the `image_generate` tool. Configurable in the web UI under Settings → Image & Video._
+
+- **`image.default_backend`** (string) — Default backend. '' / 'auto' = first enabled (local preferred). One of: openai | automatic1111 | comfyui.
+- **`image.openai.default_model`** (string) — OpenAI image model, e.g. dall-e-3 or gpt-image-1. Key + endpoint come from `providers.openai`.
+- **`image.automatic1111.enabled`** (boolean) — Enable the local Automatic1111 / SD WebUI backend (needs the server launched with `--api --listen`).
+- **`image.automatic1111.base_url`** (string) — WebUI base URL, e.g. http://127.0.0.1:7860 (or http://windows-host:7860 from WSL).
+- **`image.automatic1111.model`** (string) — Optional checkpoint to switch to per call. Blank = the WebUI's loaded model.
+- **`image.automatic1111.{steps,sampler,width,height,cfg_scale,negative_prompt}`** — Sampling defaults.
+- **`image.comfyui.enabled`** (boolean) — Enable the local ComfyUI backend.
+- **`image.comfyui.base_url`** (string) — ComfyUI base URL, e.g. http://127.0.0.1:8188.
+- **`image.comfyui.workflow_json`** (string) — Optional API-format workflow with placeholder tokens ({{prompt}} {{negative}} {{seed}} {{width}} {{height}} {{steps}} {{cfg}} {{ckpt}}). Blank = built-in default SD txt2img.
+- **`image.comfyui.model`** (string) — Checkpoint filename for the default workflow's {{ckpt}}. Blank = auto-pick first available.
+- **`image.comfyui.{steps,width,height,cfg_scale,negative_prompt}`** — Sampling defaults.
+
+## video
+
+_Video generation for the `video_generate` tool. Today: OpenAI Videos / Sora (key + endpoint from `providers.openai`). Configurable under Settings → Image & Video._
+
+- **`video.default_backend`** (string) — Reserved for future local backends. '' / 'auto' / 'openai' = OpenAI Videos.
+- **`video.openai.default_model`** (string) — Default video model, e.g. sora-2 or sora-2-pro.
+- **`video.openai.default_size`** (string) — Default frame size WIDTHxHEIGHT (larger sizes need sora-2-pro).
+- **`video.openai.default_seconds`** (integer) — Default clip length in seconds.
+
 ## wiki
 
 _Per-user wiki — markdown knowledge base companion to the structured memory DB. Stores narrative pages on disk under {data_dir}/wikis/users/<id>/._

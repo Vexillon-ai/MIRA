@@ -96,6 +96,29 @@ pub struct SubscribeRequest {
     pub endpoint_url: Option<String>,
     /// Optional bearer secret sent as `Authorization: Bearer <…>`.
     pub auth_secret:  Option<String>,
+    // Tolerated aliases — apps in the wild name these a few different ways;
+    // accept the common ones so a minor client naming mismatch doesn't 400.
+    pub url:          Option<String>,
+    pub push_url:     Option<String>,
+    pub secret:       Option<String>,
+    pub push_secret:  Option<String>,
+}
+
+impl SubscribeRequest {
+    /// The HTTP-endpoint URL across all accepted field names.
+    fn http_url(&self) -> Option<&str> {
+        [&self.endpoint_url, &self.url, &self.push_url, &self.endpoint]
+            .into_iter()
+            .filter_map(|o| o.as_deref())
+            .find(|s| !s.is_empty())
+    }
+    /// The bearer secret across all accepted field names.
+    fn http_secret(&self) -> Option<&str> {
+        [&self.auth_secret, &self.secret, &self.push_secret]
+            .into_iter()
+            .filter_map(|o| o.as_deref())
+            .find(|s| !s.is_empty())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,7 +140,16 @@ pub async fn push_subscribe(
     Json(body): Json<SubscribeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let svc = svc.ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "web push not enabled"))?;
-    let kind = body.kind.as_deref().unwrap_or("webpush");
+    // Resolve the transport. Explicit `kind` wins; otherwise infer: an HTTP
+    // push-endpoint URL with no VAPID keys is a `kind:"http"` (relay /
+    // UnifiedPush) registration that just forgot the `kind` field.
+    let kind = match body.kind.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(k) => k,
+        None if body.keys.is_none()
+            && (body.endpoint_url.is_some() || body.url.is_some() || body.push_url.is_some())
+            => "http",
+        None => "webpush",
+    };
     let id = match kind {
         "fcm" => {
             let token = body.fcm_token.as_deref()
@@ -135,15 +167,16 @@ pub async fn push_subscribe(
         // just POSTs the envelope to `endpoint_url` with the optional bearer
         // secret; no Firebase credentials or `fcm_enabled` gate needed.
         "http" => {
-            let endpoint_url = body.endpoint_url.as_deref()
-                // tolerate `endpoint` as an alias for the URL
-                .or(body.endpoint.as_deref())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| err(StatusCode::BAD_REQUEST, "endpoint_url required for kind=http"))?;
+            // Accept endpoint_url / url / push_url / endpoint for the URL, and
+            // auth_secret / secret / push_secret for the bearer — clients name
+            // these inconsistently.
+            let endpoint_url = body.http_url()
+                .ok_or_else(|| err(StatusCode::BAD_REQUEST,
+                    "endpoint_url required for kind=http (also accepted: url, push_url, endpoint)"))?;
             svc.subscribe_http(
                 &me.id,
                 endpoint_url,
-                body.auth_secret.as_deref().filter(|s| !s.is_empty()),
+                body.http_secret(),
                 body.platform.as_deref(),
                 body.device_name.as_deref(),
             ).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("subscribe: {e}")))?
@@ -216,4 +249,28 @@ pub async fn push_test(
     let delivered = svc.send_to_user(&me.id, &payload).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("send: {e}")))?;
     Ok(Json(serde_json::json!({ "delivered": delivered })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(json: serde_json::Value) -> SubscribeRequest {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn http_url_and_secret_accept_aliases() {
+        // canonical
+        assert_eq!(req(serde_json::json!({"endpoint_url":"u1","auth_secret":"s1"})).http_url(), Some("u1"));
+        // aliases
+        assert_eq!(req(serde_json::json!({"url":"u2"})).http_url(), Some("u2"));
+        assert_eq!(req(serde_json::json!({"push_url":"u3"})).http_url(), Some("u3"));
+        assert_eq!(req(serde_json::json!({"endpoint":"u4"})).http_url(), Some("u4"));
+        assert_eq!(req(serde_json::json!({"secret":"s2"})).http_secret(), Some("s2"));
+        assert_eq!(req(serde_json::json!({"push_secret":"s3"})).http_secret(), Some("s3"));
+        // empty strings are ignored
+        assert_eq!(req(serde_json::json!({"endpoint_url":"","url":"u"})).http_url(), Some("u"));
+        assert_eq!(req(serde_json::json!({})).http_url(), None);
+    }
 }

@@ -239,6 +239,29 @@ impl OpenAiBackend {
             {
                 return Err(TtsError::VoiceNotInstalled(voice.to_string()));
             }
+            // Many local OpenAI-compatible TTS servers (Chatterbox included)
+            // only produce WAV and reject `response_format: mp3/opus` with a
+            // 4xx or a "format"-flavoured message. Rather than fail over to the
+            // internal engine (losing this backend's voice), retry once with
+            // `wav` — the lowest-common-denominator container. MIRA reports the
+            // real codec back via the response Content-Type, so the client
+            // plays whatever it receives. This is why a mobile client asking
+            // for mp3 used to fall back to internal while wav-based channels
+            // worked. The retry only fires when the request wasn't already wav,
+            // so it can't recurse.
+            let format_rejected = req.format != OutputFormat::Wav
+                && (matches!(status.as_u16(), 400 | 415 | 422)
+                    || lower.contains("response_format")
+                    || lower.contains("format")
+                    || lower.contains("codec"));
+            if format_rejected {
+                warn!("tts/{}: {} rejected response_format={} ({status}); retrying as wav",
+                    self.cfg.id, self.endpoint(), body.response_format);
+                let mut wav_req = req.clone();
+                wav_req.format = OutputFormat::Wav;
+                // Box the recursive future (one level only — wav never re-retries).
+                return Box::pin(self.post_audio(&wav_req)).await;
+            }
             let detail = if detail.is_empty() { format!("HTTP {status}") }
                          else { format!("HTTP {status}: {detail}") };
             return Err(TtsError::Upstream(detail));
@@ -552,6 +575,54 @@ mod tests {
         assert_eq!(buf.bytes, canned);
         assert!(matches!(buf.codec, AudioCodec::Mp3));
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// Server rejects the first (mp3) request with 400, accepts the wav retry.
+    async fn serve_reject_then_ok(wav_body: Vec<u8>) -> (SocketAddr, Arc<AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_cl = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await { Ok(s) => s, Err(_) => break };
+                let n = hits_cl.fetch_add(1, Ordering::SeqCst);
+                let wav = wav_body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let resp = if n == 0 {
+                        // First request (mp3) → reject with a format complaint.
+                        let body = b"{\"error\":\"response_format 'mp3' is not supported\"}";
+                        let mut r = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+                        r.extend_from_slice(body); r
+                    } else {
+                        // Retry (wav) → succeed.
+                        let mut r = format!("HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", wav.len()).into_bytes();
+                        r.extend_from_slice(&wav); r
+                    };
+                    let _ = sock.write_all(&resp).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (addr, hits)
+    }
+
+    #[tokio::test]
+    async fn format_rejection_retries_as_wav() {
+        let wav = b"RIFF....WAVEfake".to_vec();
+        let (addr, hits) = serve_reject_then_ok(wav.clone()).await;
+        let backend = OpenAiBackend::new(cfg_for(addr));
+
+        let mut req = SynthesiseRequest::new("Hello from mobile.");
+        req.format = OutputFormat::Mp3; // server rejects this, MIRA retries wav
+        let buf = backend.synthesise(&req).await.expect("retry should succeed");
+        assert_eq!(buf.bytes, wav, "should return the wav retry's body");
+        assert!(matches!(buf.codec, AudioCodec::Wav { .. }), "codec should reflect the wav retry");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "exactly one retry");
     }
 
     #[tokio::test]

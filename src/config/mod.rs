@@ -173,6 +173,16 @@ pub struct MiraConfig {
     // setup); an admin can switch to a keyed provider for richer data.
     #[serde(default)]
     pub weather: WeatherConfig,
+
+    // 0.292.0 — image generation backends (OpenAI, local Automatic1111 / SD
+    // WebUI, local ComfyUI). The `image_generate` tool dispatches through this.
+    #[serde(default)]
+    pub image: ImageConfig,
+
+    // 0.292.0 — video generation (OpenAI Videos / Sora). The `video_generate`
+    // tool reads its defaults from here; key/endpoint come from providers.openai.
+    #[serde(default)]
+    pub video: VideoConfig,
 }
 
 // Backup runtime knobs. The on-demand `GET /api/admin/backup` and the
@@ -3690,6 +3700,8 @@ impl Default for MiraConfig {
             backup:          BackupConfig::default(),
             notifications:   NotificationsConfig::default(),
             weather:         WeatherConfig::default(),
+            image:           ImageConfig::default(),
+            video:           VideoConfig::default(),
         }
     }
 }
@@ -3720,6 +3732,271 @@ impl Default for WeatherConfig {
             provider: default_weather_provider(),
             api_key:  None,
             units:    default_weather_units(),
+        }
+    }
+}
+
+// ── Image generation (0.292.0) ──────────────────────────────────────────
+/// Image-generation backends. The `image_generate` tool dispatches through a
+/// router (mirroring the TTS subsystem): one `default_backend`, plus
+/// per-backend config. Backends: `openai` (uses `providers.openai`, on when a
+/// key resolves), `automatic1111` (local SD WebUI), `comfyui` (local ComfyUI).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ImageConfig {
+    /// Which backend to use by default. Empty/`auto` = first enabled, preferring
+    /// a configured local backend, else OpenAI. One of: `openai` |
+    /// `automatic1111` | `comfyui`.
+    #[serde(default)]
+    pub default_backend: String,
+    /// OpenAI Images (or OpenAI-compatible) backend settings. Key + endpoint
+    /// come from `providers.openai`; this just picks the model.
+    #[serde(default)]
+    pub openai: ImageOpenAiConfig,
+    /// Local Automatic1111 / Stable Diffusion WebUI backend.
+    #[serde(default)]
+    pub automatic1111: Automatic1111Config,
+    /// Local ComfyUI backend.
+    #[serde(default)]
+    pub comfyui: ComfyUiConfig,
+}
+
+/// OpenAI image backend knobs. The API key + base URL live under
+/// `providers.openai` (shared with chat/embeddings); only the default image
+/// model is image-specific.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageOpenAiConfig {
+    /// Default image model, e.g. `dall-e-3` or `gpt-image-1`.
+    #[serde(default = "default_openai_image_model")]
+    pub default_model: String,
+}
+
+fn default_openai_image_model() -> String { "dall-e-3".to_string() }
+
+impl Default for ImageOpenAiConfig {
+    fn default() -> Self { Self { default_model: default_openai_image_model() } }
+}
+
+/// Automatic1111 / SD WebUI (`/sdapi/v1/txt2img`). Local, no key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Automatic1111Config {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Base URL of the WebUI, e.g. `http://127.0.0.1:7860`.
+    #[serde(default = "default_a1111_url")]
+    pub base_url: String,
+    /// Optional checkpoint to switch to (override_settings.sd_model_checkpoint).
+    /// Empty = leave the WebUI's current model.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default = "default_a1111_steps")]
+    pub steps: u32,
+    #[serde(default = "default_a1111_sampler")]
+    pub sampler: String,
+    #[serde(default = "default_image_dim")]
+    pub width: u32,
+    #[serde(default = "default_image_dim")]
+    pub height: u32,
+    #[serde(default = "default_a1111_cfg")]
+    pub cfg_scale: f32,
+    /// Default negative prompt applied when the call doesn't pass one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub negative_prompt: String,
+}
+
+fn default_a1111_url() -> String { "http://127.0.0.1:7860".to_string() }
+fn default_a1111_steps() -> u32 { 25 }
+fn default_a1111_sampler() -> String { "Euler a".to_string() }
+fn default_a1111_cfg() -> f32 { 7.0 }
+fn default_image_dim() -> u32 { 1024 }
+
+impl Default for Automatic1111Config {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: default_a1111_url(),
+            model: String::new(),
+            steps: default_a1111_steps(),
+            sampler: default_a1111_sampler(),
+            width: default_image_dim(),
+            height: default_image_dim(),
+            cfg_scale: default_a1111_cfg(),
+            negative_prompt: String::new(),
+        }
+    }
+}
+
+/// ComfyUI (`POST /prompt` with a workflow graph → poll `/history` → fetch
+/// `/view`). Local, no key. The workflow is a ComfyUI **API-format** JSON with
+/// placeholder tokens the backend substitutes: `{{prompt}}`, `{{negative}}`,
+/// `{{seed}}`, `{{width}}`, `{{height}}`, `{{steps}}`, `{{cfg}}`, `{{ckpt}}`.
+/// Empty = use the built-in default SD txt2img workflow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComfyUiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Base URL, e.g. `http://127.0.0.1:8188`.
+    #[serde(default = "default_comfyui_url")]
+    pub base_url: String,
+    /// Inline workflow JSON (API format) with placeholder tokens. Empty = the
+    /// built-in default workflow.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workflow_json: String,
+    /// Checkpoint filename for the default workflow's `{{ckpt}}` (e.g.
+    /// `sd_xl_base_1.0.safetensors`). Ignored when a custom `workflow_json`
+    /// hardcodes its own checkpoint.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default = "default_comfy_steps")]
+    pub steps: u32,
+    #[serde(default = "default_image_dim")]
+    pub width: u32,
+    #[serde(default = "default_image_dim")]
+    pub height: u32,
+    #[serde(default = "default_comfy_cfg")]
+    pub cfg_scale: f32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub negative_prompt: String,
+}
+
+fn default_comfyui_url() -> String { "http://127.0.0.1:8188".to_string() }
+fn default_comfy_steps() -> u32 { 20 }
+fn default_comfy_cfg() -> f32 { 7.0 }
+
+impl Default for ComfyUiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: default_comfyui_url(),
+            workflow_json: String::new(),
+            model: String::new(),
+            steps: default_comfy_steps(),
+            width: default_image_dim(),
+            height: default_image_dim(),
+            cfg_scale: default_comfy_cfg(),
+            negative_prompt: String::new(),
+        }
+    }
+}
+
+// ── Video generation (0.292.0) ──────────────────────────────────────────
+/// Video generation. Today: OpenAI Videos / Sora (key + endpoint from
+/// `providers.openai`). `default_backend` is reserved for future local
+/// backends (e.g. ComfyUI video workflows).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VideoConfig {
+    /// Default backend. Empty/`auto` = first enabled (local preferred). One of:
+    /// `openai` | `comfyui` | `wan2gp`.
+    #[serde(default)]
+    pub default_backend: String,
+    /// OpenAI Videos (Sora) settings.
+    #[serde(default)]
+    pub openai: VideoOpenAiConfig,
+    /// Local ComfyUI video backend (a video workflow over the same /prompt API).
+    #[serde(default)]
+    pub comfyui: VideoComfyUiConfig,
+    /// Local WAN2GP (Gradio) video backend.
+    #[serde(default)]
+    pub wan2gp: Wan2gpConfig,
+}
+
+/// Local ComfyUI **video** backend. Unlike images, there's no universal default
+/// workflow — you supply a ComfyUI API-format video workflow (Wan / AnimateDiff
+/// / SVD, ending in a video-combine node) with placeholder tokens: `{{prompt}}`
+/// `{{negative}}` `{{seed}}` `{{width}}` `{{height}}` `{{frames}}` `{{fps}}`
+/// `{{steps}}` `{{cfg}}` `{{ckpt}}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoComfyUiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_comfyui_url")]
+    pub base_url: String,
+    /// REQUIRED: the video workflow JSON (API format) with placeholder tokens.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workflow_json: String,
+    /// Checkpoint/model for `{{ckpt}}` (workflow-dependent).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default = "default_comfy_steps")]
+    pub steps: u32,
+    #[serde(default = "default_video_dim")]
+    pub width: u32,
+    #[serde(default = "default_video_dim")]
+    pub height: u32,
+    /// Frames per second; `{{frames}}` = seconds × fps.
+    #[serde(default = "default_video_fps")]
+    pub fps: u32,
+    #[serde(default = "default_comfy_cfg")]
+    pub cfg_scale: f32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub negative_prompt: String,
+}
+
+fn default_video_dim() -> u32 { 512 }
+fn default_video_fps() -> u32 { 16 }
+
+impl Default for VideoComfyUiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: default_comfyui_url(),
+            workflow_json: String::new(),
+            model: String::new(),
+            steps: default_comfy_steps(),
+            width: default_video_dim(),
+            height: default_video_dim(),
+            fps: default_video_fps(),
+            cfg_scale: default_comfy_cfg(),
+            negative_prompt: String::new(),
+        }
+    }
+}
+
+/// Local WAN2GP (deepbeepmeep's Wan2GP) — a Gradio app for Wan video models.
+/// MIRA drives its Gradio API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Wan2gpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Base URL of the Gradio app, e.g. `http://127.0.0.1:7862`.
+    #[serde(default = "default_wan2gp_url")]
+    pub base_url: String,
+    /// Gradio API endpoint name to call (the named `api_name`, e.g.
+    /// `/generate_video`). Discoverable from the app's `/config`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_name: String,
+}
+
+fn default_wan2gp_url() -> String { "http://127.0.0.1:7862".to_string() }
+
+impl Default for Wan2gpConfig {
+    fn default() -> Self {
+        Self { enabled: false, base_url: default_wan2gp_url(), api_name: String::new() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoOpenAiConfig {
+    /// Default video model, e.g. `sora-2` or `sora-2-pro`.
+    #[serde(default = "default_video_model")]
+    pub default_model: String,
+    /// Default frame size `WIDTHxHEIGHT` (larger sizes need sora-2-pro).
+    #[serde(default = "default_video_size")]
+    pub default_size: String,
+    /// Default clip length in seconds.
+    #[serde(default = "default_video_seconds")]
+    pub default_seconds: u32,
+}
+
+fn default_video_model() -> String { "sora-2".to_string() }
+fn default_video_size() -> String { "1280x720".to_string() }
+fn default_video_seconds() -> u32 { 4 }
+
+impl Default for VideoOpenAiConfig {
+    fn default() -> Self {
+        Self {
+            default_model:   default_video_model(),
+            default_size:    default_video_size(),
+            default_seconds: default_video_seconds(),
         }
     }
 }

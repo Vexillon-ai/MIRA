@@ -3,7 +3,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload, Trash2, Wrench, RotateCcw, Loader2, Calendar as CalendarIcon, RefreshCw, Shield, ShieldAlert, Volume2, ChevronDown, Bell } from 'lucide-react'
+import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload, Trash2, Wrench, RotateCcw, Loader2, Calendar as CalendarIcon, RefreshCw, Shield, ShieldAlert, Volume2, ChevronDown, Bell, Image as ImageIcon } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { api } from '@/api/client'
 import { providersApi, type StatusInfo } from '@/api/providers'
@@ -187,6 +187,29 @@ interface Config {
     wasm?:    { python_path?: string }
     pyodide?: { enabled?: boolean; prewarm?: string[] }
   }
+  image?: {
+    default_backend?: '' | 'auto' | 'openai' | 'automatic1111' | 'comfyui'
+    automatic1111?: {
+      enabled?: boolean; base_url?: string; model?: string; steps?: number
+      sampler?: string; width?: number; height?: number; cfg_scale?: number
+      negative_prompt?: string
+    }
+    comfyui?: {
+      enabled?: boolean; base_url?: string; workflow_json?: string; model?: string
+      steps?: number; width?: number; height?: number; cfg_scale?: number
+      negative_prompt?: string
+    }
+  }
+  video?: {
+    default_backend?: '' | 'auto' | 'openai' | 'comfyui' | 'wan2gp'
+    openai?: { default_model?: string; default_size?: string; default_seconds?: number }
+    comfyui?: {
+      enabled?: boolean; base_url?: string; workflow_json?: string; model?: string
+      steps?: number; width?: number; height?: number; fps?: number; cfg_scale?: number
+      negative_prompt?: string
+    }
+    wan2gp?: { enabled?: boolean; base_url?: string; api_name?: string }
+  }
   tts?: {
     enabled?:               boolean
     default_backend?:       string
@@ -289,7 +312,7 @@ function setPath(obj: Config, path: string, value: unknown): Config {
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
-type TabId = 'appearance' | 'providers' | 'agent' | 'tools' | 'sandbox' | 'channels' | 'memory' | 'calendar' | 'voice' | 'notifications' | 'guardian' | 'server' | 'advanced'
+type TabId = 'appearance' | 'providers' | 'agent' | 'tools' | 'sandbox' | 'channels' | 'memory' | 'calendar' | 'voice' | 'image' | 'notifications' | 'guardian' | 'server' | 'advanced'
 
 const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: 'appearance', label: 'Appearance', icon: <Palette size={14} /> },
@@ -301,6 +324,7 @@ const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: 'memory',     label: 'Memory',     icon: <Database size={14} />},
   { id: 'calendar',   label: 'Calendar',   icon: <CalendarIcon size={14} /> },
   { id: 'voice',      label: 'Voice',      icon: <Volume2 size={14} /> },
+  { id: 'image',      label: 'Image & Video', icon: <ImageIcon size={14} /> },
   { id: 'notifications', label: 'Notifications', icon: <Bell size={14} /> },
   { id: 'guardian',   label: 'Guardian',   icon: <ShieldAlert size={14} /> },
   { id: 'server',     label: 'Server & Security', icon: <Server size={14} />  },
@@ -725,7 +749,7 @@ export default function SettingsPage() {
   const initialTab = (() => {
     if (typeof window === 'undefined') return 'appearance'
     const p = new URLSearchParams(window.location.search).get('tab')
-    const allowed: TabId[] = ['appearance','providers','agent','tools','sandbox','channels','memory','calendar','voice','notifications','guardian','server','advanced']
+    const allowed: TabId[] = ['appearance','providers','agent','tools','sandbox','channels','memory','calendar','voice','image','notifications','guardian','server','advanced']
     return (allowed as string[]).includes(p ?? '') ? (p as TabId) : 'appearance'
   })()
   const [tab, setTab] = useState<TabId>(initialTab)
@@ -997,6 +1021,9 @@ export default function SettingsPage() {
         )}
         {tab === 'voice' && (
           <VoiceTab set={set} str={str} num={num} bool={bool} />
+        )}
+        {tab === 'image' && (
+          <ImageTab set={set} str={str} num={num} bool={bool} />
         )}
         {tab === 'notifications' && (
           <div className={styles.tabBody}>
@@ -3501,6 +3528,198 @@ function hostFromUrl(s: string): string {
   } catch {
     return ''
   }
+}
+
+// ── Image & Video tab ─────────────────────────────────────────────────────────
+
+function ImageTab({
+  set, str, num, bool,
+}: {
+  set: (p: string, v: unknown) => void
+  str: (p: string, fb?: string) => string
+  num: (p: string, fb?: number) => number
+  bool: (p: string, fb?: boolean) => boolean
+}) {
+  const comfyOn = bool('image.comfyui.enabled', false)
+  const a1111On = bool('image.automatic1111.enabled', false)
+  return (
+    <div className={styles.tabBody}>
+      <Section title="Image generation">
+        <p className={styles.sectionDesc}>
+          The <code>image_generate</code> tool turns a prompt into an inline image through a pluggable backend. Enable one or more below; the <strong>default backend</strong> picks which runs when the agent doesn't specify one. Local backends (ComfyUI / Automatic1111) need no key. OpenAI uses the key under <strong>Providers</strong>.
+        </p>
+        <Field label="Default backend" desc="Which backend to use when the request doesn't name one. 'Auto' picks the first enabled (local preferred).">
+          <SelectInput
+            value={str('image.default_backend', 'auto')}
+            onChange={(v) => set('image.default_backend', v)}
+            options={[
+              { value: 'auto',          label: 'Auto (first enabled, local preferred)' },
+              { value: 'comfyui',       label: 'ComfyUI (local)' },
+              { value: 'automatic1111', label: 'Automatic1111 / SD WebUI (local)' },
+              { value: 'openai',        label: 'OpenAI Images (cloud)' },
+            ]}
+          />
+        </Field>
+      </Section>
+
+      <Section title="ComfyUI (local)">
+        <p className={styles.sectionDesc}>
+          Local ComfyUI server. MIRA runs a node-graph workflow (built-in default SD txt2img, or your own API-format workflow) and fetches the result.
+        </p>
+        <Field label="Enabled" desc="Use ComfyUI as an image backend.">
+          <Toggle value={comfyOn} onChange={(v) => set('image.comfyui.enabled', v)} />
+        </Field>
+        <Field label="Base URL" desc="e.g. http://127.0.0.1:8188 — or http://windows-host:8188 when ComfyUI runs on the Windows host and MIRA is in WSL.">
+          <TextInput value={str('image.comfyui.base_url', 'http://127.0.0.1:8188')} onChange={(v) => set('image.comfyui.base_url', v)} placeholder="http://127.0.0.1:8188" mono />
+        </Field>
+        <Field label="Checkpoint (model)" desc="Checkpoint filename for the default workflow (e.g. sd_xl_base_1.0.safetensors). Blank = auto-pick the first available.">
+          <TextInput value={str('image.comfyui.model')} onChange={(v) => set('image.comfyui.model', v)} placeholder="auto" mono />
+        </Field>
+        <Field label="Steps" desc="Sampling steps.">
+          <NumberInput value={num('image.comfyui.steps', 20)} onChange={(v) => set('image.comfyui.steps', v)} min={1} max={150} />
+        </Field>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Field label="Width" desc="Default width.">
+            <NumberInput value={num('image.comfyui.width', 1024)} onChange={(v) => set('image.comfyui.width', v)} min={64} max={4096} step={64} />
+          </Field>
+          <Field label="Height" desc="Default height.">
+            <NumberInput value={num('image.comfyui.height', 1024)} onChange={(v) => set('image.comfyui.height', v)} min={64} max={4096} step={64} />
+          </Field>
+          <Field label="CFG scale" desc="Prompt adherence.">
+            <NumberInput value={num('image.comfyui.cfg_scale', 7)} onChange={(v) => set('image.comfyui.cfg_scale', v)} min={1} max={30} step={0.5} />
+          </Field>
+        </div>
+        <Field label="Negative prompt" desc="Default things to avoid (used when the call doesn't pass one).">
+          <TextInput value={str('image.comfyui.negative_prompt')} onChange={(v) => set('image.comfyui.negative_prompt', v)} placeholder="blurry, low quality, watermark" />
+        </Field>
+        <Field label="Custom workflow (advanced)" desc="Optional ComfyUI API-format workflow JSON with placeholder tokens {{prompt}} {{negative}} {{seed}} {{width}} {{height}} {{steps}} {{cfg}} {{ckpt}}. Blank = built-in default SD txt2img.">
+          <TextInput value={str('image.comfyui.workflow_json')} onChange={(v) => set('image.comfyui.workflow_json', v)} placeholder="(default workflow)" mono />
+        </Field>
+      </Section>
+
+      <Section title="Automatic1111 / SD WebUI (local)">
+        <p className={styles.sectionDesc}>
+          Local Stable Diffusion WebUI (incl. Forge). Requires the server launched with <code>--api --listen</code>.
+        </p>
+        <Field label="Enabled" desc="Use Automatic1111 as an image backend.">
+          <Toggle value={a1111On} onChange={(v) => set('image.automatic1111.enabled', v)} />
+        </Field>
+        <Field label="Base URL" desc="e.g. http://127.0.0.1:7860 — or http://windows-host:7860 from WSL.">
+          <TextInput value={str('image.automatic1111.base_url', 'http://127.0.0.1:7860')} onChange={(v) => set('image.automatic1111.base_url', v)} placeholder="http://127.0.0.1:7860" mono />
+        </Field>
+        <Field label="Checkpoint (model)" desc="Optional checkpoint to switch to per call. Blank = use the WebUI's currently-loaded model.">
+          <TextInput value={str('image.automatic1111.model')} onChange={(v) => set('image.automatic1111.model', v)} placeholder="(loaded model)" mono />
+        </Field>
+        <Field label="Sampler" desc="Sampler name, e.g. 'Euler a' or 'DPM++ 2M'.">
+          <TextInput value={str('image.automatic1111.sampler', 'Euler a')} onChange={(v) => set('image.automatic1111.sampler', v)} placeholder="Euler a" mono />
+        </Field>
+        <Field label="Steps" desc="Sampling steps.">
+          <NumberInput value={num('image.automatic1111.steps', 25)} onChange={(v) => set('image.automatic1111.steps', v)} min={1} max={150} />
+        </Field>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Field label="Width" desc="Default width.">
+            <NumberInput value={num('image.automatic1111.width', 1024)} onChange={(v) => set('image.automatic1111.width', v)} min={64} max={4096} step={64} />
+          </Field>
+          <Field label="Height" desc="Default height.">
+            <NumberInput value={num('image.automatic1111.height', 1024)} onChange={(v) => set('image.automatic1111.height', v)} min={64} max={4096} step={64} />
+          </Field>
+          <Field label="CFG scale" desc="Prompt adherence.">
+            <NumberInput value={num('image.automatic1111.cfg_scale', 7)} onChange={(v) => set('image.automatic1111.cfg_scale', v)} min={1} max={30} step={0.5} />
+          </Field>
+        </div>
+        <Field label="Negative prompt" desc="Default things to avoid.">
+          <TextInput value={str('image.automatic1111.negative_prompt')} onChange={(v) => set('image.automatic1111.negative_prompt', v)} placeholder="blurry, low quality, watermark" />
+        </Field>
+      </Section>
+
+      <Section title="OpenAI Images (cloud)">
+        <p className={styles.sectionDesc}>
+          Uses the OpenAI key + endpoint from the <strong>Providers</strong> tab (or an OpenAI-compatible images endpoint). Enabled automatically when a key is present.
+        </p>
+        <Field label="Default model" desc="e.g. dall-e-3 or gpt-image-1.">
+          <TextInput value={str('image.openai.default_model', 'dall-e-3')} onChange={(v) => set('image.openai.default_model', v)} placeholder="dall-e-3" mono />
+        </Field>
+      </Section>
+
+      <Section title="Video generation">
+        <p className={styles.sectionDesc}>
+          The <code>video_generate</code> tool renders a short clip inline as a player, through a pluggable backend (mirrors image). Pick the <strong>default backend</strong>; configure each below.
+        </p>
+        <Field label="Default backend" desc="Which backend to use when the request doesn't name one. 'Auto' picks the first enabled (local preferred).">
+          <SelectInput
+            value={str('video.default_backend', 'auto')}
+            onChange={(v) => set('video.default_backend', v)}
+            options={[
+              { value: 'auto',    label: 'Auto (first enabled, local preferred)' },
+              { value: 'comfyui', label: 'ComfyUI video (local)' },
+              { value: 'wan2gp',  label: 'WAN2GP (local)' },
+              { value: 'openai',  label: 'OpenAI Videos / Sora (cloud)' },
+            ]}
+          />
+        </Field>
+      </Section>
+
+      <Section title="ComfyUI video (local)">
+        <p className={styles.sectionDesc}>
+          Runs a ComfyUI <strong>video</strong> workflow (Wan / AnimateDiff / SVD). There's no universal default video workflow, so you must paste your own API-format workflow with placeholder tokens: <code>{'{{prompt}}'} {'{{negative}}'} {'{{seed}}'} {'{{width}}'} {'{{height}}'} {'{{frames}}'} {'{{fps}}'} {'{{steps}}'} {'{{cfg}}'} {'{{ckpt}}'}</code> (<code>{'{{frames}}'}</code> = seconds × fps).
+        </p>
+        <Field label="Enabled" desc="Use ComfyUI as a video backend.">
+          <Toggle value={bool('video.comfyui.enabled', false)} onChange={(v) => set('video.comfyui.enabled', v)} />
+        </Field>
+        <Field label="Base URL" desc="Usually the same ComfyUI as images, e.g. http://windows-host:8188.">
+          <TextInput value={str('video.comfyui.base_url', 'http://127.0.0.1:8188')} onChange={(v) => set('video.comfyui.base_url', v)} placeholder="http://127.0.0.1:8188" mono />
+        </Field>
+        <Field label="Workflow JSON (required)" desc="ComfyUI API-format video workflow with the placeholder tokens above. Export from ComfyUI (Save (API Format)) and replace the prompt/seed/etc values with tokens.">
+          <TextInput value={str('video.comfyui.workflow_json')} onChange={(v) => set('video.comfyui.workflow_json', v)} placeholder="(paste API-format workflow)" mono />
+        </Field>
+        <Field label="Model / checkpoint" desc="Value for {{ckpt}} (workflow-dependent).">
+          <TextInput value={str('video.comfyui.model')} onChange={(v) => set('video.comfyui.model', v)} placeholder="(workflow-dependent)" mono />
+        </Field>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Field label="Width" desc="Default width."><NumberInput value={num('video.comfyui.width', 512)} onChange={(v) => set('video.comfyui.width', v)} min={64} max={2048} step={16} /></Field>
+          <Field label="Height" desc="Default height."><NumberInput value={num('video.comfyui.height', 512)} onChange={(v) => set('video.comfyui.height', v)} min={64} max={2048} step={16} /></Field>
+          <Field label="FPS" desc="frames = seconds × fps."><NumberInput value={num('video.comfyui.fps', 16)} onChange={(v) => set('video.comfyui.fps', v)} min={1} max={60} /></Field>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Field label="Steps" desc="Sampling steps."><NumberInput value={num('video.comfyui.steps', 20)} onChange={(v) => set('video.comfyui.steps', v)} min={1} max={150} /></Field>
+          <Field label="CFG scale" desc="Prompt adherence."><NumberInput value={num('video.comfyui.cfg_scale', 7)} onChange={(v) => set('video.comfyui.cfg_scale', v)} min={1} max={30} step={0.5} /></Field>
+        </div>
+        <Field label="Negative prompt" desc="Default things to avoid.">
+          <TextInput value={str('video.comfyui.negative_prompt')} onChange={(v) => set('video.comfyui.negative_prompt', v)} placeholder="blurry, low quality" />
+        </Field>
+      </Section>
+
+      <Section title="WAN2GP (local)">
+        <p className={styles.sectionDesc}>
+          Local WAN2GP (Wan2GP) — a Gradio video app. MIRA drives its Gradio API. Set the URL and the API endpoint name (from the app's <code>/config</code>).
+        </p>
+        <Field label="Enabled" desc="Use WAN2GP as a video backend.">
+          <Toggle value={bool('video.wan2gp.enabled', false)} onChange={(v) => set('video.wan2gp.enabled', v)} />
+        </Field>
+        <Field label="Base URL" desc="e.g. http://windows-host:7862.">
+          <TextInput value={str('video.wan2gp.base_url', 'http://127.0.0.1:7862')} onChange={(v) => set('video.wan2gp.base_url', v)} placeholder="http://127.0.0.1:7862" mono />
+        </Field>
+        <Field label="Gradio API name" desc="The named endpoint to call, e.g. /generate_video (discoverable from the app's /config).">
+          <TextInput value={str('video.wan2gp.api_name')} onChange={(v) => set('video.wan2gp.api_name', v)} placeholder="/generate_video" mono />
+        </Field>
+      </Section>
+
+      <Section title="OpenAI Videos / Sora (cloud)">
+        <p className={styles.sectionDesc}>
+          Uses the OpenAI key from the <strong>Providers</strong> tab; off until a key is set.
+        </p>
+        <Field label="Default model" desc="e.g. sora-2 or sora-2-pro (larger sizes need pro).">
+          <TextInput value={str('video.openai.default_model', 'sora-2')} onChange={(v) => set('video.openai.default_model', v)} placeholder="sora-2" mono />
+        </Field>
+        <Field label="Default size" desc="Frame size WIDTHxHEIGHT, e.g. 1280x720.">
+          <TextInput value={str('video.openai.default_size', '1280x720')} onChange={(v) => set('video.openai.default_size', v)} placeholder="1280x720" mono />
+        </Field>
+        <Field label="Default length (seconds)" desc="Clip length in seconds.">
+          <NumberInput value={num('video.openai.default_seconds', 4)} onChange={(v) => set('video.openai.default_seconds', v)} min={1} max={60} />
+        </Field>
+      </Section>
+    </div>
+  )
 }
 
 function VoiceTab({
