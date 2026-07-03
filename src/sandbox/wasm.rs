@@ -23,7 +23,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::preview1::{self, WasiP1Ctx};
-use wasmtime_wasi::pipe::{MemoryInputPipe, MemoryOutputPipe};
+use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 use super::{CodeSandbox, Language, ResourceLimits, SandboxError, SandboxOutput};

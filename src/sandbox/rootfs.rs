@@ -459,7 +459,7 @@ fn collect_so_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Run `ldd` on `binary` and return every absolute host path it reports.
 ///
 /// `ldd` output shapes we care about:
-///   ```
+///   ```text
 ///   linux-vdso.so.1 (0x00007ffe...)              ← skip, no path
 ///   libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x...)   ← lib + path
 ///   /lib64/ld-linux-x86-64.so.2 (0x...)          ← loader, no `=>`

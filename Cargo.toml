@@ -2,7 +2,7 @@
 name = "mira"
 # First public release: 0.272.0 = "public beta 1" (tag v0.272.0; GitHub release
 # marked pre-release). Post-beta fixes continue from 0.272.1.
-version = "0.292.1"
+version = "0.292.2"
 edition = "2024"
 description = "Multi-tasking Intelligent Responsive Assistant - A personal AI agent framework"
 authors = ["Tarek El Diab"]
@@ -191,13 +191,21 @@ tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 
 # Auth — password hashing (argon2id) and JWT
 argon2       = "0.5"
-jsonwebtoken = "9"
+# v10 requires choosing a crypto backend. Use aws_lc_rs — the same provider the
+# rest of the TLS stack (rustls 0.23 via reqwest/lettre) already compiles, so
+# the whole binary shares one audited backend and JWT RSA doesn't route through
+# the pure-Rust `rsa` crate (RUSTSEC-2023-0071 Marvin timing sidechannel).
+jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 
 # LDAP / Active Directory auth (Q2 #11). Async (tokio) search-then-bind for
 # SSO against an enterprise directory. default-features=false drops the sync
 # wrapper + native-tls; tls-rustls keeps the same TLS backend as the rest of
 # the stack (for ldaps:// and STARTTLS).
-ldap3 = { version = "0.11", default-features = false, features = ["tls-rustls"] }
+# 0.12 moves onto rustls 0.23 (→ ring 0.17 + rustls-webpki 0.103), dropping the
+# old ring 0.16 / rustls-webpki 0.101 copies. rustls 0.23 needs an explicit
+# provider, so use `tls-rustls-ring` (= tls-rustls + rustls/ring) rather than
+# bare `tls-rustls`, which no longer selects one.
+ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ring"] }
 
 # PDF parsing (future tool)
 lopdf = "0.34"
@@ -267,8 +275,8 @@ sysinfo = { version = "0.36", default-features = false, features = ["system", "d
 # behind the `sandbox-wasm` feature (heavy compile). Brings secure `code_run`
 # to Windows/macOS with one capability-based model. See
 # design-docs/just-in-time-tools.md + memory project_code_execution_sandbox.
-wasmtime = { version = "27", optional = true, default-features = false, features = ["cranelift", "runtime"] }
-wasmtime-wasi = { version = "27", optional = true }
+wasmtime = { version = "36", optional = true, default-features = false, features = ["cranelift", "runtime"] }
+wasmtime-wasi = { version = "36", optional = true }
 
 # Sandbox (Phase 7a-4) — seccomp-bpf filter compiler. Only pulled in on Linux
 # when the `sandbox-linux` feature is on; other platforms fall back to the
