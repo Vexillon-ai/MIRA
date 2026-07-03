@@ -44,6 +44,13 @@ pub struct OpenAiConfig {
     pub model:         String,
     pub default_voice: String,
     pub timeout_secs:  u64,
+    /// This backend's server only emits WAV (it has no mp3/opus encoder), so
+    /// any non-WAV `response_format` would be rejected. When set, we downgrade
+    /// the request to WAV up front — skipping a doomed mp3 round-trip and the
+    /// warn! it logs. Chatterbox is the known case. The generic reject→retry
+    /// in `post_audio` stays as a safety net for *un*flagged third-party
+    /// servers whose format support we can't know ahead of time.
+    pub wav_only:      bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -176,11 +183,20 @@ impl OpenAiBackend {
             .filter(|s| !s.is_empty())
             .unwrap_or(&self.cfg.default_voice);
 
+        // Known WAV-only server (e.g. Chatterbox): downgrade before we ask,
+        // so the doomed non-WAV attempt and its warn! never happen. Unflagged
+        // servers still get the request as-is and rely on the retry below.
+        let fmt = if self.cfg.wav_only && req.format != OutputFormat::Wav {
+            OutputFormat::Wav
+        } else {
+            req.format
+        };
+
         let body = SpeechBody {
             model:           &self.cfg.model,
             input:           &req.text,
             voice,
-            response_format: Self::response_format(req.format),
+            response_format: Self::response_format(fmt),
             speed:           req.speed.clamp(0.25, 4.0),
         };
 
@@ -249,7 +265,7 @@ impl OpenAiBackend {
             // for mp3 used to fall back to internal while wav-based channels
             // worked. The retry only fires when the request wasn't already wav,
             // so it can't recurse.
-            let format_rejected = req.format != OutputFormat::Wav
+            let format_rejected = fmt != OutputFormat::Wav
                 && (matches!(status.as_u16(), 400 | 415 | 422)
                     || lower.contains("response_format")
                     || lower.contains("format")
@@ -267,7 +283,7 @@ impl OpenAiBackend {
             return Err(TtsError::Upstream(detail));
         }
         let bytes = resp.bytes().await?.to_vec();
-        Ok((bytes, Self::codec_for(req.format)))
+        Ok((bytes, Self::codec_for(fmt)))
     }
 }
 
@@ -560,6 +576,7 @@ mod tests {
             model:         "tts-1".into(),
             default_voice: "alloy".into(),
             timeout_secs:  5,
+            wav_only:      false,
         }
     }
 
@@ -626,6 +643,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wav_only_backend_downgrades_without_retry() {
+        // A wav_only backend asked for mp3 should send wav on the FIRST
+        // request (no reject, no retry) and report the wav codec.
+        let wav = b"RIFF....WAVEfake".to_vec();
+        let (addr, hits) = serve_fake(wav.clone(), 200).await;
+        let mut cfg = cfg_for(addr);
+        cfg.wav_only = true;
+        let backend = OpenAiBackend::new(cfg);
+
+        let mut req = SynthesiseRequest::new("Hello from mobile.");
+        req.format = OutputFormat::Mp3; // downgraded to wav up front
+        let buf = backend.synthesise(&req).await.expect("should succeed");
+        assert!(matches!(buf.codec, AudioCodec::Wav { .. }), "codec should be wav");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "no retry — one request only");
+    }
+
+    #[tokio::test]
     async fn synthesise_maps_401_to_unauthorized() {
         let (addr, _) = serve_fake(b"unauthorized".to_vec(), 401).await;
         let backend = OpenAiBackend::new(cfg_for(addr));
@@ -649,7 +683,7 @@ mod tests {
         let backend = OpenAiBackend::new(OpenAiConfig {
             id: "openai", base_url: "http://127.0.0.1:1/v1".into(),
             api_key: "".into(), model: "tts-1".into(),
-            default_voice: "alloy".into(), timeout_secs: 1,
+            default_voice: "alloy".into(), timeout_secs: 1, wav_only: false,
         });
         let err = backend.synthesise(&SynthesiseRequest::new("   ")).await.unwrap_err();
         assert!(matches!(err, TtsError::BadRequest(_)), "got {err:?}");
@@ -676,7 +710,7 @@ mod tests {
         let backend = OpenAiBackend::new(OpenAiConfig {
             id: "openai", base_url: "http://x/v1".into(),
             api_key: "".into(), model: "tts-1".into(),
-            default_voice: "alloy".into(), timeout_secs: 1,
+            default_voice: "alloy".into(), timeout_secs: 1, wav_only: false,
         });
         let voices = backend.list_voices().await.unwrap();
         assert!(voices.iter().any(|v| v.id == "alloy"));
@@ -689,7 +723,7 @@ mod tests {
         let backend = OpenAiBackend::new(OpenAiConfig {
             id: "openai_compat", base_url: "http://x/v1".into(),
             api_key: "".into(), model: "tts-1".into(),
-            default_voice: "echo".into(), timeout_secs: 1,
+            default_voice: "echo".into(), timeout_secs: 1, wav_only: false,
         });
         let voices = backend.list_voices().await.unwrap();
         assert_eq!(voices.len(), 1);
@@ -702,7 +736,7 @@ mod tests {
         let backend = OpenAiBackend::new(OpenAiConfig {
             id: "openai", base_url: "https://api.openai.com/v1/".into(),
             api_key: "".into(), model: "tts-1".into(),
-            default_voice: "alloy".into(), timeout_secs: 1,
+            default_voice: "alloy".into(), timeout_secs: 1, wav_only: false,
         });
         assert_eq!(backend.endpoint(), "https://api.openai.com/v1/audio/speech");
     }
@@ -719,7 +753,7 @@ mod tests {
         let mk = |url: &str| OpenAiBackend::new(OpenAiConfig {
             id: "openai_compat", base_url: url.into(),
             api_key: "".into(), model: "tts-1".into(),
-            default_voice: "alloy".into(), timeout_secs: 1,
+            default_voice: "alloy".into(), timeout_secs: 1, wav_only: false,
         });
         assert_eq!(mk("http://x:8000/v1").root(),  "http://x:8000");
         assert_eq!(mk("http://x:8000/v1/").root(), "http://x:8000");

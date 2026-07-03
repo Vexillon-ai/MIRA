@@ -204,6 +204,7 @@ impl TtsService {
                         model:         "chatterbox".to_string(),
                         default_voice: cfg.chatterbox.default_voice.clone(),
                         timeout_secs:  cfg.request_timeout_secs,
+                        wav_only:      true,  // Chatterbox emits WAV only — skip the mp3 reject/retry.
                     })));
                 info!("tts: chatterbox backend ready (port={}, voice={})",
                     cfg.chatterbox.port, cfg.chatterbox.default_voice);
@@ -222,6 +223,7 @@ impl TtsService {
                         model:         cfg.openai.model.clone(),
                         default_voice: cfg.openai.default_voice.clone(),
                         timeout_secs:  cfg.request_timeout_secs,
+                        wav_only:      false,
                     })));
                 info!("tts: openai backend ready (model={})", cfg.openai.model);
             }
@@ -241,6 +243,7 @@ impl TtsService {
                         model:         cfg.openai_compat.model.clone(),
                         default_voice: cfg.openai_compat.default_voice.clone(),
                         timeout_secs:  cfg.request_timeout_secs,
+                        wav_only:      false,  // unknown server — rely on the reject/retry fallback.
                     })));
                 info!("tts: openai_compat backend ready (url={compat_url})");
             }

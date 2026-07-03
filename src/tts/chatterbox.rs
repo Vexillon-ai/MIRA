@@ -82,12 +82,24 @@ impl ChatterboxSupervisor {
     }
 
     /// Background supervise loop. Spawn the process, watch it, restart on
-    /// exit with exponential backoff (capped). Idles politely when the
-    /// binary isn't present yet (e.g. before the installer has run), so an
-    /// install that lands later is picked up without a MIRA restart.
+    /// exit — **and** on a wedged-but-alive server (health probe failing for a
+    /// sustained window without the process exiting) — with exponential
+    /// backoff (capped). Idles politely when the binary isn't present yet
+    /// (e.g. before the installer has run), so an install that lands later is
+    /// picked up without a MIRA restart.
     pub async fn run(self: Arc<Self>) {
         let mut backoff = Duration::from_secs(1);
         const MAX_BACKOFF: Duration = Duration::from_secs(30);
+        // Health-probe cadence, and how many consecutive failed probes count as
+        // "hung → force a restart". A crash makes `child.wait()` return on its
+        // own; this path handles the process that's still alive but no longer
+        // answering /health. Once the server has been healthy at least once we
+        // react quickly (~30s); before that we allow a longer grace window for
+        // model load on a cold start (~120s) so a slow boot isn't mistaken for
+        // a hang.
+        const HEALTH_INTERVAL: Duration = Duration::from_secs(10);
+        const UNHEALTHY_LIMIT: u32 = 3;
+        const STARTUP_LIMIT:   u32 = 12;
 
         loop {
             if !self.binary_path.exists() {
@@ -132,16 +144,39 @@ impl ChatterboxSupervisor {
                 s.last_error = None;
             }
 
-            // Watch for exit while periodically refreshing health.
+            // Watch for exit while periodically refreshing health. A process
+            // that's alive but wedged never trips `child.wait()`, so we also
+            // kill+restart it after a sustained run of failed health probes.
+            let mut ever_healthy = false;
+            let mut consecutive_unhealthy = 0u32;
             let exit = loop {
                 tokio::select! {
                     status = child.wait() => break status,
-                    _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                    _ = tokio::time::sleep(HEALTH_INTERVAL) => {
                         let ok = self.health_ok().await;
                         self.state.lock().await.healthy = ok;
-                        // A clean first health success resets the backoff so a
-                        // long-lived server doesn't carry a stale penalty.
-                        if ok { backoff = Duration::from_secs(1); }
+                        if ok {
+                            // A clean health success resets the backoff so a
+                            // long-lived server doesn't carry a stale penalty.
+                            ever_healthy = true;
+                            consecutive_unhealthy = 0;
+                            backoff = Duration::from_secs(1);
+                        } else {
+                            consecutive_unhealthy += 1;
+                            let limit = if ever_healthy { UNHEALTHY_LIMIT } else { STARTUP_LIMIT };
+                            if consecutive_unhealthy >= limit {
+                                warn!(
+                                    "chatterbox: unresponsive for {} consecutive probes ({}s) but process still alive — killing to force a restart",
+                                    consecutive_unhealthy,
+                                    consecutive_unhealthy * HEALTH_INTERVAL.as_secs() as u32,
+                                );
+                                let _ = child.start_kill();
+                                let st = child.wait().await; // reap the killed child
+                                self.state.lock().await.last_error =
+                                    Some("killed: unresponsive (health probe failing)".into());
+                                break st;
+                            }
+                        }
                     }
                 }
             };
@@ -188,6 +223,20 @@ mod tests {
         assert!(!st.healthy);
         assert!(!st.running);
         assert_eq!(st.starts, 0);
+    }
+
+    #[test]
+    fn unhealthy_restart_thresholds() {
+        // Lock the hung-server policy: kill+restart after N consecutive failed
+        // /health probes at a 10s cadence. Quicker once it's been healthy;
+        // longer grace before the first success so a cold model load isn't
+        // mistaken for a hang.
+        const HEALTH_INTERVAL_SECS: u32 = 10;
+        const UNHEALTHY_LIMIT: u32 = 3;   // ~30s after it was up
+        const STARTUP_LIMIT:   u32 = 12;  // ~120s before first health success
+        assert_eq!(UNHEALTHY_LIMIT * HEALTH_INTERVAL_SECS, 30);
+        assert_eq!(STARTUP_LIMIT   * HEALTH_INTERVAL_SECS, 120);
+        assert!(STARTUP_LIMIT > UNHEALTHY_LIMIT, "cold start gets more grace than a live hang");
     }
 
     #[test]

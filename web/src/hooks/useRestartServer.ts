@@ -52,15 +52,19 @@ export function useRestartServer(opts?: {
  * Watch /api/status until we see the server go down (request fails) and
  * then come back up (request succeeds again). Toast on the transition.
  *
- * Bounded by a 30s wall-clock timeout so a permanently-broken supervisor
- * doesn't leave the loop running forever. Uses a 1.5s poll interval —
- * fast enough that the gap between "old process exits" and "new process
- * binds the port" usually shows up as at least one failed poll, slow
- * enough not to hammer the server during normal operation.
+ * Bounded by a 60s wall-clock timeout so a permanently-broken supervisor
+ * doesn't leave the loop running forever. 60s (not 30s) because a MIRA
+ * booting with many features enabled — supervised Chatterbox, MCP servers,
+ * channel pollers — can take a good while to rebind the port, and a
+ * premature "didn't come back" error alarms the user when it's still coming
+ * up. Uses a 1.5s poll interval — fast enough that the gap between "old
+ * process exits" and "new process binds the port" usually shows up as at
+ * least one failed poll, slow enough not to hammer the server during normal
+ * operation.
  */
 async function pollUntilBackOnline(qc: QueryClient): Promise<void> {
   const startedAt = Date.now()
-  const TIMEOUT_MS = 30_000
+  const TIMEOUT_MS = 60_000
   const POLL_MS    = 1_500
   let sawOffline   = false
   // Soft delay before the first probe — the API handler waits 250ms
@@ -81,5 +85,5 @@ async function pollUntilBackOnline(qc: QueryClient): Promise<void> {
     }
     await new Promise(r => setTimeout(r, POLL_MS))
   }
-  toast.error("Server didn't come back within 30s — check `mira status`.")
+  toast.error("Server didn't come back within 60s — check `mira status`.")
 }

@@ -19,6 +19,43 @@ use crate::config::VideoComfyUiConfig;
 const GEN_TIMEOUT: Duration = Duration::from_secs(900); // video is slow
 const POLL_INTERVAL: Duration = Duration::from_millis(2000);
 
+/// Turn a ComfyUI `/prompt` error body into a readable one-liner. ComfyUI
+/// returns `{error, node_errors:{ "<id>": {class_type, errors:[{message,
+/// details}]} }}`; we flatten the per-node errors (`node 37 (UNETLoader):
+/// Value not in list: unet_name '' not in [...]`) so the user sees exactly
+/// which node/input the render service rejected. Falls back to a truncated
+/// raw body when the shape isn't what we expect.
+fn summarise_comfy_error(body: &str) -> String {
+    if let Ok(j) = serde_json::from_str::<Value>(body) {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(nodes) = j.get("node_errors").and_then(Value::as_object) {
+            for (nid, err) in nodes {
+                let class = err.get("class_type").and_then(Value::as_str).unwrap_or("?");
+                for e in err.get("errors").and_then(Value::as_array).into_iter().flatten() {
+                    let msg = e.get("message").and_then(Value::as_str).unwrap_or("error");
+                    let det = e.get("details").and_then(Value::as_str).unwrap_or("");
+                    parts.push(if det.is_empty() {
+                        format!("node {nid} ({class}): {msg}")
+                    } else {
+                        format!("node {nid} ({class}): {msg}: {det}")
+                    });
+                }
+            }
+        }
+        if parts.is_empty() {
+            if let Some(msg) = j.get("error").and_then(|e| e.get("message")).and_then(Value::as_str) {
+                parts.push(msg.to_string());
+            }
+        }
+        if !parts.is_empty() {
+            return parts.join("; ").chars().take(600).collect();
+        }
+    }
+    let trimmed = body.trim();
+    if trimmed.is_empty() { "no response body".into() }
+    else { trimmed.chars().take(400).collect() }
+}
+
 pub struct ComfyUiVideoBackend {
     base_url:        String,
     workflow_json:   String,
@@ -86,13 +123,21 @@ impl VideoBackend for ComfyUiVideoBackend {
         let workflow = self.build_workflow(req)?;
         let client_id = uuid::Uuid::new_v4().to_string();
 
-        let enqueue: Value = self.http.post(format!("{}/prompt", self.base_url))
+        let resp = self.http.post(format!("{}/prompt", self.base_url))
             .json(&json!({ "prompt": workflow, "client_id": client_id }))
             .send().await
-            .map_err(|e| VideoError::Backend(format!("ComfyUI /prompt failed: {}", e.without_url())))?
-            .error_for_status()
-            .map_err(|e| VideoError::Backend(format!("ComfyUI rejected the workflow: {}", e.without_url())))?
-            .json().await
+            .map_err(|e| VideoError::Backend(format!("ComfyUI /prompt failed: {}", e.without_url())))?;
+        let status = resp.status();
+        if !status.is_success() {
+            // ComfyUI puts the *actual* validation reason (e.g. an unknown
+            // checkpoint name from an unset {{ckpt}}, a bad value, a missing
+            // node) in the response body's `node_errors` — `error_for_status`
+            // discards it, leaving an unactionable bare "400". Surface it.
+            let body = resp.text().await.unwrap_or_default();
+            return Err(VideoError::Backend(format!(
+                "ComfyUI rejected the workflow ({status}): {}", summarise_comfy_error(&body))));
+        }
+        let enqueue: Value = resp.json().await
             .map_err(|e| VideoError::Backend(format!("/prompt parse: {e}")))?;
         let prompt_id = enqueue.get("prompt_id").and_then(Value::as_str)
             .ok_or_else(|| VideoError::Backend("/prompt returned no prompt_id".into()))?.to_string();
@@ -153,6 +198,22 @@ impl VideoBackend for ComfyUiVideoBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summarise_comfy_error_flattens_node_errors() {
+        // The real body ComfyUI returns for an empty {{ckpt}} (unset Model).
+        let body = r#"{"error":{"type":"prompt_outputs_failed_validation","message":"Prompt outputs failed validation","details":"","extra_info":{}},"node_errors":{"37":{"class_type":"UNETLoader","errors":[{"type":"value_not_in_list","message":"Value not in list","details":"unet_name: '' not in ['wan2.1_t2v_1.3B_fp16.safetensors']","extra_info":{}}]}}}"#;
+        let s = summarise_comfy_error(body);
+        assert!(s.contains("node 37 (UNETLoader)"), "got: {s}");
+        assert!(s.contains("Value not in list"), "got: {s}");
+        assert!(s.contains("unet_name"), "got: {s}");
+    }
+
+    #[test]
+    fn summarise_comfy_error_falls_back_to_raw_body() {
+        assert_eq!(summarise_comfy_error(""), "no response body");
+        assert_eq!(summarise_comfy_error("plain text boom"), "plain text boom");
+    }
 
     // Real end-to-end against a local ComfyUI running a Wan T2V workflow.
     // Ignored (needs the server + GPU + the workflow file). Run with:
