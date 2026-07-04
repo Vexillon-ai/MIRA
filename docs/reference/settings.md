@@ -58,6 +58,29 @@ family) emit a chain-of-thought before their reply.
 
   Both take effect across chat, channels, and tool loops.
 
+## Personality & playful easter eggs
+
+MIRA's voice is shaped by your **tone sliders** (warmth / playfulness /
+verbosity), set on the **Settings → Presence** page. These now apply to
+**every** reply — ordinary chat as well as proactive check-ins — not just to
+companion messages as before.
+
+On top of that sits a delight layer, controlled instance-wide by one operator
+setting:
+
+- **`agent.playful_easter_eggs`** (boolean, **default `true`**) — when on, MIRA
+  recognises famous pop-culture references and playful prompts ("mirror mirror
+  on the wall", "open the pod bay doors", the meaning of life, a magic-8-ball
+  "should I…?", "marco", "I wish…", asking it to sing / rap / tell a joke, and
+  more) and plays along — **improvised** (no canned strings), in each user's own
+  personality and scaled by their playfulness setting, and without hijacking a
+  genuine request. Set it to `false` to disable the layer instance-wide for a
+  strictly-business assistant.
+
+You can also toggle it from the UI under **Settings → Agent → Playful easter
+eggs**. For the user-facing tour, see
+[Personality & easter eggs](../guides/personality-and-easter-eggs.md).
+
 ## The complete reference
 
 Every configuration key — its type, default, and description — is **generated
