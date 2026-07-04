@@ -45,6 +45,7 @@ interface Config {
     max_response_tokens?: number
     max_context_turns?: number
     system_prompt_file?: string
+    playful_easter_eggs?: boolean
     tools?: {
       shell?:       { enabled?: boolean }
       filesystem?:  { enabled?: boolean }
@@ -1753,6 +1754,12 @@ function AgentTab({
         </Field>
         <Field label="System prompt file" desc="Path to a custom agent.md persona file. Leave blank to use the built-in default.">
           <TextInput value={str('agent.system_prompt_file')} onChange={(v) => set('agent.system_prompt_file', v)} placeholder="~/.mira/agent.md" mono />
+        </Field>
+        <Field
+          label="Playful easter eggs"
+          desc="Let MIRA recognise famous pop-culture references and playful prompts (mirror-mirror, 'open the pod bay doors', 'meaning of life', magic-8-ball 'should I…', 'marco', 'I wish…', and more) and play along — improvised, in your own personality/tone and scaled by your playfulness setting, without hijacking a genuine request. A fun delight layer; turn off for a strictly-business assistant."
+        >
+          <Toggle value={bool('agent.playful_easter_eggs', true)} onChange={(v) => set('agent.playful_easter_eggs', v)} />
         </Field>
         <Field
           label="Show thinking"

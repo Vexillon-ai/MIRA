@@ -1248,6 +1248,10 @@
           "description": "Suppress model 'thinking' by appending the /no_think directive to the system prompt. Turn on when the active model is a reasoning model (e.g. the qwen3 family) — otherwise it can burn the per-round token budget on chain-of-thought before acting, stalling tool loops. The web chat can override this per-conversation. Default false.",
           "type": "boolean"
         },
+        "playful_easter_eggs": {
+          "description": "Playful 'easter eggs' personality layer. When on, MIRA recognises famous pop-culture references and playful prompts (mirror-mirror, 'open the pod bay doors', 'meaning of life', magic-8-ball 'should I…', 'marco', 'I wish…', etc.) and plays along — improvised, in the user's own personality/tone and scaled by their playfulness setting — without hijacking a genuine request. LLM-driven, no canned strings. Default true; set false to disable the delight layer instance-wide.",
+          "type": "boolean"
+        },
         "max_context_turns": {
           "description": "Maximum conversation turns injected into the model context per request. Older turns are silently omitted (they remain in the session store). Tune to fit your model's context window.",
           "type": "integer",

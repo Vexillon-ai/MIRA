@@ -758,18 +758,37 @@ impl AgentCore {
             ""
         };
 
+        // Playful "easter eggs" delight layer (independent of companion mode).
+        // Teaches the model to notice pop-culture references / playful prompts
+        // and play along in the user's own tone, scaled by their playfulness.
+        // Skipped for override turns (onboarding, guardian, etc.). The tone
+        // comes from the user's companion presence dials, defaulting to neutral
+        // when unset — so a non-companion user still gets a light, balanced bit.
+        let easter_egg_addendum: String = if self.config.agent.playful_easter_eggs
+            && context.system_prompt_override.is_none()
+        {
+            let tone = self.companion.get()
+                .and_then(|sys| sys.get(user_id).ok().flatten())
+                .map(|s| s.presence.tone)
+                .unwrap_or_default();
+            crate::companion::easter_eggs::easter_egg_addendum(&tone)
+        } else {
+            String::new()
+        };
+
         let effective_system = if profile_block.is_empty()
             && wiki_context.is_empty()
             && memory_context.is_empty()
             && companion_addendum.is_empty()
+            && easter_egg_addendum.is_empty()
             && safety_addendum.is_empty()
         {
             base_prompt.to_string()
         } else {
             format!(
-                "{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}",
                 base_prompt, profile_block, wiki_context, memory_context,
-                companion_addendum, safety_addendum,
+                companion_addendum, easter_egg_addendum, safety_addendum,
             )
         };
 

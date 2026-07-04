@@ -31,6 +31,7 @@
 pub mod briefing;
 pub mod chitchat;
 pub mod dispatcher;
+pub mod easter_eggs;
 pub mod engagement;
 pub mod engagement_log;
 pub mod groups;

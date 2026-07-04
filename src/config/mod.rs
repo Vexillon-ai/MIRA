@@ -1726,6 +1726,15 @@ pub struct AgentConfig {
     #[serde(default)]
     pub disable_reasoning: bool,
 
+    // Playful "easter eggs" personality layer. When on, MIRA recognises famous
+    // pop-culture references and playful prompts (mirror-mirror, "open the pod
+    // bay doors", "meaning of life", magic-8-ball "should I…", "marco", etc.)
+    // and plays along — improvised, in the user's own tone, scaled by their
+    // playfulness — without hijacking genuine requests. LLM-driven (no canned
+    // strings). On by default; a low-playfulness persona only gets subtle winks.
+    #[serde(default = "default_true")]
+    pub playful_easter_eggs: bool,
+
     // Maximum history turns kept in context per session (1 turn = user + assistant).
     #[serde(default = "default_max_context_turns")]
     pub max_context_turns: usize,
@@ -1876,6 +1885,7 @@ impl Default for AgentConfig {
             tool_mode:         default_tool_mode(),
             system_prompt_file: String::new(),
             disable_reasoning: false,
+            playful_easter_eggs: default_true(),
             max_context_turns: default_max_context_turns(),
             tools:             ToolsConfig::default(),
             tool_selection:    ToolSelectionConfig::default(),
