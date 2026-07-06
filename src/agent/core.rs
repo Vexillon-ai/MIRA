@@ -758,20 +758,31 @@ impl AgentCore {
             ""
         };
 
+        // Per-user tone dials (warmth/playfulness/verbosity), fetched once for
+        // both the always-on voice steer and the easter-egg layer. Skipped for
+        // override turns (onboarding, guardian, …) which supply their own
+        // persona; neutral default when the user hasn't tuned anything.
+        let tone = context.system_prompt_override.is_none().then(|| {
+            self.companion.get()
+                .and_then(|sys| sys.get(user_id).ok().flatten())
+                .map(|s| s.presence.tone)
+                .unwrap_or_default()
+        });
+
+        // Always-on voice steer: shape EVERY reply to the user's tone (a
+        // playfulness-heavy user gets a playful MIRA throughout, not just during
+        // easter eggs). Empty for neutral defaults, so most users are unaffected.
+        let tone_addendum: String = tone.as_ref()
+            .map(crate::companion::easter_eggs::tone_addendum)
+            .unwrap_or_default();
+
         // Playful "easter eggs" delight layer (independent of companion mode).
         // Teaches the model to notice pop-culture references / playful prompts
         // and play along in the user's own tone, scaled by their playfulness.
-        // Skipped for override turns (onboarding, guardian, etc.). The tone
-        // comes from the user's companion presence dials, defaulting to neutral
-        // when unset — so a non-companion user still gets a light, balanced bit.
-        let easter_egg_addendum: String = if self.config.agent.playful_easter_eggs
-            && context.system_prompt_override.is_none()
-        {
-            let tone = self.companion.get()
-                .and_then(|sys| sys.get(user_id).ok().flatten())
-                .map(|s| s.presence.tone)
-                .unwrap_or_default();
-            crate::companion::easter_eggs::easter_egg_addendum(&tone)
+        let easter_egg_addendum: String = if self.config.agent.playful_easter_eggs {
+            tone.as_ref()
+                .map(crate::companion::easter_eggs::easter_egg_addendum)
+                .unwrap_or_default()
         } else {
             String::new()
         };
@@ -780,15 +791,16 @@ impl AgentCore {
             && wiki_context.is_empty()
             && memory_context.is_empty()
             && companion_addendum.is_empty()
+            && tone_addendum.is_empty()
             && easter_egg_addendum.is_empty()
             && safety_addendum.is_empty()
         {
             base_prompt.to_string()
         } else {
             format!(
-                "{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}",
                 base_prompt, profile_block, wiki_context, memory_context,
-                companion_addendum, easter_egg_addendum, safety_addendum,
+                companion_addendum, tone_addendum, easter_egg_addendum, safety_addendum,
             )
         };
 

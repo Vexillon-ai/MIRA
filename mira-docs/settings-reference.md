@@ -419,9 +419,10 @@ _MIRA HTTP server settings (invoked with --server flag). Exposes an API for Tele
 - **`server.request_timeout_secs`** (integer) — Maximum seconds to process a single request before returning a 408 timeout.
 - **`server.tls_cert_path`** (string) — Path to a TLS certificate file in PEM format. Set to null to use plain HTTP (not recommended for public servers).
 - **`server.tls_key_path`** (string) — Path to the TLS private key file in PEM format. Required when tls_cert_path is set.
-- **`server.update_check`** (object) — Periodic check against an upstream Releases API for a newer MIRA build. Off by default; intended for self-hosted operators who want a 'new version available' notice.
-- **`server.update_check.enabled`** (boolean) — Whether to poll the source URL for new releases.
-- **`server.update_check.source_url`** (string) — Releases API URL to poll. Defaults to the public MIRA GitLab project; forks should override with their own GitHub / GitLab releases endpoint. Empty string disables (same as enabled=false).
+- **`server.update_check`** (object) — Passive check against an upstream Releases API for a newer MIRA build, surfaced in Settings → Updates and as an admin banner. ON by default (check-only); it never downloads or installs anything on its own.
+- **`server.update_check.enabled`** (boolean) — Whether to check the source URL for new releases. Default true (check-only; installing is always a deliberate 'Upgrade now' / `mira upgrade` action).
+- **`server.update_check.source_url`** (string) — Releases API URL to check. Defaults to the public MIRA GitHub project (Vexillon-ai/MIRA); forks should override with their own GitHub / GitLab releases endpoint. Empty string disables (same as enabled=false).
+- **`server.update_check.frequency`** (string; one of: `daily`, `weekly`, `monthly`) — How often the server refreshes its cached check result. The Settings 'Check now' button always forces an immediate refresh regardless. Default daily.
 - **`server.webhook_secret`** (string) — Shared secret used to verify incoming webhook signatures (e.g. from Telegram or Signal). Set to null to skip signature verification.
 
 ## session

@@ -157,6 +157,17 @@ export default function ChatPage() {
   const dropdownModels: ModelInfo[] = models.filter(m =>
     capsAllowModel(myCaps, m.provider, m.id))
 
+  // Pre-select the effective default (the primary provider's default model,
+  // flagged `is_default` by the server) whenever nothing is explicitly picked,
+  // so the header shows — and the send uses — the real default rather than just
+  // the first model in the combined list. Picking from the dropdown overrides
+  // it for the session; existing conversations keep the model they started with.
+  useEffect(() => {
+    if (selectedModel || dropdownModels.length === 0) return
+    const def = dropdownModels.find(m => m.is_default) ?? dropdownModels[0]
+    setSelectedModel({ id: def.id, provider: def.provider })
+  }, [selectedModel, dropdownModels, setSelectedModel])
+
   // The order of these two effects matters: the "clear on conv change" effect
   // must run BEFORE the "populate from fetched data" effect. Otherwise, when
   // React Query returns a cached same-reference result for the new conv (e.g.

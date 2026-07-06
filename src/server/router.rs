@@ -1083,6 +1083,11 @@ pub fn build_router(
             // + atomic swap + supervisor restart (runs `mira upgrade --binary`).
             .route("/api/admin/upgrade",
                    post(crate::server::handlers::update_check::upgrade))
+            // admin-only rollback: GET lists pre-upgrade snapshots; POST
+            // restores one (previous binary + config) and restarts.
+            .route("/api/admin/rollback",
+                   get(crate::server::handlers::update_check::rollback_list)
+                   .post(crate::server::handlers::update_check::rollback))
             // Admin: tool-call audit log (one row per ToolRegistry::execute)
             .route("/api/admin/tool_audit", get(list_tool_audit))
             // Admin: managed native deps (ONNX Runtime, future: signal-cli, JRE).

@@ -13,6 +13,8 @@ export interface ProviderHealth {
 export interface ModelInfo {
   id: string
   provider: string
+  /** The one entry a new chat pre-selects: the primary provider's default model. */
+  is_default?: boolean
 }
 
 export interface StatusInfo {

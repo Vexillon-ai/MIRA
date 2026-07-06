@@ -9,9 +9,11 @@
 
 pub mod binary_upgrade;
 pub mod chatterbox;
+pub mod data_version;
 pub mod deps;
 pub mod unit;
 pub mod plist;
+pub mod rollback;
 pub mod upgrade;
 pub mod backup;
 pub mod backup_crypto;

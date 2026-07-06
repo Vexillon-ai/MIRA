@@ -99,7 +99,7 @@ pub async fn chat_handler(
     };
     let model = req.model_override
         .clone()
-        .unwrap_or_else(|| config.providers.lmstudio.default_model.clone());
+        .unwrap_or_else(|| config.default_chat_model().1);
 
     // Resolve the conversation up front so we can branch on its `mode`.
     let (conv_id, conv_mode) = match &req.conversation_id {

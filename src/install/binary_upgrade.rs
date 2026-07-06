@@ -81,10 +81,30 @@ const DEFAULT_RELEASE_PROVIDER: ReleaseProvider = ReleaseProvider::GitHub;
 /// (e.g. `https://gitlab.example.com/api/v4/projects/<id>`).
 const DEFAULT_RELEASE_BASE_URL: &str = "https://github.com/Vexillon-ai/MIRA";
 
-/// Target triple this binary was built for. Determines which tarball
-/// suffix we download. v1 ships only one target; later targets get
-/// added to the CI pipeline + this match.
-const BUILD_TARGET: &str = "x86_64-unknown-linux-gnu";
+/// Target triple this binary was built for, resolved at compile time so a
+/// Windows / macOS / aarch64 build upgrades against its OWN release asset, not
+/// the Linux one. Must match the targets the release CI pipeline publishes:
+/// linux x86_64/aarch64, windows-msvc x86_64, darwin x86_64/aarch64.
+const fn build_target() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") { "aarch64-apple-darwin" } else { "x86_64-apple-darwin" }
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    }
+}
+const BUILD_TARGET: &str = build_target();
+
+/// Release-asset archive extension for this target: Windows ships a `.zip`,
+/// every other target a `.tar.gz` (matches the CI release jobs).
+const ASSET_EXT: &str = if cfg!(target_os = "windows") { "zip" } else { "tar.gz" };
+
+/// The MIRA binary's filename inside the extracted archive (and, reused by
+/// [`crate::install::rollback`], the snapshot binary name).
+pub(crate) const BINARY_NAME: &str = if cfg!(target_os = "windows") { "mira.exe" } else { "mira" };
 
 pub struct BinaryUpgradeOptions {
     /// Specific version to upgrade to (e.g. `"0.84.0"` or `"v0.84.0"`).
@@ -151,25 +171,25 @@ pub fn run_binary_upgrade(opts: BinaryUpgradeOptions) -> Result<(), Box<dyn Erro
         println!("(--force: re-installing same version to repair / test the pipeline)");
     }
 
-    // 2. Download tarball + signature into a temp dir.
+    // 2. Download the release archive + signature into a temp dir.
     let tmpdir = tempfile::Builder::new().prefix("mira-upgrade-").tempdir()?;
-    let tarball_name = format!("mira-{version}-{BUILD_TARGET}.tar.gz");
-    let sig_name     = format!("{tarball_name}.minisig");
-    let tarball_url  = asset_url(provider, &base, &version, &tarball_name);
+    let archive_name = format!("mira-{version}-{BUILD_TARGET}.{ASSET_EXT}");
+    let sig_name     = format!("{archive_name}.minisig");
+    let archive_url  = asset_url(provider, &base, &version, &archive_name);
     let sig_url      = asset_url(provider, &base, &version, &sig_name);
 
-    let tarball_path = tmpdir.path().join(&tarball_name);
+    let archive_path = tmpdir.path().join(&archive_name);
     let sig_path     = tmpdir.path().join(&sig_name);
     println!();
-    println!("Downloading {tarball_name}…");
-    download(provider, &tarball_url, &tarball_path, token.as_deref())?;
+    println!("Downloading {archive_name}…");
+    download(provider, &archive_url, &archive_path, token.as_deref())?;
     println!("Downloading {sig_name}…");
     download(provider, &sig_url, &sig_path, token.as_deref())?;
 
     // 3. Verify signature with embedded public key.
     println!();
     println!("Verifying signature…");
-    verify_signature(&tarball_path, &sig_path)?;
+    verify_signature(&archive_path, &sig_path)?;
     println!("✓ signature verified");
 
     // 4. Extract, find new binary.
@@ -177,13 +197,23 @@ pub fn run_binary_upgrade(opts: BinaryUpgradeOptions) -> Result<(), Box<dyn Erro
     println!("Extracting…");
     let extract_dir = tmpdir.path().join("extracted");
     fs::create_dir_all(&extract_dir)?;
-    extract_tarball(&tarball_path, &extract_dir)?;
+    extract_archive(&archive_path, &extract_dir)?;
 
     let new_binary = locate_extracted_binary(&extract_dir, &version)?;
     println!("New binary:       {}", new_binary.display());
 
-    // 5. Atomically swap with the running binary.
+    // 5. Snapshot the current binary + config so `mira rollback` can revert
+    // this exact version if the new build misbehaves (R1). Best-effort — a
+    // snapshot failure warns but never blocks the upgrade.
     let current_binary = std::env::current_exe()?;
+    match crate::install::rollback::save_snapshot(&current_binary, env!("CARGO_PKG_VERSION")) {
+        Ok(s)  => println!("Rollback snapshot: {}", s.dir.display()),
+        Err(e) => eprintln!(
+            "warning: couldn't save a rollback snapshot ({e}); upgrade proceeds, \
+             but `mira rollback` won't have {} available", env!("CARGO_PKG_VERSION")),
+    }
+
+    // 6. Atomically swap with the running binary.
     println!("Swapping with:    {}", current_binary.display());
     atomic_swap(&new_binary, &current_binary)?;
     println!("✓ binary replaced");
@@ -334,13 +364,50 @@ fn verify_signature(tarball: &Path, sig: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Extract a `.tar.gz` into `dest`. Lightweight wrapper that surfaces
-/// the I/O error on a single line for nicer CLI output.
-fn extract_tarball(tarball: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
-    let f = fs::File::open(tarball)?;
-    let gz = flate2::read::GzDecoder::new(f);
-    let mut archive = tar::Archive::new(gz);
-    archive.unpack(dest)?;
+/// Extract a release archive into `dest`, picking the format from the file
+/// extension: Windows assets are `.zip`, everything else `.tar.gz`.
+fn extract_archive(archive: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
+    let is_zip = archive.extension().and_then(|e| e.to_str()) == Some("zip");
+    if is_zip {
+        extract_zip(archive, dest)
+    } else {
+        let f = fs::File::open(archive)?;
+        let gz = flate2::read::GzDecoder::new(f);
+        let mut tar = tar::Archive::new(gz);
+        tar.unpack(dest)?;
+        Ok(())
+    }
+}
+
+/// Extract a `.zip` into `dest`, preserving the archive's directory layout
+/// and (on Unix) the executable bit stored in the zip entry.
+fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
+    let f = fs::File::open(archive)?;
+    let mut zip = zip::ZipArchive::new(f)?;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i)?;
+        // `enclosed_name` rejects path-traversal ("../") entries; own the path
+        // so the borrow ends before we read the entry's bytes below.
+        let Some(rel) = entry.enclosed_name() else { continue };
+        let rel = rel.to_path_buf();
+        let out = dest.join(&rel);
+        if entry.is_dir() {
+            fs::create_dir_all(&out)?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut w = fs::File::create(&out)?;
+        std::io::copy(&mut entry, &mut w)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Some(mode) = entry.unix_mode() {
+                fs::set_permissions(&out, fs::Permissions::from_mode(mode))?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -348,7 +415,7 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
 /// layout is `mira-<version>-<target>/mira`.
 fn locate_extracted_binary(dir: &Path, version: &str) -> Result<PathBuf, Box<dyn Error>> {
     let pkg_dir = dir.join(format!("mira-{version}-{BUILD_TARGET}"));
-    let bin = pkg_dir.join("mira");
+    let bin = pkg_dir.join(BINARY_NAME);
     if !bin.is_file() {
         return Err(format!(
             "expected binary at {} but didn't find it. \
@@ -369,7 +436,7 @@ fn locate_extracted_binary(dir: &Path, version: &str) -> Result<PathBuf, Box<dyn
 /// If anything fails before step 3, `dest` is unchanged. After step 3
 /// the running process keeps using its open inode (Linux semantics) so
 /// it doesn't crash; the new binary takes effect on next exec.
-fn atomic_swap(src: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
+pub(crate) fn atomic_swap(src: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
     let parent = dest.parent()
         .ok_or_else(|| format!("destination has no parent dir: {}", dest.display()))?;
     let temp_name = format!(
@@ -394,10 +461,56 @@ fn atomic_swap(src: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o755))?;
     }
-    // The atomic flip.
+    // The flip. On Unix, rename-onto-dest is atomic and the running process
+    // keeps its open inode. On Windows the running `.exe` is LOCKED and can't
+    // be overwritten — but it CAN be renamed out of the way, so we move it to
+    // `<dest>.old` (removed on next boot) and drop the new binary in its place.
+    // The live process keeps executing from the renamed file until the service
+    // restarts onto the new one.
+    #[cfg(windows)]
+    {
+        let old = sidelined_old_path(dest);
+        // A leftover `.old` from a prior upgrade is unlocked once that process
+        // exited — clear it so this rename has an empty slot.
+        let _ = fs::remove_file(&old);
+        fs::rename(dest, &old)
+            .map_err(|e| format!("move running binary aside {} → {}: {e}", dest.display(), old.display()))?;
+        if let Err(e) = fs::rename(&temp_path, dest) {
+            // Roll the sideline back so the install is never left binary-less.
+            let _ = fs::rename(&old, dest);
+            return Err(format!("install new binary → {}: {e}", dest.display()).into());
+        }
+    }
+    #[cfg(not(windows))]
     fs::rename(&temp_path, dest)
         .map_err(|e| format!("atomic swap {} → {}: {e}", temp_path.display(), dest.display()))?;
     Ok(())
+}
+
+/// `<dest>.old` — where a running Windows binary is parked during a swap so
+/// the new one can take its place. Appends (doesn't replace the extension) so
+/// `mira.exe` → `mira.exe.old`.
+#[cfg(windows)]
+fn sidelined_old_path(dest: &Path) -> PathBuf {
+    let mut s = dest.as_os_str().to_owned();
+    s.push(".old");
+    PathBuf::from(s)
+}
+
+/// Best-effort removal of a `<current_exe>.old` left by a previous Windows
+/// upgrade. Safe to call on every startup: on the freshly-restarted process
+/// the old file is no longer locked, so it deletes cleanly; a no-op elsewhere.
+pub fn cleanup_sidelined_binary() {
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        let old = sidelined_old_path(&exe);
+        if old.exists() {
+            match fs::remove_file(&old) {
+                Ok(())  => tracing::info!("upgrade cleanup: removed stale {}", old.display()),
+                Err(e)  => tracing::debug!("upgrade cleanup: {} still locked ({e}); will retry next boot", old.display()),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -557,23 +557,43 @@ pub fn external_cli_command(binary: &Path) -> tokio::process::Command {
     cmd
 }
 
-/// Resolve the `npm` launcher from the MIRA-managed Node (preferred) or PATH,
-/// plus the runtime bin dirs to put on the child's PATH so `npm` finds `node`.
+/// Resolve the `npm` launcher, plus the runtime bin dirs to put on the child's
+/// PATH so `npm` finds `node`.
+///
+/// Search order: MIRA-managed Node (pinned, always spawnable) → the system PATH
+/// → common install dirs a service PATH usually omits. The bare-name fallback
+/// is last, because on Windows `CreateProcess` can't launch a bare `npm` (the
+/// real launcher is `npm.cmd`) — that was the bug behind "spawn npm: program
+/// not found" on the Windows service: `npm` was on PATH but only the
+/// un-spawnable bare name reached the spawn. `which_on_path` is Windows-aware
+/// (matches `npm.cmd`), so a resolved path always routes through the `cmd /C`
+/// shim correctly.
 fn resolve_npm() -> (PathBuf, Vec<PathBuf>) {
-    let dirs = managed_runtime_bin_dirs();
+    let managed = managed_runtime_bin_dirs();
     #[cfg(windows)]
     let names: &[&str] = &["npm.cmd", "npm.exe", "npm"];
     #[cfg(not(windows))]
     let names: &[&str] = &["npm"];
-    for d in &dirs {
-        for n in names {
-            let c = d.join(n);
-            if c.is_file() {
-                return (c, dirs.clone());
+
+    let in_dirs = |dirs: &[PathBuf]| -> Option<PathBuf> {
+        dirs.iter().find_map(|d| names.iter().map(|n| d.join(n)).find(|c| c.is_file()))
+    };
+
+    let found = in_dirs(&managed)                       // 1. managed Node
+        .or_else(|| which_on_path("npm"))               // 2. system PATH (npm.cmd)
+        .or_else(|| in_dirs(&external_cli_search_dirs())); // 3. common install dirs
+
+    match found {
+        Some(npm) => {
+            // Prepend npm's own dir so its sibling `node` resolves for the child.
+            let mut dirs = managed;
+            if let Some(parent) = npm.parent() {
+                dirs.insert(0, parent.to_path_buf());
             }
+            (npm, dirs)
         }
+        None => (PathBuf::from("npm"), managed),
     }
-    (PathBuf::from("npm"), dirs)
 }
 
 /// Install (or no-op if already present) a CLI distributed as an npm package

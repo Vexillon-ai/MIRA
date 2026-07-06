@@ -938,23 +938,52 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateCheckConfig {
-    #[serde(default)]
+    // Passive version check against the Releases API. ON by default — it's a
+    // single lightweight request that only COMPARES versions; it never
+    // downloads or installs anything (upgrading is always an explicit action,
+    // via the Settings "Upgrade now" button or `mira upgrade`). Set false to
+    // stop MIRA contacting the release host at all.
+    #[serde(default = "default_true")]
     pub enabled: bool,
-    // Releases API URL. Default points at the public MIRA GitHub
-    // releases endpoint; forks should override with their own GitHub /
-    // GitLab Releases endpoint. Empty string disables (same as
-    // `enabled: false`).
+    // Releases API URL. Default points at the public MIRA GitHub releases
+    // endpoint; forks should override with their own GitHub / GitLab Releases
+    // endpoint. Empty string disables (same as `enabled: false`).
     #[serde(default = "default_update_check_url")]
     pub source_url: String,
+    // How often the server refreshes its cached check result: "daily" |
+    // "weekly" | "monthly". The UI's "Check now" always forces an immediate
+    // refresh regardless of this.
+    #[serde(default = "default_update_check_frequency")]
+    pub frequency: String,
 }
 
 fn default_update_check_url() -> String {
     "https://api.github.com/repos/Vexillon-ai/MIRA/releases".to_string()
 }
 
+fn default_update_check_frequency() -> String {
+    "daily".to_string()
+}
+
+impl UpdateCheckConfig {
+    /// The cache-refresh interval implied by `frequency`. Unknown values fall
+    /// back to daily.
+    pub fn refresh_interval(&self) -> std::time::Duration {
+        match self.frequency.trim().to_ascii_lowercase().as_str() {
+            "weekly"  => std::time::Duration::from_secs(7  * 86_400),
+            "monthly" => std::time::Duration::from_secs(30 * 86_400),
+            _         => std::time::Duration::from_secs(86_400),
+        }
+    }
+}
+
 impl Default for UpdateCheckConfig {
     fn default() -> Self {
-        Self { enabled: false, source_url: default_update_check_url() }
+        Self {
+            enabled:    true,
+            source_url: default_update_check_url(),
+            frequency:  default_update_check_frequency(),
+        }
     }
 }
 
@@ -3634,6 +3663,43 @@ impl MiraConfig {
         Ok(())
     }
 
+    /// The `(provider slug, model id)` a new chat uses when the caller hasn't
+    /// picked one — the configured `primary_provider`'s **default model**.
+    /// Falls back to LMStudio's default (the historical hard-wired default)
+    /// when the primary provider isn't a known slug or has no default set.
+    pub fn default_chat_model(&self) -> (String, String) {
+        let primary = self.primary_provider.trim();
+        if let Some(m) = self.provider_default_model(primary) {
+            let m = m.trim().to_string();
+            if !m.is_empty() {
+                return (primary.to_string(), m);
+            }
+        }
+        ("lmstudio".to_string(), self.providers.lmstudio.default_model.clone())
+    }
+
+    /// A provider slug's configured `default_model`, or `None` if the slug
+    /// isn't a known built-in provider. The `openai_compat` catch-all matches
+    /// on its user-set `name`.
+    pub fn provider_default_model(&self, slug: &str) -> Option<String> {
+        let p = &self.providers;
+        let m = match slug {
+            "ollama"     => &p.ollama.default_model,
+            "lmstudio"   => &p.lmstudio.default_model,
+            "openrouter" => &p.openrouter.default_model,
+            "openai"     => &p.openai.default_model,
+            "deepseek"   => &p.deepseek.default_model,
+            "moonshot"   => &p.moonshot.default_model,
+            "groq"       => &p.groq.default_model,
+            "xai"        => &p.xai.default_model,
+            "anthropic"  => &p.anthropic.default_model,
+            "gemini"     => &p.gemini.default_model,
+            other if other == p.openai_compat.name => &p.openai_compat.default_model,
+            _ => return None,
+        };
+        Some(m.clone())
+    }
+
     // ── Environment overrides ─────────────────────────────────────────────────
 
     fn apply_env_overrides(&mut self) {
@@ -4494,6 +4560,36 @@ mod tests {
         let loaded = MiraConfig::from_file(&path).unwrap();
         assert_eq!(loaded.primary_provider, "ollama");
         assert_eq!(loaded.providers.ollama.url, "http://my-ollama:11434");
+    }
+
+    #[test]
+    fn default_chat_model_uses_primary_providers_default_not_first_available() {
+        let mut c = MiraConfig::default();
+        c.primary_provider = "lmstudio".into();
+        c.providers.lmstudio.default_model = "openai/gpt-oss-20b".into();
+        // First in available_models is a DIFFERENT model — the default must win.
+        c.providers.lmstudio.available_models = vec!["some/other-model".into(), "openai/gpt-oss-20b".into()];
+        let (prov, model) = c.default_chat_model();
+        assert_eq!(prov, "lmstudio");
+        assert_eq!(model, "openai/gpt-oss-20b");
+    }
+
+    #[test]
+    fn default_chat_model_follows_the_primary_provider() {
+        let mut c = MiraConfig::default();
+        c.primary_provider = "anthropic".into();
+        c.providers.anthropic.default_model = "claude-x".into();
+        assert_eq!(c.default_chat_model(), ("anthropic".into(), "claude-x".into()));
+    }
+
+    #[test]
+    fn default_chat_model_falls_back_to_lmstudio_for_unknown_primary() {
+        let mut c = MiraConfig::default();
+        c.primary_provider = "nonesuch".into();
+        c.providers.lmstudio.default_model = "fallback-model".into();
+        let (prov, model) = c.default_chat_model();
+        assert_eq!(prov, "lmstudio");
+        assert_eq!(model, "fallback-model");
     }
 
     #[test]

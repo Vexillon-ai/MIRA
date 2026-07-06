@@ -345,6 +345,21 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+    // Roll back to the binary + config saved before the last upgrade.
+    // Snapshots are created automatically on every upgrade. Works even
+    // if the current build crash-loops (run it from an admin terminal).
+    Rollback {
+        // Specific version to roll back to (e.g. 0.292.3). Defaults to
+        // the most recent snapshot.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+        // List available rollback snapshots and exit.
+        #[arg(long)]
+        list: bool,
+        // Restore the binary + config but don't restart the service.
+        #[arg(long)]
+        no_restart: bool,
+    },
     // Manage MIRA's bundled native dependencies (currently ONNX
     // Runtime, used by fastembed for in-process embeddings). Pinned
     // versions live in deps/manifest.toml; downloads land in
@@ -1007,6 +1022,30 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
         });
     }
 
+    if let Some(Command::Rollback { version, list, no_restart }) = args.command.as_ref() {
+        if *list {
+            let snaps = mira::install::rollback::list_snapshots();
+            if snaps.is_empty() {
+                println!("No rollback snapshots yet — one is saved automatically on each upgrade.");
+            } else {
+                println!("Available rollback snapshots (newest first):");
+                for s in &snaps {
+                    println!("  v{}  ({}{})", s.version, s.dir.display(),
+                        if s.config.is_some() { ", +config" } else { "" });
+                }
+            }
+            return Ok(());
+        }
+        let opts = mira::install::rollback::RollbackOptions {
+            version:    version.clone(),
+            no_restart: *no_restart,
+        };
+        return mira::install::rollback::run_rollback(opts).map_err(|e| -> Box<dyn Error> {
+            eprintln!("mira rollback: {e}");
+            "rollback failed".into()
+        });
+    }
+
     // Managed-deps subcommands — fetch + verify pinned native libs
     // (ONNX Runtime today). Pure filesystem + network, no MIRA runtime.
     if let Some(Command::Deps { action }) = args.command.as_ref() {
@@ -1084,6 +1123,7 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
             | Command::Uninstall
             | Command::Start | Command::Stop | Command::Restart | Command::Status
             | Command::Upgrade { .. }
+            | Command::Rollback { .. }
             | Command::Skill   { .. }
             | Command::Deps    { .. }
             | Command::PkgExec { .. }
@@ -1099,6 +1139,16 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
 
     // ── Server mode ───────────────────────────────────────────────────────────
     if args.server {
+        // R1: after an upgrade, clear a sidelined Windows binary (`mira.exe.old`),
+        // and refuse to boot if THIS binary is too old to safely read data a
+        // newer one migrated — clear guidance beats a cryptic crash / corruption.
+        mira::install::binary_upgrade::cleanup_sidelined_binary();
+        let data_dir = config.data_dir_path();
+        if let Err(msg) = mira::install::data_version::guard(&data_dir) {
+            eprintln!("ERROR: {msg}");
+            std::process::exit(1);
+        }
+
         let mut cfg = (*config).clone();
         if let Some(port) = args.port { cfg.server.port = port; }
         if let Some(host) = args.host.clone() { cfg.server.host = host; }
@@ -1106,6 +1156,8 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
             .with_config(Arc::new(cfg))
             .build()
             .await?;
+        // Migrations have run by now — record that this version owns the data.
+        mira::install::data_version::stamp(&data_dir);
         gateway.run_until_shutdown().await?;
         return Ok(());
     }

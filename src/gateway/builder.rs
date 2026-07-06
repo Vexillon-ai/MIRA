@@ -840,6 +840,26 @@ impl GatewayBuilder {
         );
         info!("Session store initialised (cleanup every {}s)", config.session.cleanup_interval_secs);
 
+        // ── Update-check auto-refresh ────────────────────────────────
+        // Frequency-gated background check against the Releases API so the
+        // "new version available" banner + Settings card stay current even with
+        // no admin UI open. Passive: version compare only — it never downloads
+        // or installs (upgrading is always an explicit "Upgrade now" action).
+        if config.server.update_check.enabled && !config.server.update_check.source_url.is_empty() {
+            let cfg = Arc::clone(&config);
+            let interval = config.server.update_check.refresh_interval();
+            tokio::spawn(async move {
+                // Let the server finish booting before the first outbound call.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let mut iv = tokio::time::interval(interval);
+                loop {
+                    iv.tick().await;
+                    crate::server::handlers::update_check::refresh_cache(&*cfg).await;
+                }
+            });
+            info!("Update check enabled ({} refresh)", config.server.update_check.frequency);
+        }
+
         // ── AgentCore ────────────────────────────────────────────────
         let agent_core = Arc::new(AgentCore::new(
             Arc::clone(&config),

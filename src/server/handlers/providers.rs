@@ -37,6 +37,10 @@ pub struct HealthResponse {
 pub struct ModelInfo {
     pub id:       String,
     pub provider: String,
+    /// True for the one entry a new chat pre-selects: the configured
+    /// primary provider's default model.
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 // ── GET /api/providers/health ─────────────────────────────────────────────────
@@ -289,14 +293,16 @@ pub async fn providers_models(
             for id in available_models {
                 if id.is_empty() { continue; }
                 out.push(ModelInfo {
-                    id:       id.clone(),
-                    provider: slug.to_owned(),
+                    id:         id.clone(),
+                    provider:   slug.to_owned(),
+                    is_default: false,
                 });
             }
         } else if !default_model.is_empty() {
             out.push(ModelInfo {
-                id:       default_model.to_owned(),
-                provider: slug.to_owned(),
+                id:         default_model.to_owned(),
+                provider:   slug.to_owned(),
+                is_default: false,
             });
         }
     }
@@ -348,12 +354,18 @@ pub async fn providers_models(
         }
     }
 
-    // Hoist the configured primary's first entry to the front so the
-    // dropdown's pre-selected option matches what the chat handler
-    // will use when the user hasn't picked a model this session.
-    let primary = cfg.primary_provider.as_str();
-    if let Some(idx) = out.iter().position(|m| m.provider == primary) {
+    // Flag the effective default — the primary provider's DEFAULT model (not
+    // just its first available_model) — and hoist it to the front, so the
+    // dropdown's pre-selected option matches what the chat handler uses when
+    // the user hasn't picked a model this session.
+    let (def_provider, def_model) = cfg.default_chat_model();
+    if let Some(idx) = out.iter().position(|m| m.provider == def_provider && m.id == def_model) {
+        out[idx].is_default = true;
         if idx != 0 { out.swap(0, idx); }
+    } else if !def_model.is_empty() {
+        // The default model isn't in the provider's available_models list —
+        // surface it at the front anyway so new chats can still pre-select it.
+        out.insert(0, ModelInfo { id: def_model, provider: def_provider, is_default: true });
     }
 
     axum::Json(out)

@@ -595,17 +595,22 @@
           ]
         },
         "update_check": {
-          "description": "Periodic check against an upstream Releases API for a newer MIRA build. Off by default; intended for self-hosted operators who want a 'new version available' notice.",
+          "description": "Passive check against an upstream Releases API for a newer MIRA build, surfaced in Settings and as an admin banner. ON by default: it's a single lightweight request that only COMPARES versions — it never downloads or installs anything (upgrading is always an explicit action). Set enabled=false to stop MIRA contacting the release host entirely.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "enabled": {
-              "description": "Whether to poll the source URL for new releases.",
+              "description": "Whether to check the source URL for new releases. Default true (check-only; installing is always a deliberate 'Upgrade now' / `mira upgrade` action).",
               "type": "boolean"
             },
             "source_url": {
-              "description": "Releases API URL to poll. Defaults to the public MIRA GitLab project; forks should override with their own GitHub / GitLab releases endpoint. Empty string disables (same as enabled=false).",
+              "description": "Releases API URL to check. Defaults to the public MIRA GitHub project (Vexillon-ai/MIRA); forks should override with their own GitHub / GitLab releases endpoint. Empty string disables (same as enabled=false).",
               "type": "string"
+            },
+            "frequency": {
+              "description": "How often the server refreshes its cached check result. The Settings 'Check now' button always forces an immediate refresh regardless of this. Default 'daily'.",
+              "type": "string",
+              "enum": ["daily", "weekly", "monthly"]
             }
           }
         }

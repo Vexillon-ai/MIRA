@@ -137,6 +137,32 @@ I have" / "restore from yesterday's backup" — the destructive restore is
 admin-gated, requires `confirm: true`, and refuses encrypted archives via
 chat (passphrases in chat would leak).
 
+## Updating & rolling back
+
+MIRA can keep itself current and recover from a bad update.
+
+- **Update check** — a passive check against the release provider's Releases
+  API, **on by default** (`server.update_check`, check-only — it compares
+  versions and never downloads or installs on its own). Surfaced in
+  **Settings → Updates** (current vs latest, last-checked, **Check now**) and as
+  an admin banner. A background refresher runs on a configurable cadence
+  (`frequency`: daily / weekly / monthly).
+- **In-place upgrade (all platforms)** — `mira upgrade` (or the Settings
+  **Upgrade now** button) downloads the signed release archive for **this
+  host's** target (Linux/macOS `.tar.gz`, Windows `.zip`; x86_64 or aarch64),
+  **verifies the minisign signature** against the embedded public key, swaps the
+  binary, and restarts via the service supervisor. On Windows the running
+  `.exe` is renamed aside and cleaned up on the next boot. **Docker** installs
+  aren't swapped in place — MIRA shows guidance to pull the new image tag and
+  recreate the container.
+- **Rollback** — every upgrade first snapshots the **previous binary + config**.
+  If a build misbehaves, **Settings → Roll back** or `mira rollback`
+  (`--list` / `--version X`) restores the previous binary + config and restarts;
+  the CLI works even if the new build won't start. A **boot-time compatibility
+  guard** refuses to start (with clear guidance) if you roll a binary back
+  further than the on-disk data it was migrated to supports, rather than risk
+  corruption — restore a pre-upgrade backup in that case.
+
 ## Memory benchmarking
 
 A built-in harness (`mira bench memory`) measures MIRA's memory stack against the LongMemEval long-term-memory benchmark, so the wiki + memory story can be reported as numbers comparable to mem0 / Zep / Letta. It replays each benchmark conversation through MIRA's real extraction pipeline, asks the question through the normal turn path (real memory + wiki retrieval), and LLM-judges the answer against the gold — reporting per-question-type and overall accuracy. `--model` picks a cheap provider model for the run; `--extract-model` pins the extraction model independently of the answer model (so you can isolate retrieval quality from answer-model capability).

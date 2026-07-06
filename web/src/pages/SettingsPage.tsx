@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload, Trash2, Wrench, RotateCcw, Loader2, Calendar as CalendarIcon, RefreshCw, Shield, ShieldAlert, Volume2, ChevronDown, Bell, Image as ImageIcon } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { api } from '@/api/client'
+import UpdatesCard from '@/components/UpdatesCard'
 import { providersApi, type StatusInfo } from '@/api/providers'
 import { ttsApi } from '@/api/tts'
 import { playBlobWithGain, type PlayHandle } from '@/api/ttsPlayback'
@@ -120,6 +121,7 @@ interface Config {
     allowed_origins?: string[]
     auth_token?: string; webhook_secret?: string
     tls_cert_path?: string | null; tls_key_path?: string | null
+    update_check?: { enabled?: boolean; source_url?: string; frequency?: string }
   }
   security?: {
     rate_limit_rpm?:      number
@@ -1003,7 +1005,7 @@ export default function SettingsPage() {
           <ProvidersTab set={set} str={str} num={num} />
         )}
         {tab === 'agent' && (
-          <AgentTab set={set} str={str} num={num} bool={bool} />
+          <AgentTab set={set} str={str} num={num} bool={bool} isAdmin={isAdmin} />
         )}
         {tab === 'tools' && (
           <ToolsTab set={set} str={str} num={num} bool={bool} draft={draft} />
@@ -1711,12 +1713,13 @@ function AppearanceAgentSection() {
 // ── Agent tab ─────────────────────────────────────────────────────────────────
 
 function AgentTab({
-  set, str, num, bool,
+  set, str, num, bool, isAdmin,
 }: {
   set: (p: string, v: unknown) => void
   str: (p: string, fb?: string) => string
   num: (p: string, fb?: number) => number
   bool: (p: string, fb?: boolean) => boolean
+  isAdmin: boolean
 }) {
   return (
     <div className={styles.tabBody}>
@@ -1768,6 +1771,34 @@ function AgentTab({
           <Toggle value={bool('agent.show_thinking', true)} onChange={(v) => set('agent.show_thinking', v)} />
         </Field>
       </Section>
+
+      {isAdmin && (
+        <Section title="Updates">
+          <p className={styles.sectionDesc}>
+            MIRA checks for new releases and — where the platform allows — can upgrade itself
+            in place and roll back if needed. Checking only compares versions; installing an
+            update is always a deliberate action here.
+          </p>
+          <Field
+            label="Automatically check for updates"
+            desc="Periodically compare your version against the latest release. On by default; a single lightweight request that never downloads or installs anything on its own. Turn off to stop MIRA contacting the release host."
+          >
+            <Toggle value={bool('server.update_check.enabled', true)} onChange={(v) => set('server.update_check.enabled', v)} />
+          </Field>
+          <Field label="Check frequency" desc="How often MIRA refreshes the update check in the background. 'Check now' below always checks immediately.">
+            <SelectInput
+              value={str('server.update_check.frequency', 'daily')}
+              onChange={(v) => set('server.update_check.frequency', v)}
+              options={[
+                { value: 'daily',   label: 'Daily' },
+                { value: 'weekly',  label: 'Weekly' },
+                { value: 'monthly', label: 'Monthly' },
+              ]}
+            />
+          </Field>
+          <UpdatesCard />
+        </Section>
+      )}
 
       <Section title="Tool selection (Just-in-Time Tools)">
         <p className={styles.sectionDesc}>
