@@ -424,8 +424,12 @@ pub fn signal_cli_present(configured_binary: &str) -> bool {
 /// `.bat`/`.cmd`/`.exe` probes on Windows). Returns the resolved path.
 fn which_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    // Runnable extensions FIRST, extensionless LAST (mirrors Windows PATHEXT).
+    // Critical for npm/npx: the Node dir ships BOTH a `npm.cmd` launcher and an
+    // extensionless `npm` Unix shell script; picking the latter makes
+    // CreateProcess fail with "not a valid Win32 application" (os error 193).
     #[cfg(windows)]
-    let exts = ["", ".exe", ".bat", ".cmd"];
+    let exts = [".exe", ".cmd", ".bat", ""];
     #[cfg(not(windows))]
     let exts = [""];
     for dir in std::env::split_paths(&path) {
@@ -509,8 +513,11 @@ pub fn resolve_external_cli(name: &str) -> Option<PathBuf> {
     if let Some(p) = which_on_path(name) {
         return Some(p);
     }
+    // Runnable extensions first, extensionless last (see `which_on_path`) so a
+    // `.cmd`/`.exe` shim is preferred over an extensionless Unix-style script
+    // that CreateProcess can't launch (os error 193).
     #[cfg(windows)]
-    let exts: &[&str] = &["", ".exe", ".cmd", ".bat"];
+    let exts: &[&str] = &[".exe", ".cmd", ".bat", ""];
     #[cfg(not(windows))]
     let exts: &[&str] = &[""];
     for dir in external_cli_search_dirs() {
