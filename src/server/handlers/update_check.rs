@@ -198,6 +198,7 @@ pub struct RollbackRequest {
 /// Detached thread + 202, same as `upgrade` (the restart replaces this process).
 pub async fn rollback(
     AuthUser(me): AuthUser,
+    Extension(restart): Extension<Arc<tokio::sync::Notify>>,
     Json(req): Json<RollbackRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if me.role != Role::Admin {
@@ -221,9 +222,14 @@ pub async fn rollback(
 
     let version = req.version.clone();
     std::thread::spawn(move || {
-        let opts = crate::install::rollback::RollbackOptions { version, no_restart: false };
+        // Restore only; restart via restart_notify (see `upgrade` for why not
+        // svc.stop()/start() from inside the service).
+        let opts = crate::install::rollback::RollbackOptions { version, no_restart: true };
         match crate::install::rollback::run_rollback(opts) {
-            Ok(())  => tracing::info!("rollback: completed (service restarting)"),
+            Ok(())  => {
+                tracing::info!("rollback: restore complete — triggering restart");
+                restart.notify_waiters();
+            }
             Err(e)  => tracing::error!("rollback failed (binary untouched on error): {e}"),
         }
     });
@@ -312,6 +318,7 @@ pub async fn refresh_cache(cfg: &MiraConfig) {
 pub async fn upgrade(
     AuthUser(me): AuthUser,
     Extension(cfg_arc): Extension<Arc<crate::web::LiveConfig>>,
+    Extension(restart): Extension<Arc<tokio::sync::Notify>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if me.role != Role::Admin {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": "admin only" })));
@@ -323,17 +330,28 @@ pub async fn upgrade(
         })));
     }
 
-    std::thread::spawn(|| {
+    std::thread::spawn(move || {
+        // Swap the binary but do NOT let run_binary_upgrade restart via
+        // `svc.stop()`/`start()` on its own service — that races the live
+        // process and (on the Windows SCM service) never tears it down, so the
+        // swapped-in exe is never loaded and the old process keeps its `.old`
+        // inode locked. Instead trigger the SAME clean app-restart the
+        // /api/admin/restart button uses: the process force-exits and the
+        // supervisor (systemd / launchd / Windows SCM recovery) relaunches onto
+        // the new binary.
         let opts = crate::install::binary_upgrade::BinaryUpgradeOptions {
             version: None,        // latest
-            no_restart: false,
+            no_restart: true,     // restart via restart_notify below, not svc.stop
             force: false,
             provider: None,       // env/default selects the forge
             release_base_url: None,
             token: None,          // reads $MIRA_RELEASE_TOKEN if set
         };
         match crate::install::binary_upgrade::run_binary_upgrade(opts) {
-            Ok(()) => tracing::info!("self-upgrade: completed (service restarting)"),
+            Ok(()) => {
+                tracing::info!("self-upgrade: swap complete — triggering restart");
+                restart.notify_waiters();
+            }
             Err(e) => tracing::error!("self-upgrade failed (running binary untouched): {e}"),
         }
     });

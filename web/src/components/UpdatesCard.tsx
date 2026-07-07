@@ -12,6 +12,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Download, RotateCcw, RefreshCw } from 'lucide-react'
 import { api } from '@/api/client'
+import { waitForNewVersionThenReload } from '@/api/upgradeReload'
 import styles from './UpdatesCard.module.css'
 
 interface UpdateInfo {
@@ -60,14 +61,23 @@ export default function UpdatesCard() {
     mutationFn: () => api.get('/api/admin/update-check?force=true').then((r) => r.data),
     onSuccess:  (d) => { qc.setQueryData(['update-check'], d); setMsg(null) },
   })
+  // After an upgrade/rollback kicks off, wait for the server to restart onto a
+  // new version and reload the page automatically — no manual "Reload" click.
+  const awaitRestart = () => {
+    const current = info.data?.current ?? ''
+    setMsg('MIRA is restarting — this page will reload automatically when it\'s back…')
+    void waitForNewVersionThenReload(current).then((reloaded) => {
+      if (!reloaded) setMsg('Still restarting — if this page doesn\'t reload shortly, refresh it manually.')
+    })
+  }
   const upgrade = useMutation({
     mutationFn: () => api.post('/api/admin/upgrade').then((r) => r.data),
-    onSuccess:  (d) => setMsg(d?.message ?? 'Upgrade started — MIRA will restart shortly.'),
+    onSuccess:  () => awaitRestart(),
     onError:    () => setMsg('Upgrade failed to start — try `mira upgrade` from a terminal.'),
   })
   const rollback = useMutation({
     mutationFn: (version: string) => api.post('/api/admin/rollback', { version }).then((r) => r.data),
-    onSuccess:  (d) => setMsg(d?.message ?? 'Rollback started — MIRA will restart shortly.'),
+    onSuccess:  () => awaitRestart(),
     onError:    (e: any) => setMsg(e?.response?.data?.error ?? 'Rollback failed to start.'),
   })
 

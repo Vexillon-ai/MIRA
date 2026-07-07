@@ -14,6 +14,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { Sparkles, X as XIcon, Download, RotateCw } from 'lucide-react'
 import { useState } from 'react'
 import { api } from '@/api/client'
+import { waitForNewVersionThenReload } from '@/api/upgradeReload'
 import { useAuthStore } from '@/store/authStore'
 import styles from './UpdateBanner.module.css'
 
@@ -38,13 +39,6 @@ export default function UpdateBanner() {
     try { return localStorage.getItem(DISMISSED_KEY) } catch { return null }
   })
 
-  // One-click upgrade: POST kicks off download→verify→swap→restart server-side
-  // and returns 202; the server then restarts, so we switch to an "upgrading"
-  // state and let the admin reload once it's back.
-  const upgradeMut = useMutation({
-    mutationFn: () => api.post('/api/admin/upgrade').then((r) => r.data),
-  })
-
   const { data } = useQuery<UpdateCheckResponse>({
     queryKey: ['update-check'],
     queryFn:  () => api.get('/api/admin/update-check').then((r) => r.data),
@@ -58,18 +52,26 @@ export default function UpdateBanner() {
     retry: false,
   })
 
-  // While upgrading, the banner shows progress regardless of the dismiss/version
-  // checks below.
+  // One-click upgrade: POST kicks off download→verify→swap→restart server-side
+  // and returns 202; the server then restarts. We switch to an "upgrading"
+  // state and auto-reload the page once it's back on the new version.
+  const upgradeMut = useMutation({
+    mutationFn: () => api.post('/api/admin/upgrade').then((r) => r.data),
+    onSuccess:  () => { void waitForNewVersionThenReload(data?.current ?? '') },
+  })
+
+  // While upgrading, show progress; the page reloads itself once the new build
+  // is up (manual fallback kept in case the poll times out).
   if (upgradeMut.isSuccess) {
     return (
       <div className={styles.banner} role="status">
         <RotateCw size={14} />
         <span className={styles.text}>
-          Upgrading MIRA… it will download, verify, and restart. Reload this page
-          in a moment to land on the new version.
+          Upgrading MIRA… it will download, verify, and restart, then this page
+          reloads automatically.
         </span>
         <button className={styles.link} onClick={() => window.location.reload()}>
-          Reload
+          Reload now
         </button>
       </div>
     )

@@ -469,10 +469,13 @@ pub(crate) fn atomic_swap(src: &Path, dest: &Path) -> Result<(), Box<dyn Error>>
     // restarts onto the new one.
     #[cfg(windows)]
     {
+        // Use a UNIQUE sideline name per swap. If a prior upgrade failed to
+        // restart, its old process can still be alive holding its `.old` file
+        // open — Windows then refuses to delete or rename onto it, which would
+        // poison every future upgrade with "Access is denied". A fresh
+        // `.old-<pid>-<seq>` name sidesteps any such lingering lock; all of them
+        // are swept on the next clean boot by `cleanup_sidelined_binary`.
         let old = sidelined_old_path(dest);
-        // A leftover `.old` from a prior upgrade is unlocked once that process
-        // exited — clear it so this rename has an empty slot.
-        let _ = fs::remove_file(&old);
         fs::rename(dest, &old)
             .map_err(|e| format!("move running binary aside {} → {}: {e}", dest.display(), old.display()))?;
         if let Err(e) = fs::rename(&temp_path, dest) {
@@ -487,27 +490,38 @@ pub(crate) fn atomic_swap(src: &Path, dest: &Path) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// `<dest>.old` — where a running Windows binary is parked during a swap so
-/// the new one can take its place. Appends (doesn't replace the extension) so
-/// `mira.exe` → `mira.exe.old`.
+/// A unique sideline path for the running Windows binary during a swap, e.g.
+/// `mira.exe` → `mira.exe.old-1234-0`. Appends (doesn't replace the extension),
+/// and the `-<pid>-<seq>` suffix guarantees a name no lingering old process is
+/// still holding open. `cleanup_sidelined_binary` removes the whole `.old*`
+/// family on boot.
 #[cfg(windows)]
 fn sidelined_old_path(dest: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let mut s = dest.as_os_str().to_owned();
-    s.push(".old");
+    s.push(format!(".old-{}-{seq}", std::process::id()));
     PathBuf::from(s)
 }
 
-/// Best-effort removal of a `<current_exe>.old` left by a previous Windows
-/// upgrade. Safe to call on every startup: on the freshly-restarted process
-/// the old file is no longer locked, so it deletes cleanly; a no-op elsewhere.
+/// Best-effort removal of every `<current_exe>.old*` sideline left by prior
+/// Windows upgrades. Safe on every startup: the freshly-restarted process no
+/// longer holds those files, so they delete cleanly; a no-op elsewhere. Any
+/// still-locked one (a stray old process) is just retried next boot.
 pub fn cleanup_sidelined_binary() {
     #[cfg(windows)]
     if let Ok(exe) = std::env::current_exe() {
-        let old = sidelined_old_path(&exe);
-        if old.exists() {
-            match fs::remove_file(&old) {
-                Ok(())  => tracing::info!("upgrade cleanup: removed stale {}", old.display()),
-                Err(e)  => tracing::debug!("upgrade cleanup: {} still locked ({e}); will retry next boot", old.display()),
+        let (Some(dir), Some(name)) = (exe.parent(), exe.file_name().and_then(|n| n.to_str())) else { return };
+        // Matches both the legacy `mira.exe.old` and the new `mira.exe.old-<..>`.
+        let prefix = format!("{name}.old");
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                match fs::remove_file(e.path()) {
+                    Ok(())  => tracing::info!("upgrade cleanup: removed stale {}", e.path().display()),
+                    Err(err) => tracing::debug!("upgrade cleanup: {} still locked ({err}); will retry next boot", e.path().display()),
+                }
             }
         }
     }
