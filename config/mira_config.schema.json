@@ -613,6 +613,36 @@
               "enum": ["daily", "weekly", "monthly"]
             }
           }
+        },
+        "web_apps": {
+          "description": "Serve web apps/games that MIRA's coding agent builds (a completed task's output/index.html) at an isolated per-app origin, so 'open the game you built' returns a real clickable link instead of the model confabulating a browser-open it cannot perform. Each app is served at http://<task_id>.<host_suffix>:<port>/ — a distinct browser origin from the MIRA app itself, so a model-built app cannot read MIRA's session token or call its authenticated API.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Master switch for serving built web apps. Default true.",
+              "type": "boolean"
+            },
+            "mode": {
+              "description": "How built apps are exposed — a security/reachability trade-off the deployer picks (the server can't auto-detect how a browser reaches it, nor fall back at runtime). 'subdomain' (default): served at http://<task_id>.<host_suffix>:<port>/ — a distinct origin per app (isolates cookies AND localStorage), no extra port; works when the browser resolves the suffix to MIRA's box (same machine, or WSL via localhost). 'port': a separate listener (web_apps.port) at http://<host>:<apps_port>/a/<task_id>/ — reachable over any host incl. a LAN / WSL-gateway IP, with weaker isolation (all apps share one origin; port is not a cookie boundary on the same host). 'both': serve via both; the subdomain is the primary link, the port URL an alternate.",
+              "type": "string",
+              "enum": ["subdomain", "port", "both"]
+            },
+            "host_suffix": {
+              "description": "Host suffix for the per-app subdomain origin (subdomain/both mode; app served at http://<task_id>.<host_suffix>:<port>/). Default 'localhost' — resolved to loopback natively by every major browser (RFC 6761), giving origin isolation with no extra port. Only works when the browser reaches MIRA's box via that name (same machine, or WSL via localhost).",
+              "type": "string"
+            },
+            "port": {
+              "description": "Listener port for 'port'/'both' mode. 0 (default) means server.port + 1.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "advertised_host": {
+              "description": "Host clients use to reach the 'port'-mode listener, used only to build the returned URL (e.g. a LAN or WSL-gateway IP like '192.0.2.10'). Null derives it from server.public_base_url, then server.host (when concrete), then 'localhost'.",
+              "type": ["string", "null"]
+            }
+          }
         }
       }
     },

@@ -2347,8 +2347,18 @@ fn build_tool_registry(
         spawn_tool = spawn_tool.with_auth_db(auth.db_arc());
     }
     registry.register(spawn_tool);
-    registry.register(crate::tools::agent_tasks::GetTaskResultTool::new(
+    let mut get_task_result = crate::tools::agent_tasks::GetTaskResultTool::new(
         Arc::clone(&agent_registry),
+    );
+    if let Some(arts) = task_artifacts.as_ref() {
+        get_task_result = get_task_result.with_web_apps(Arc::clone(&cfg_arc), Arc::clone(arts));
+    }
+    registry.register(get_task_result);
+    // list_web_apps — lets the model return a real "open the game" link
+    // instead of confabulating a browser-open MIRA can't perform.
+    registry.register(crate::tools::agent_tasks::ListWebAppsTool::new(
+        Arc::clone(&cfg_arc),
+        task_artifacts.clone(),
     ));
     registry.register(crate::tools::agent_tasks::ListNamedAgentsTool::new(
         agent_defs.clone(),
@@ -2356,7 +2366,7 @@ fn build_tool_registry(
     registry.register(crate::tools::agent_tasks::CreateNamedAgentTool::new(
         agent_defs.clone(),
     ));
-    info!("Tool registered: agent_tasks (spawn_background_task, get_task_result, list_named_agents, create_named_agent)");
+    info!("Tool registered: agent_tasks (spawn_background_task, get_task_result, list_web_apps, list_named_agents, create_named_agent)");
 
     // Phase C — workflow orchestration tools. Registered only when the
     // orchestrator + store are wired; `list_workflows` is always registered

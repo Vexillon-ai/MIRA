@@ -934,6 +934,75 @@ pub struct ServerConfig {
     // install-and-supervisor design).
     #[serde(default)]
     pub update_check: UpdateCheckConfig,
+
+    // Serving of coding-agent-built web apps (a completed task's
+    // output/index.html) at an isolated per-app origin, so "open the
+    // game you built" returns a real clickable link instead of the
+    // model confabulating a browser-open it cannot perform.
+    #[serde(default)]
+    pub web_apps: WebAppsConfig,
+}
+
+/// Serve web apps/games that MIRA's coding agent builds. Each app is served
+/// at `http://<task_id>.<host_suffix>:<port>/`, a distinct browser origin from
+/// the MIRA app itself — so a model-built app cannot read MIRA's session token
+/// or call its authenticated API. `task_id` (a high-entropy UUIDv7) is the
+/// unguessable capability; only requests whose `Host` is `<label>.<host_suffix>`
+/// are treated as app requests, everything else routes to MIRA normally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebAppsConfig {
+    /// Master switch. When off, no app is served and the URL helper still
+    /// resolves (so the tool can explain the app exists on disk).
+    #[serde(default = "default_web_apps_enabled")]
+    pub enabled: bool,
+
+    /// How built apps are exposed — a security/reachability trade-off the
+    /// deployer picks (the server can't auto-detect how a browser will reach
+    /// it, nor fall back at runtime — it hands back one URL and never sees
+    /// whether the client's connection succeeded):
+    /// - `subdomain` (default): `<task_id>.<host_suffix>:<port>` — a distinct
+    ///   origin per app (isolates cookies AND localStorage), no extra port.
+    ///   Works when the browser resolves the suffix to the box MIRA runs on
+    ///   (same machine, or WSL reached via `localhost`).
+    /// - `port`: a separate listener (`web_apps.port`) at `/a/<task_id>/`.
+    ///   Reachable over any host incl. a LAN / WSL-gateway IP, at the cost of
+    ///   weaker isolation (all apps share one origin; port is not a cookie
+    ///   boundary on the same host).
+    /// - `both`: serve via both; the subdomain is the primary link, the port
+    ///   URL an alternate.
+    #[serde(default = "default_web_apps_mode")]
+    pub mode: String,
+
+    /// Host suffix for the per-app subdomain origin (`subdomain`/`both`).
+    /// `localhost` resolves to loopback natively in every major browser
+    /// (RFC 6761) — origin-isolated, no extra port. Only works when the
+    /// browser reaches MIRA's box via that name (same machine, or WSL via
+    /// `localhost`).
+    #[serde(default = "default_web_app_host_suffix")]
+    pub host_suffix: String,
+
+    /// Listener port for `port`/`both` mode. `0` means `server.port + 1`.
+    #[serde(default)]
+    pub port: u16,
+
+    /// Host clients use to reach the `port`-mode listener — used only to build
+    /// the returned URL (e.g. a LAN or WSL-gateway IP like `192.0.2.10`).
+    /// `None` derives it from `server.public_base_url`, then `server.host`
+    /// (when concrete), then `localhost`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertised_host: Option<String>,
+}
+
+impl Default for WebAppsConfig {
+    fn default() -> Self {
+        Self {
+            enabled:         default_web_apps_enabled(),
+            mode:            default_web_apps_mode(),
+            host_suffix:     default_web_app_host_suffix(),
+            port:            0,
+            advertised_host: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1003,6 +1072,7 @@ impl Default for ServerConfig {
             display_name:         None,
             public_base_url:      None,
             update_check:         UpdateCheckConfig::default(),
+            web_apps:             WebAppsConfig::default(),
         }
     }
 }
@@ -3349,6 +3419,9 @@ fn default_tui_token_path()  -> String  { "~/.mira/data/local.token".to_string()
 
 fn default_server_host()     -> String  { "127.0.0.1".to_string() }
 fn default_server_port()     -> u16     { 8080 }
+fn default_web_apps_enabled()     -> bool   { true }
+fn default_web_apps_mode()        -> String { "subdomain".to_string() }
+fn default_web_app_host_suffix()  -> String { "localhost".to_string() }
 fn default_max_connections() -> u32     { 100 }
 fn default_request_timeout() -> u32     { 30 }
 

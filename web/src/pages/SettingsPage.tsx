@@ -122,6 +122,13 @@ interface Config {
     auth_token?: string; webhook_secret?: string
     tls_cert_path?: string | null; tls_key_path?: string | null
     update_check?: { enabled?: boolean; source_url?: string; frequency?: string }
+    web_apps?: {
+      enabled?: boolean
+      mode?: string
+      host_suffix?: string
+      port?: number
+      advertised_host?: string | null
+    }
   }
   security?: {
     rate_limit_rpm?:      number
@@ -3238,6 +3245,38 @@ function ServerTab({
           <TextInput value={str('system_email.smtp_password')} onChange={(v) => set('system_email.smtp_password', v)} type="password" placeholder="•••••" mono />
         </Field>
       </CollapsibleSection>
+
+      <Section title="Web apps (built games & tools)">
+        <p className={styles.sectionDesc}>
+          When the coding agent builds something runnable (a game, a small web tool), MIRA can
+          serve it at its own clickable link so you can open it — instead of the assistant
+          claiming it opened a tab it can't. Each app gets its own browser origin, isolated from
+          the MIRA app itself. Changing the mode/port needs a restart to take effect.
+        </p>
+        <Field label="Serve built web apps" desc="Master switch. When off, MIRA still tells you where a built app lives on disk, but gives no link.">
+          <Toggle value={bool('server.web_apps.enabled', true)} onChange={(v) => set('server.web_apps.enabled', v)} />
+        </Field>
+        <Field label="Mode" desc="How apps are reached — pick by how your browser reaches MIRA (the server can't auto-detect it). Subdomain: <task>.<suffix> — most isolated, works same-machine or WSL via localhost. Port: a separate listener, reachable over a LAN / WSL-gateway IP. Both: serve both, subdomain link primary.">
+          <SelectInput
+            value={str('server.web_apps.mode', 'subdomain')}
+            onChange={(v) => set('server.web_apps.mode', v)}
+            options={[
+              { value: 'subdomain', label: 'Subdomain — <task>.<suffix> (most isolated, same machine / WSL-localhost)' },
+              { value: 'port',      label: 'Port — separate listener (LAN / WSL-gateway IP)' },
+              { value: 'both',      label: 'Both (subdomain link primary)' },
+            ]}
+          />
+        </Field>
+        <Field label="Host suffix" desc="Subdomain / Both mode. App served at http://<task_id>.<suffix>:<port>/. 'localhost' resolves to loopback in every browser with no extra port; only works when the browser reaches MIRA's box via that name.">
+          <TextInput value={str('server.web_apps.host_suffix', 'localhost')} onChange={(v) => set('server.web_apps.host_suffix', v)} placeholder="localhost" mono />
+        </Field>
+        <Field label="Port-mode listener port" desc="Port / Both mode. 0 = server port + 1. The separate listener serves apps at http://<host>:<this-port>/a/<task_id>/.">
+          <NumberInput value={num('server.web_apps.port', 0)} onChange={(v) => set('server.web_apps.port', v)} min={0} max={65535} />
+        </Field>
+        <Field label="Advertised host" desc="Port / Both mode. Host put in the returned URL — e.g. a LAN or WSL-gateway IP like 192.0.2.10. Leave blank to derive from public base URL, then the server host.">
+          <TextInput value={str('server.web_apps.advertised_host')} onChange={(v) => set('server.web_apps.advertised_host', v || null)} placeholder="auto-derived" mono />
+        </Field>
+      </Section>
     </div>
   )
 }

@@ -1415,10 +1415,32 @@ pub fn build_router(
     if let Some(layer) = ip_ban_layer {
         layered = layered.layer(layer);
     }
-    layered
+    let app = layered
         .layer(RateLimitLayer::new(security.rate_limit_rpm, vec![]))
         .layer(build_cors_layer(&security.cors_origins))
-        .layer(RequestLogLayer)
+        .layer(RequestLogLayer);
+
+    // Serve coding-agent-built web apps at an isolated per-app origin
+    // (`<task_id>.<host_suffix>`). Mounted as the OUTERMOST layer so an app
+    // request short-circuits before auth / rate-limit / CORS ever see it, and
+    // so a normal request pays only a Host-header peek. Only for the
+    // subdomain-serving modes (`subdomain`/`both`) — `port` mode serves apps on
+    // a separate listener instead (see MiraServer). No-op without the store.
+    let subdomain_serving = config.server.web_apps.enabled
+        && crate::server::web_apps::subdomain_mode_enabled(&config.server);
+    match (subdomain_serving, task_artifacts.as_ref()) {
+        (true, Some(store)) => {
+            let state = crate::server::web_apps::WebAppState {
+                store:       Arc::clone(store),
+                host_suffix: config.server.web_apps.host_suffix.clone(),
+            };
+            app.layer(axum::middleware::from_fn_with_state(
+                state,
+                crate::server::web_apps::dispatch,
+            ))
+        }
+        _ => app,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

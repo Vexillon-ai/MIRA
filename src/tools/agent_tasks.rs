@@ -631,11 +631,27 @@ fn coding_addendum_for(skill_id: &str) -> &'static str {
 
 pub struct GetTaskResultTool {
     agent_registry: Arc<AgentRegistry>,
+    /// When wired, a completed task that produced a runnable web app
+    /// (`output/index.html`) also reports the URL to open it — so the model
+    /// hands the user a real link instead of confabulating a browser-open.
+    config:         Option<Arc<MiraConfig>>,
+    task_artifacts: Option<Arc<crate::task_artifacts::TaskArtifactsStore>>,
 }
 
 impl GetTaskResultTool {
     pub fn new(agent_registry: Arc<AgentRegistry>) -> Self {
-        Self { agent_registry }
+        Self { agent_registry, config: None, task_artifacts: None }
+    }
+
+    /// Wire the config + artifacts store so completed web-app tasks surface a
+    /// clickable URL. Called at gateway startup.
+    pub fn with_web_apps(
+        mut self, config: Arc<MiraConfig>,
+        store: Arc<crate::task_artifacts::TaskArtifactsStore>,
+    ) -> Self {
+        self.config = Some(config);
+        self.task_artifacts = Some(store);
+        self
     }
 }
 
@@ -649,7 +665,11 @@ impl Tool for GetTaskResultTool {
          `result_summary` carries what the subagent produced. When the \
          status is `running` or `pending`, the task is still in flight — \
          the user will be pinged automatically when it finishes; tell \
-         them so rather than busy-polling."
+         them so rather than busy-polling. \
+         \n\nIf the completed task built a runnable web app/game, the result \
+         includes `web_app_url` — give the user that exact URL to open in \
+         their browser. MIRA cannot open a browser tab itself, so never \
+         claim you opened it; hand over the link."
     }
 
     fn tier(&self) -> Tier { Tier::Pure }
@@ -687,7 +707,7 @@ impl Tool for GetTaskResultTool {
         };
         let agent = handle.read().expect("agent read");
 
-        let body = json!({
+        let mut body = json!({
             "task_id":        agent.id.to_string(),
             "skill":          agent.skill_id,
             "status":         status_str(agent.status),
@@ -698,7 +718,103 @@ impl Tool for GetTaskResultTool {
             "spent_usd":      agent.budget.spent_usd,
             "budget_usd":     agent.budget.max_usd,
         });
+
+        // If a completed task produced a runnable web app, surface the URL so
+        // the model hands the user a real link instead of confabulating an
+        // "I opened it" that MIRA cannot actually perform.
+        if status_str(agent.status) == "completed" {
+            if let (Some(cfg), Some(store)) = (self.config.as_ref(), self.task_artifacts.as_ref()) {
+                let tid = agent.id.to_string();
+                if crate::server::web_apps::has_web_app(store, &tid) {
+                    let links = crate::server::web_apps::web_app_links(&cfg.server, &tid);
+                    body["web_app_url"] = json!(links.primary);
+                    if let Some(alt) = links.alt {
+                        body["web_app_alt_url"] = json!(alt);
+                    }
+                    body["web_app_hint"] = json!(
+                        "This task built a runnable web app. Give the user this exact URL to open \
+                         in their browser — MIRA cannot open a tab itself, so do NOT claim you did."
+                    );
+                }
+            }
+        }
         Ok(ToolResult::success(body.to_string()))
+    }
+}
+
+// ── list_web_apps ────────────────────────────────────────────────────────────
+
+/// Lets the model answer "open the game you built earlier" honestly: it lists
+/// completed coding tasks whose output is a runnable web app (`index.html`),
+/// each with the exact URL to open it. Without this the model has no path from
+/// "open X" to an action and tends to confabulate a browser-open MIRA can't do.
+pub struct ListWebAppsTool {
+    config:         Arc<MiraConfig>,
+    task_artifacts: Option<Arc<crate::task_artifacts::TaskArtifactsStore>>,
+}
+
+impl ListWebAppsTool {
+    pub fn new(
+        config: Arc<MiraConfig>,
+        task_artifacts: Option<Arc<crate::task_artifacts::TaskArtifactsStore>>,
+    ) -> Self {
+        Self { config, task_artifacts }
+    }
+}
+
+#[async_trait]
+impl Tool for ListWebAppsTool {
+    fn name(&self) -> &str { "list_web_apps" }
+
+    fn description(&self) -> &str {
+        "List the runnable web apps/games MIRA's coding agent has built — \
+         completed tasks whose output contains an `index.html` — each with the \
+         exact `url` to open it in a browser. \
+         \n\nUse this whenever the user asks to \"open\", \"play\", \"run\", or \
+         \"show\" something you built earlier: find the matching app by its \
+         `brief`, then give the user its `url` verbatim. \
+         \n\nIMPORTANT: MIRA runs as a background service and CANNOT open a \
+         browser tab on the user's screen. Never say you opened / launched it \
+         — hand over the URL and let the user click it. If `serving_enabled` \
+         is false, tell the user the app exists but serving is turned off in \
+         settings (`server.web_apps.enabled`)."
+    }
+
+    fn tier(&self) -> Tier { Tier::Pure }
+
+    fn args_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    async fn execute(&self, _args: ToolArgs) -> Result<ToolResult, MiraError> {
+        let Some(store) = self.task_artifacts.as_ref() else {
+            return Ok(ToolResult::success(json!({
+                "web_apps": [],
+                "serving_enabled": false,
+                "note": "task artifacts store is not configured on this instance",
+            }).to_string()));
+        };
+
+        let mut apps: Vec<Value> = Vec::new();
+        for entry in store.list() {
+            if entry.manifest.status != "completed" { continue; }
+            if !entry.path.join("output").join("index.html").is_file() { continue; }
+            let tid = entry.manifest.task_id.clone();
+            let links = crate::server::web_apps::web_app_links(&self.config.server, &tid);
+            apps.push(json!({
+                "task_id":    tid,
+                "brief":      entry.manifest.brief_excerpt,
+                "slug":       entry.manifest.slug,
+                "created_at": entry.manifest.created_at,
+                "url":        links.primary,
+                "alt_url":    links.alt,
+            }));
+        }
+
+        Ok(ToolResult::success(json!({
+            "web_apps":         apps,
+            "serving_enabled":  self.config.server.web_apps.enabled,
+        }).to_string()))
     }
 }
 

@@ -16,6 +16,7 @@
 
 pub mod handlers;
 pub mod router;
+pub mod web_apps;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -43,6 +44,10 @@ use crate::MiraError;
 pub struct MiraServer {
     router:         axum::Router,
     bind_addr:      SocketAddr,
+    // `port`/`both`-mode web-apps listener: a second socket serving built apps
+    // at `/a/<task_id>/` on its own origin. `None` unless the mode is enabled.
+    apps_addr:      Option<SocketAddr>,
+    apps_router:    Option<axum::Router>,
     // Notified when an admin hits `POST /api/admin/restart`. The Gateway
     // races this against ctrl_c to trigger graceful shutdown.
     pub restart_notify: Arc<tokio::sync::Notify>,
@@ -127,6 +132,24 @@ impl MiraServer {
             .parse()
             .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], config.server.port)));
 
+        // `port`/`both`-mode web apps get a second listener on their own port,
+        // bound to the same host as the main server (so it's reachable however
+        // the main server is). Built before `build_router` moves the store.
+        let (apps_addr, apps_router) = if config.server.web_apps.enabled
+            && web_apps::port_mode_enabled(&config.server)
+        {
+            match task_artifacts.as_ref() {
+                Some(store) => {
+                    let apps_port = web_apps::effective_apps_port(&config.server);
+                    let addr = SocketAddr::new(bind_addr.ip(), apps_port);
+                    (Some(addr), Some(web_apps::app_port_router(Arc::clone(store))))
+                }
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
         let router = router::build_router(
             agent_core,
             &security,
@@ -171,14 +194,33 @@ impl MiraServer {
             audit_store,
         );
 
-        Self { router, bind_addr, restart_notify }
+        Self { router, bind_addr, apps_addr, apps_router, restart_notify }
     }
 
     // Bind and serve until the given `shutdown_signal` future resolves.
-    pub async fn run_until_shutdown<F>(self, shutdown_signal: F) -> Result<(), MiraError>
+    pub async fn run_until_shutdown<F>(mut self, shutdown_signal: F) -> Result<(), MiraError>
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        // Spawn the `port`/`both`-mode web-apps listener alongside the main one.
+        // A bind failure here (e.g. the port is taken) disables port-mode
+        // serving but must NOT stop the main server from coming up.
+        if let (Some(addr), Some(apps_router)) = (self.apps_addr, self.apps_router.take()) {
+            match TcpListener::bind(addr).await {
+                Ok(l) => {
+                    info!("MIRA web-apps (port mode) listening on http://{}", addr);
+                    tokio::spawn(async move {
+                        if let Err(e) = axum::serve(l, apps_router).await {
+                            tracing::error!("web-apps listener error: {e}");
+                        }
+                    });
+                }
+                Err(e) => tracing::warn!(
+                    "web-apps: failed to bind {addr}: {e} — port-mode serving disabled"
+                ),
+            }
+        }
+
         let listener = TcpListener::bind(self.bind_addr).await
             .map_err(|e| MiraError::ServerError(format!(
                 "Failed to bind {}: {}", self.bind_addr, e

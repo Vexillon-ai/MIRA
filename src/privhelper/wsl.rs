@@ -83,7 +83,7 @@ fn render_unit(alias: &str) -> String {
 fn gateway_ip() -> Option<String> {
     let out = std::process::Command::new("ip").args(["route", "show", "default"]).output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
-    // "default via 172.22.240.1 dev eth0 proto kernel"
+    // "default via 192.0.2.10 dev eth0 proto kernel"
     s.split_whitespace().skip_while(|t| *t != "via").nth(1).map(str::to_string)
 }
 
