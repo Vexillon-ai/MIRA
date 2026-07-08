@@ -1077,6 +1077,11 @@ pub fn build_router(
             // when `server.update_check.enabled = false` (the default),
             // otherwise probes the configured Releases API and reports
             // newer_available + release_url.
+            // admin-only remote-access status + guided setup (Tailscale
+            // detection, effective remote URL baked into pairing, copy-paste
+            // commands). Detection only — opens no ports, exposes no secrets.
+            .route("/api/admin/remote-access",
+                   get(crate::server::handlers::remote_access::remote_access_status))
             .route("/api/admin/update-check",
                    get(crate::server::handlers::update_check::update_check))
             // admin-only one-click in-place upgrade: download + verify

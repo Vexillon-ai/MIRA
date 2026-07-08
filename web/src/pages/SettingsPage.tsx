@@ -7,6 +7,7 @@ import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload,
 import toast from 'react-hot-toast'
 import { api } from '@/api/client'
 import UpdatesCard from '@/components/UpdatesCard'
+import RemoteAccessCard from '@/components/RemoteAccessCard'
 import { providersApi, type StatusInfo } from '@/api/providers'
 import { ttsApi } from '@/api/tts'
 import { playBlobWithGain, type PlayHandle } from '@/api/ttsPlayback'
@@ -121,6 +122,7 @@ interface Config {
     allowed_origins?: string[]
     auth_token?: string; webhook_secret?: string
     tls_cert_path?: string | null; tls_key_path?: string | null
+    remote_url?: string | null
     update_check?: { enabled?: boolean; source_url?: string; frequency?: string }
     web_apps?: {
       enabled?: boolean
@@ -3246,6 +3248,28 @@ function ServerTab({
         </Field>
       </CollapsibleSection>
 
+      <Section title="Remote access (reach MIRA from away)">
+        <p className={styles.sectionDesc}>
+          Reach your server from the mobile app when you're away from home — without opening
+          router ports. <strong>Tailscale</strong> is the recommended path: install it on this
+          host and your phone once, and MIRA auto-detects the tunnel URL and bakes it into the
+          pairing QR. Or set an explicit URL below (Cloudflare Tunnel, DDNS, reverse proxy). This
+          opens no ports — it's detection + configuration + a link in the QR.
+        </p>
+        <Field
+          label="Remote URL (override)"
+          desc="Externally-reachable base URL (e.g. https://mira.my-tailnet.ts.net or a Cloudflare Tunnel / DDNS host). Leave blank to auto-detect Tailscale. Must be an absolute http/https URL."
+        >
+          <TextInput
+            value={str('server.remote_url')}
+            onChange={(v) => set('server.remote_url', v || null)}
+            placeholder="auto-detect (Tailscale) — or https://mira.example.com"
+            mono
+          />
+        </Field>
+        <RemoteAccessCard />
+      </Section>
+
       <Section title="Web apps (built games & tools)">
         <p className={styles.sectionDesc}>
           When the coding agent builds something runnable (a game, a small web tool), MIRA can
@@ -3273,7 +3297,7 @@ function ServerTab({
         <Field label="Port-mode listener port" desc="Port / Both mode. 0 = server port + 1. The separate listener serves apps at http://<host>:<this-port>/a/<task_id>/.">
           <NumberInput value={num('server.web_apps.port', 0)} onChange={(v) => set('server.web_apps.port', v)} min={0} max={65535} />
         </Field>
-        <Field label="Advertised host" desc="Port / Both mode. Host put in the returned URL — e.g. a LAN or WSL-gateway IP like 192.0.2.10. Leave blank to derive from public base URL, then the server host.">
+        <Field label="Advertised host" desc="Port / Both mode. Host put in the returned URL — e.g. a LAN or WSL-gateway IP like 172.22.240.1. Leave blank to derive from public base URL, then the server host.">
           <TextInput value={str('server.web_apps.advertised_host')} onChange={(v) => set('server.web_apps.advertised_host', v || null)} placeholder="auto-derived" mono />
         </Field>
       </Section>

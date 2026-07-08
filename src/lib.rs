@@ -53,6 +53,7 @@ pub mod policy;
 pub mod privhelper;
 pub mod providers;
 pub mod proxy;
+pub mod remote_access;
 pub mod sandbox;
 pub mod security;
 pub mod server;

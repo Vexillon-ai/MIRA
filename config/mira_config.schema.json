@@ -594,6 +594,13 @@
             "null"
           ]
         },
+        "remote_url": {
+          "description": "Externally-reachable base URL for REMOTE access away from the LAN — e.g. a Tailscale MagicDNS name (https://mira.my-tailnet.ts.net) or a Cloudflare Tunnel / DDNS hostname. Distinct from public_base_url (the LAN/current address): this is the 'away' endpoint embedded as remote_url in the pairing QR so the mobile app can auto-select it when the LAN address is unreachable. Null falls back to Tailscale auto-detection, then omits the field. Must be an absolute http/https URL when set. Also settable via the MIRA_REMOTE_URL env var.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "update_check": {
           "description": "Passive check against an upstream Releases API for a newer MIRA build, surfaced in Settings and as an admin banner. ON by default: it's a single lightweight request that only COMPARES versions — it never downloads or installs anything (upgrading is always an explicit action). Set enabled=false to stop MIRA contacting the release host entirely.",
           "type": "object",

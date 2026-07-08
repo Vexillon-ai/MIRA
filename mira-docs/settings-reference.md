@@ -416,6 +416,7 @@ _MIRA HTTP server settings (invoked with --server flag). Exposes an API for Tele
 - **`server.max_connections`** (integer) — Maximum number of simultaneous client connections.
 - **`server.port`** (integer) — TCP port to listen on.
 - **`server.public_base_url`** (string) — Canonical public base URL (scheme+host[+port]) the outside world — phones, pairing QR codes — should use to reach this instance. Null derives it from the incoming request. Set this when behind a reverse proxy.
+- **`server.remote_url`** (string) — Externally-reachable base URL for REMOTE access away from the LAN — e.g. a Tailscale MagicDNS name (https://mira.my-tailnet.ts.net) or a Cloudflare Tunnel / DDNS hostname. Distinct from public_base_url (the LAN/current address): this is the 'away' endpoint embedded as remote_url in the pairing QR so the mobile app can auto-select it when the LAN address is unreachable. Null falls back to Tailscale auto-detection, then omits the field. Must be an absolute http/https URL when set. Also settable via the MIRA_REMOTE_URL env var.
 - **`server.request_timeout_secs`** (integer) — Maximum seconds to process a single request before returning a 408 timeout.
 - **`server.tls_cert_path`** (string) — Path to a TLS certificate file in PEM format. Set to null to use plain HTTP (not recommended for public servers).
 - **`server.tls_key_path`** (string) — Path to the TLS private key file in PEM format. Required when tls_cert_path is set.

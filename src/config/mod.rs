@@ -927,6 +927,17 @@ pub struct ServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_base_url: Option<String>,
 
+    // Externally-reachable base URL for REMOTE access (away from the LAN) —
+    // e.g. a Tailscale MagicDNS name (https://mira.my-tailnet.ts.net) or a
+    // Cloudflare Tunnel / DDNS hostname. Distinct from `public_base_url`
+    // (the LAN/current address): this is the "away" endpoint embedded as
+    // `remote_url` in the pairing QR so the app can auto-select it when the
+    // LAN one is unreachable. None → fall back to Tailscale auto-detection,
+    // then omit. Must be an absolute http/https URL when set.
+    // Also settable via the `MIRA_REMOTE_URL` env var.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
+
     // periodic check against a Releases API for a newer
     // MIRA version. Renders a banner in the admin web UI when one
     // is available. Off by default ("skippable per-version, off by
@@ -1071,6 +1082,7 @@ impl Default for ServerConfig {
             webhook_secret:       None,
             display_name:         None,
             public_base_url:      None,
+            remote_url:           None,
             update_check:         UpdateCheckConfig::default(),
             web_apps:             WebAppsConfig::default(),
         }
@@ -3786,6 +3798,13 @@ impl MiraConfig {
             if !url.is_empty() {
                 self.providers.ollama.url = url;
                 info!("Ollama URL overridden by OLLAMA_HOST env var");
+            }
+        }
+        if let Ok(url) = std::env::var("MIRA_REMOTE_URL") {
+            let url = url.trim().to_string();
+            if !url.is_empty() {
+                self.server.remote_url = Some(url);
+                info!("Remote access URL set from MIRA_REMOTE_URL env var");
             }
         }
     }

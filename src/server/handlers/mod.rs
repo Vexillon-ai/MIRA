@@ -4,6 +4,7 @@
 
 pub mod admin;
 pub mod admin_audit;
+pub mod remote_access;
 pub mod update_check;
 pub mod backup;
 pub mod briefing;

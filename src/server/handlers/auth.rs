@@ -234,8 +234,14 @@ pub struct PairingStartResponse {
     pub pairing_id:     String,
     /// Raw single-use secret — embedded in the QR, returned exactly once.
     pub pairing_secret: String,
-    /// Canonical base URL the phone should use to reach this instance.
+    /// Canonical base URL the phone should use to reach this instance — the
+    /// LAN / currently-browsed address. The QR's `base_url`.
     pub base_url:       String,
+    /// Externally-reachable "away" URL (Tailscale / tunnel), when known. The
+    /// QR's optional `remote_url`; the app stores both and auto-selects
+    /// whichever is reachable. Omitted when no remote URL is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_url:     Option<String>,
     /// Human label for this instance (config `server.display_name`, else "MIRA").
     pub server_name:    String,
     /// Expiry, unix-millis.
@@ -305,9 +311,13 @@ pub async fn pairing_start_handler(
     };
     let cfg         = live_cfg.get().await;
     let base_url    = resolve_base_url(&cfg, &headers);
+    // The "away" endpoint (configured remote_url, else Tailscale auto-detect).
+    // Cached + timeout-guarded, so this never blocks pairing for long. Omitted
+    // when unknown, keeping the payload backward compatible.
+    let remote_url  = crate::remote_access::effective_remote_url(&cfg).await;
     let server_name = cfg.server.display_name.clone().unwrap_or_else(|| "MIRA".to_string());
     axum::Json(PairingStartResponse {
-        pairing_id, pairing_secret: secret, base_url, server_name, expires_at,
+        pairing_id, pairing_secret: secret, base_url, remote_url, server_name, expires_at,
     }).into_response()
 }
 

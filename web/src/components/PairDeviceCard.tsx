@@ -9,8 +9,14 @@
 // claims it, with a live countdown to expiry and a regenerate action.
 //
 // The QR encodes the JSON the app expects (see MIRA-SERVER-CHANGES §2.3):
-//   { v:1, type:"mira_pairing", base_url, server_name, pairing_id,
-//     pairing_secret, expires_at }
+//   { v, type:"mira_pairing", base_url, remote_url?, server_name,
+//     pairing_id, pairing_secret, expires_at }
+// `base_url` is the LAN / currently-browsed address; `remote_url` is the
+// optional "away" endpoint (Tailscale / tunnel). It's emitted only when the
+// server knows one, and `v` is bumped to 2 only in that case — so a server
+// with no remote URL produces the exact v1 payload as before. A v2-aware app
+// stores both endpoints and auto-selects whichever is reachable; older builds
+// ignore the new field.
 // The pairing secret is single-use + short-lived; it only ever lives in
 // this authenticated browser and the QR it renders.
 
@@ -25,6 +31,8 @@ interface PairingStart {
   pairing_id:     string
   pairing_secret: string
   base_url:       string
+  /** Optional "away" endpoint (Tailscale / tunnel), present only when known. */
+  remote_url?:    string
   server_name:    string
   expires_at:     number
 }
@@ -61,10 +69,14 @@ export default function PairDeviceCard() {
   // Render the QR whenever a fresh pairing arrives.
   useEffect(() => {
     if (!pairing || !canvasRef.current) return
+    // Only the presence of an away endpoint changes the payload: emit
+    // `remote_url` + bump to v2 when we have one, else keep the exact v1 shape
+    // so a server with no remote URL produces a byte-identical QR to before.
     const payload = JSON.stringify({
-      v: 1,
+      v: pairing.remote_url ? 2 : 1,
       type: 'mira_pairing',
       base_url:       pairing.base_url,
+      ...(pairing.remote_url ? { remote_url: pairing.remote_url } : {}),
       server_name:    pairing.server_name,
       pairing_id:     pairing.pairing_id,
       pairing_secret: pairing.pairing_secret,
