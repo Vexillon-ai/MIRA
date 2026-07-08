@@ -322,7 +322,7 @@ mod tests {
         let mut s = ServerConfig::default();
         s.port = 8087;
         s.host = "0.0.0.0".to_string();               // wildcard bind
-        s.web_apps.advertised_host = Some("192.0.2.10".to_string());
+        s.web_apps.advertised_host = Some("198.51.100.10".to_string());
 
         // subdomain (default): only a subdomain link.
         let l = web_app_links(&s, "t1");
@@ -332,14 +332,14 @@ mod tests {
         // port: primary is the /a/<id>/ URL on the +1 port over the LAN host.
         s.web_apps.mode = "port".to_string();
         let l = web_app_links(&s, "t1");
-        assert_eq!(l.primary, "http://192.0.2.10:8088/a/t1/");
+        assert_eq!(l.primary, "http://198.51.100.10:8088/a/t1/");
         assert!(l.alt.is_none());
 
         // both: subdomain primary, port alternate.
         s.web_apps.mode = "both".to_string();
         let l = web_app_links(&s, "t1");
         assert_eq!(l.primary, "http://t1.localhost:8087/");
-        assert_eq!(l.alt.as_deref(), Some("http://192.0.2.10:8088/a/t1/"));
+        assert_eq!(l.alt.as_deref(), Some("http://198.51.100.10:8088/a/t1/"));
     }
 
     #[test]
@@ -352,8 +352,8 @@ mod tests {
         s.public_base_url = Some("https://mira.example.com:8443/app".to_string());
         assert_eq!(advertised_host(&s), "mira.example.com");
         // Explicit advertised_host wins.
-        s.web_apps.advertised_host = Some("192.0.2.5".to_string());
-        assert_eq!(advertised_host(&s), "192.0.2.5");
+        s.web_apps.advertised_host = Some("203.0.113.5".to_string());
+        assert_eq!(advertised_host(&s), "203.0.113.5");
         // Concrete server.host used when no override/base url.
         let mut s2 = ServerConfig::default();
         s2.host = "192.0.2.9".to_string();

@@ -47,7 +47,7 @@ The default `subdomain` mode only works when your browser can resolve
 `<task-id>.localhost` to the machine MIRA runs on — i.e. the browser is on the
 same box, or reaches MIRA via `localhost` (as WSL's built-in port forwarding
 does). If instead you reach MIRA over the LAN or a **WSL gateway IP** (like
-`http://192.0.2.10:<port>`), that subdomain won't resolve there.
+`http://198.51.100.10:<port>`), that subdomain won't resolve there.
 
 For those setups, switch the **mode**:
 
@@ -55,7 +55,7 @@ For those setups, switch the **mode**:
   serves each app at `http://<host>:<apps-port>/a/<task-id>/`. Because it's a
   real port, it's reachable over any host that reaches MIRA — including a
   gateway/LAN IP. Set `server.web_apps.advertised_host` to the IP you use (e.g.
-  `192.0.2.10`) so the link MIRA hands you points there.
+  `198.51.100.10`) so the link MIRA hands you points there.
 - **`both`** — serve both ways; MIRA gives you the subdomain link with the port
   link as a backup.
 

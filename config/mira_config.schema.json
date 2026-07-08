@@ -639,7 +639,7 @@
               "maximum": 65535
             },
             "advertised_host": {
-              "description": "Host clients use to reach the 'port'-mode listener, used only to build the returned URL (e.g. a LAN or WSL-gateway IP like '192.0.2.10'). Null derives it from server.public_base_url, then server.host (when concrete), then 'localhost'.",
+              "description": "Host clients use to reach the 'port'-mode listener, used only to build the returned URL (e.g. a LAN or WSL-gateway IP like '198.51.100.10'). Null derives it from server.public_base_url, then server.host (when concrete), then 'localhost'.",
               "type": ["string", "null"]
             }
           }

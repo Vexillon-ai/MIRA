@@ -986,7 +986,7 @@ pub struct WebAppsConfig {
     pub port: u16,
 
     /// Host clients use to reach the `port`-mode listener — used only to build
-    /// the returned URL (e.g. a LAN or WSL-gateway IP like `192.0.2.10`).
+    /// the returned URL (e.g. a LAN or WSL-gateway IP like `198.51.100.10`).
     /// `None` derives it from `server.public_base_url`, then `server.host`
     /// (when concrete), then `localhost`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
