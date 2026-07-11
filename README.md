@@ -27,22 +27,24 @@ A project of **[Vexillon](https://vexillon.ai)**.
 
 ## 📸 Screenshots
 
-> _Screenshots coming soon._ The cells below are placeholders — drop the real images into [`.github/assets/`](.github/assets/) and swap them in (the exact markdown is in the comment beneath the table).
+<div align="center">
 
-|                Web dashboard                |        Conversation (Signal / Telegram)        |               Terminal UI               |
-| :-----------------------------------------: | :--------------------------------------------: | :-------------------------------------: |
-|               _coming soon_                 |                  _coming soon_                  |              _coming soon_              |
+<table>
+<tr>
+<td width="50%"><img src=".github/assets/screenshot-checkins.png" width="100%" alt="Proactive companion check-ins"/><br/><sub><b>Proactive check-ins</b> — MIRA reaches out first</sub></td>
+<td width="50%"><img src=".github/assets/screenshot-presence.png" width="100%" alt="Presence tuning"/><br/><sub><b>Presence</b> — tune its rhythm &amp; personality</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src=".github/assets/screenshot-mcp.png" width="100%" alt="MCP servers"/><br/><sub><b>MCP</b> — extend it with external tool servers</sub></td>
+<td width="50%"><img src=".github/assets/screenshot-skills.png" width="100%" alt="Skills"/><br/><sub><b>Skills</b> — bundled tools, scoped permissions</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src=".github/assets/screenshot-tui.png" width="100%" alt="Terminal UI"/><br/><sub><b>Terminal UI</b> — the full agent in your shell</sub></td>
+<td width="50%"><img src=".github/assets/screenshot-providers.png" width="100%" alt="Provider health"/><br/><sub><b>Providers</b> — multi-provider health at a glance</sub></td>
+</tr>
+</table>
 
-<!--
-When you have real screenshots, save them under .github/assets/ and replace the row above with:
-
-| ![Web dashboard](.github/assets/screenshot-web.png) | ![Conversation on Signal/Telegram](.github/assets/screenshot-chat.png) | ![Terminal UI](.github/assets/screenshot-tui.png) |
-
-Suggested shots:
-  • screenshot-web.png  — the admin web UI / chat view
-  • screenshot-chat.png — a real conversation in Signal or Telegram (a proactive check-in reads well)
-  • screenshot-tui.png  — the terminal UI / `mira` CLI status
--->
+</div>
 
 ---
 
