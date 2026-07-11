@@ -64,6 +64,20 @@ impl ArtifactId {
     }
 }
 
+/// Repair artifact URLs that a weak model mangled when it re-typed one into its
+/// prose. Our artifact layer always emits root-relative `/api/artifacts/<sha>`,
+/// but a model summarising a tool result sometimes "helpfully" rewrites that
+/// leading path into a bogus host — `/api/artifacts/<sha>.png` becomes
+/// `https://api.artifacts/<sha>.png`, which no client can load. `api.artifacts`
+/// is never a real host, so folding it back to the root-relative form is safe
+/// and lossless. Applied to assistant content before it's persisted so reloads
+/// render the image on every client.
+pub fn normalize_artifact_urls(content: &str) -> String {
+    content
+        .replace("https://api.artifacts/", "/api/artifacts/")
+        .replace("http://api.artifacts/",  "/api/artifacts/")
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ArtifactError {
     #[error("artifact extension `{0}` is not in the allowlist")]
@@ -194,6 +208,22 @@ mod tests {
         };
         let md = id.markdown_image("chart");
         assert_eq!(md, format!("![chart](/api/artifacts/{}.png)", "a".repeat(64)));
+    }
+
+    #[test]
+    fn normalizes_mangled_artifact_host() {
+        let sha = "a".repeat(64);
+        let mangled = format!("Here it is: ![img](https://api.artifacts/{sha}.png) enjoy");
+        let fixed   = normalize_artifact_urls(&mangled);
+        assert_eq!(fixed, format!("Here it is: ![img](/api/artifacts/{sha}.png) enjoy"));
+        // http variant too.
+        assert_eq!(
+            normalize_artifact_urls("http://api.artifacts/x.wav"),
+            "/api/artifacts/x.wav",
+        );
+        // Already-correct + unrelated content is untouched.
+        let ok = format!("![img](/api/artifacts/{sha}.png) and https://example.com/photo.png");
+        assert_eq!(normalize_artifact_urls(&ok), ok);
     }
 
     #[test]

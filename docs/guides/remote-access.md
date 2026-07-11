@@ -71,6 +71,66 @@ It must be an absolute `http`/`https` URL. Once set, that address is embedded in
 the pairing QR as the remote endpoint (it takes precedence over Tailscale
 auto-detection).
 
+## Running in a container (Tailscale sidecar)
+
+If you run MIRA in Docker, the tidy pattern is a **Tailscale sidecar**: a
+`tailscale` container joins your tailnet and MIRA shares its network, so
+Tailscale fronts MIRA over HTTPS with nothing exposed on the host.
+
+```yaml
+# docker-compose.yml
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    hostname: mira                         # → MagicDNS name mira.<tailnet>.ts.net
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}           # a reusable/ephemeral key from the admin console
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_SERVE_CONFIG=/config/serve.json # front MIRA over HTTPS (see below)
+      - TS_USERSPACE=false
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./ts-serve.json:/config/serve.json:ro
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add: [NET_ADMIN]
+    restart: unless-stopped
+
+  mira:
+    image: your/mira:latest
+    network_mode: service:tailscale        # share the tailscale container's network
+    # ...your usual MIRA volumes/env; MIRA listens on 127.0.0.1:8080 here...
+    restart: unless-stopped
+
+volumes:
+  tailscale-state:
+```
+
+```json
+// ts-serve.json — serve MIRA's local port over HTTPS on the tailnet
+{
+  "TCP": { "443": { "HTTPS": true } },
+  "Web": {
+    "${TS_CERT_DOMAIN}:443": {
+      "Handlers": { "/": { "Proxy": "http://127.0.0.1:8080" } }
+    }
+  }
+}
+```
+
+**Set `remote_url` explicitly in this setup.** MIRA's auto-detection shells out
+to the local `tailscale` CLI — but in the sidecar pattern that CLI lives in the
+*tailscale* container, not MIRA's, so auto-detection returns nothing. Tell MIRA
+its address directly (it's `https://<hostname>.<tailnet>.ts.net`):
+
+```yaml
+  mira:
+    environment:
+      - MIRA_REMOTE_URL=https://mira.your-tailnet.ts.net
+```
+
+Everything else works the same — that URL goes straight into the pairing QR.
+
 ## How it fits together
 
 - **`base_url`** in the pairing QR = your **LAN / local** address (unchanged).

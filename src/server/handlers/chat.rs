@@ -394,7 +394,11 @@ pub async fn chat_handler(
                             if let Err(e) = history.add_message(NewMessage {
                                 conversation_id: conv_id_c.clone(),
                                 role:            MessageRole::Assistant,
-                                content:         full_response.clone(),
+                                // Repair any artifact URL the model mangled into
+                                // its prose (e.g. https://api.artifacts/<sha>) so
+                                // a reloaded conversation renders the image on
+                                // every client.
+                                content:         crate::artifacts::normalize_artifact_urls(&full_response),
                                 content_type:    "text".to_owned(),
                                 token_count:     Some(usage.completion_tokens as i32),
                                 model:           Some(model.clone()),
@@ -544,6 +548,10 @@ pub async fn chat_handler(
                                 "type": "call",
                                 "tool": name,
                                 "args": args,
+                                // call_id lets clients correlate a result to
+                                // its call exactly (vs matching by tool name,
+                                // which breaks for parallel/repeated calls).
+                                "call_id": call_id,
                             });
                             tool_events.push(ev.clone());
                             thinking_events.push(serde_json::json!({
@@ -563,6 +571,7 @@ pub async fn chat_handler(
                                 "tool": name,
                                 "success": success,
                                 "output": output,
+                                "call_id": call_id,
                             });
                             thinking_events.push(serde_json::json!({
                                 "type":    "tool_result",

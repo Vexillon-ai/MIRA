@@ -138,6 +138,15 @@ impl Tool for ImageGenerateTool {
         if let Some(note) = out.note {
             md.push_str(&format!("\n\n_{note}_"));
         }
+        // The UI renders this image directly from the tool result. Steer the
+        // model away from re-typing the link in its reply — a weak model
+        // otherwise reproduces (and often mangles) the URL, yielding a
+        // duplicate/broken second image. The image still shows regardless of
+        // what the model says.
+        md.push_str(
+            "\n\n[system: the image above is already displayed to the user — do NOT repeat \
+             the image link or markdown in your reply; just briefly describe it in words.]"
+        );
         Ok(ToolResult::success(md))
     }
 }
