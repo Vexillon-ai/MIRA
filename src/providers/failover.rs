@@ -26,9 +26,12 @@ pub struct FailoverProvider {
 impl FailoverProvider {
     /// Create a new failover provider with primary and fallback chain
     pub fn new(primary: Box<dyn ModelProvider>, fallbacks: Vec<Box<dyn ModelProvider>>) -> Self {
-        info!("Created failover provider: {} -> {:?}", 
-              primary.name(), 
-              fallbacks.iter().map(|f| f.name()).collect::<Vec<_>>());
+        // Callers commonly construct with an empty fallback vec and append via
+        // `with_fallback`, so an info-level line here would misleadingly print
+        // `-> []`. The authoritative assembled-chain log lives in
+        // `build_provider_chain`; keep only a debug breadcrumb here.
+        tracing::debug!("FailoverProvider::new: primary={} (+{} fallbacks at construction)",
+                        primary.name(), fallbacks.len());
         Self { primary, fallbacks }
     }
     

@@ -1899,25 +1899,129 @@ pub(crate) fn build_provider_chain(
 
     // Honour `primary_provider` from config: pull that slug to the front
     // of the chain if it's registered. Otherwise keep LM Studio first
-    // (the historical behaviour).
+    // (the historical behaviour). The primary is always honoured as-is,
+    // even when it's a cloud provider (a deliberate choice).
     let primary_slug = config.primary_provider.as_str();
     if let Some(idx) = providers.iter().position(|(slug, _)| *slug == primary_slug) {
         let entry = providers.remove(idx);
         providers.insert(0, entry);
     }
 
-    if providers.len() == 1 {
-        let (_, p) = providers.remove(0);
-        return Ok(Arc::from(p));
+    // Split off the primary; everything else is a candidate fallback.
+    let mut it = providers.into_iter();
+    let (primary_reg, primary) = it.next().expect("providers non-empty (checked above)");
+    let candidates: Vec<(&'static str, Box<dyn crate::providers::ModelProvider>)> = it.collect();
+
+    // Select + order the automatic-failover tail per policy (pure logic in
+    // `select_failover_slugs`), then pull the matching providers out of the
+    // candidate set in that order. The primary is never a fallback of itself,
+    // and cloud providers stay usable for EXPLICIT selection
+    // (build_provider_for_alias, a separate path).
+    let candidate_slugs: Vec<&str> = candidates.iter().map(|(s, _)| *s).collect();
+    let order = select_failover_slugs(primary_reg, &candidate_slugs, config);
+    let mut cands = candidates;
+    let mut fallbacks: Vec<(&'static str, Box<dyn crate::providers::ModelProvider>)> = Vec::new();
+    for slug in &order {
+        if let Some(pos) = cands.iter().position(|(s, _)| s == slug) {
+            fallbacks.push(cands.remove(pos));
+        }
     }
 
-    let mut iter = providers.into_iter().map(|(_, p)| p);
-    let primary = iter.next().unwrap();
+    // Log the REAL assembled chain (the old `FailoverProvider::new` line always
+    // printed `-> []` because fallbacks are appended afterwards).
+    let fb_slugs: Vec<&str> = fallbacks.iter().map(|(s, _)| *s).collect();
+    info!("Provider failover chain: {primary_reg} -> {fb_slugs:?}");
+    if !provider_is_local(primary_reg, config) && config.failover_providers.is_none() {
+        warn!("primary_provider '{primary_reg}' is a CLOUD provider while automatic \
+               failover is local-only (default) — conversations reach the cloud via the \
+               primary itself. Set a local primary (or an explicit failover_providers) to \
+               keep everything on-box.");
+    }
+
+    // No fallbacks → return the primary directly. Fail-closed: if the local
+    // chain is later exhausted, the caller surfaces a clear "provider
+    // unavailable" rather than silently reaching for the cloud.
+    if fallbacks.is_empty() {
+        return Ok(Arc::from(primary));
+    }
+
     let mut chain = FailoverProvider::new(primary, vec![]);
-    for fallback in iter {
-        chain = chain.with_fallback(fallback);
+    for (_, fb) in fallbacks {
+        chain = chain.with_fallback(fb);
     }
     Ok(Arc::new(chain))
+}
+
+/// The ordered fallback slugs to use as the automatic-failover tail, given the
+/// primary and the registered candidate slugs (registration order). Pure logic,
+/// unit-tested below:
+///   `Some(list)` → the listed slugs that are actually registered, in list order
+///                  (the primary is never a fallback of itself).
+///   `None`       → fail-closed local-only: only LOCAL candidates, in
+///                  registration order; cloud providers never auto-fallback.
+pub(crate) fn select_failover_slugs(
+    primary: &str,
+    candidate_slugs: &[&str],
+    config: &MiraConfig,
+) -> Vec<String> {
+    match config.failover_providers.as_ref() {
+        Some(list) => list
+            .iter()
+            .filter(|w| w.as_str() != primary)
+            .filter(|w| candidate_slugs.contains(&w.as_str()))
+            .map(|w| w.to_string())
+            .collect(),
+        None => candidate_slugs
+            .iter()
+            .filter(|s| provider_is_local(s, config))
+            .map(|s| s.to_string())
+            .collect(),
+    }
+}
+
+/// Classify a provider slug as local (runs on-box / on the LAN — no
+/// conversation leaves the network) or cloud (data egresses to a third party).
+/// `openai_compat` is local iff its configured `base_url` is a loopback /
+/// RFC-1918 private / `.local` host. Anything not explicitly local is cloud.
+pub(crate) fn provider_is_local(slug: &str, config: &MiraConfig) -> bool {
+    match slug {
+        "lmstudio" | "ollama" => true,
+        "openai_compat" => host_is_local(&config.providers.openai_compat.base_url),
+        // openrouter / openai / deepseek / moonshot / groq / xai / anthropic / gemini
+        _ => false,
+    }
+}
+
+/// True if a base URL's host is loopback, an RFC-1918 private / link-local
+/// address, or a `.local` / `.localhost` name — i.e. it stays on-box or on the
+/// LAN. Best-effort string parse; unknown / public hosts return false.
+pub(crate) fn host_is_local(url: &str) -> bool {
+    let after     = url.split("://").nth(1).unwrap_or(url);
+    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority); // drop userinfo
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")            // IPv6 literal [addr]:port
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let h = host.trim().to_ascii_lowercase();
+    if h.is_empty() {
+        return false;
+    }
+    if h == "localhost" || h.ends_with(".localhost") || h.ends_with(".local") {
+        return true;
+    }
+    if let Ok(v4) = h.parse::<std::net::Ipv4Addr>() {
+        return v4.is_loopback() || v4.is_private() || v4.is_link_local();
+    }
+    // IPv6: ::1 (loopback), ULA (fc00::/7), link-local (fe80::/10). Best-effort.
+    if h.contains(':') {
+        return h == "::1"
+            || h.starts_with("fc") || h.starts_with("fd")
+            || h.starts_with("fe8") || h.starts_with("fe9")
+            || h.starts_with("fea") || h.starts_with("feb");
+    }
+    false
 }
 
 fn build_tool_registry(
@@ -2890,6 +2994,82 @@ async fn sweep_orphan_completion_subs(
             warn!("orphan sweep: failed to mark sub {} as failed: {e}", sub.id);
         } else {
             info!("orphan sweep: subscription {} marked failed (was waiting on agent.worker.completed)", sub.id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod failover_policy_tests {
+    use super::*;
+    use crate::config::MiraConfig;
+
+    fn cfg() -> MiraConfig { MiraConfig::default() }
+
+    #[test]
+    fn local_only_default_keeps_local_drops_cloud() {
+        let c = cfg(); // failover_providers = None → local-only default
+        let cands = ["ollama", "openrouter", "anthropic", "gemini"];
+        assert_eq!(select_failover_slugs("lmstudio", &cands, &c), vec!["ollama"]);
+    }
+
+    #[test]
+    fn explicit_list_preserves_order_and_drops_unregistered() {
+        let mut c = cfg();
+        c.failover_providers = Some(vec!["anthropic".into(), "ollama".into(), "nope".into()]);
+        let cands = ["ollama", "openrouter", "anthropic"];
+        // list order honoured; unregistered 'nope' dropped; cloud allowed (explicit opt-in)
+        assert_eq!(select_failover_slugs("lmstudio", &cands, &c), vec!["anthropic", "ollama"]);
+    }
+
+    #[test]
+    fn primary_never_a_fallback_of_itself() {
+        let mut c = cfg();
+        c.failover_providers = Some(vec!["lmstudio".into(), "ollama".into()]);
+        let cands = ["ollama"];
+        assert_eq!(select_failover_slugs("lmstudio", &cands, &c), vec!["ollama"]);
+    }
+
+    #[test]
+    fn empty_list_disables_failover() {
+        let mut c = cfg();
+        c.failover_providers = Some(vec![]);
+        assert!(select_failover_slugs("lmstudio", &["ollama", "openrouter"], &c).is_empty());
+    }
+
+    #[test]
+    fn single_local_provider_yields_no_fallbacks() {
+        let c = cfg();
+        let cands: [&str; 0] = []; // only the primary registered
+        assert!(select_failover_slugs("lmstudio", &cands, &c).is_empty());
+    }
+
+    #[test]
+    fn explicit_cloud_primary_gets_local_only_tail() {
+        // Explicit cloud selection sets the cloud provider as PRIMARY (honoured
+        // elsewhere); under the local-only default its auto-tail stays local.
+        let c = cfg();
+        assert_eq!(select_failover_slugs("anthropic", &["ollama", "gemini"], &c), vec!["ollama"]);
+    }
+
+    #[test]
+    fn openai_compat_locality_by_url() {
+        let mut c = cfg();
+        c.providers.openai_compat.base_url = "http://127.0.0.1:1234/v1".into();
+        assert!(provider_is_local("openai_compat", &c));
+        c.providers.openai_compat.base_url = "https://api.together.xyz/v1".into();
+        assert!(!provider_is_local("openai_compat", &c));
+    }
+
+    #[test]
+    fn host_is_local_classification() {
+        for good in ["http://127.0.0.1:1234", "http://localhost:8080/v1",
+                     "http://192.168.1.5:1234", "http://10.1.2.3", "https://box.local",
+                     "http://[::1]:1234", "http://172.16.3.4:9"] {
+            assert!(host_is_local(good), "expected local: {good}");
+        }
+        for bad in ["https://api.openai.com/v1", "https://openrouter.ai/api/v1",
+                    "http://8.8.8.8", "http://172.32.0.1", "https://example.com"] {
+            assert!(!host_is_local(bad), "expected cloud: {bad}");
         }
     }
 }

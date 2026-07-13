@@ -58,6 +58,17 @@ pub struct MiraConfig {
     #[serde(default = "default_primary_provider")]
     pub primary_provider: String,
 
+    // Ordered list of provider slugs used as AUTOMATIC failover after the
+    // primary — presence = enabled for fallback, order = priority. `None`
+    // (default) is **fail-closed local-only**: only local providers
+    // (lmstudio, ollama, a loopback/LAN openai_compat) receive conversations
+    // automatically when the primary fails; cloud providers never do. Cloud
+    // providers remain available for EXPLICIT model selection regardless of
+    // this list — it governs only the silent auto-failover chain, so a local
+    // "heart" can't leak the family's chats off-box on a crash/timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failover_providers: Option<Vec<String>>,
+
     #[serde(default)]
     pub providers: ProvidersConfig,
 
@@ -3841,6 +3852,7 @@ impl Default for MiraConfig {
             config_version:  default_config_version(),
             data_dir:        default_data_dir(),
             primary_provider:default_primary_provider(),
+            failover_providers: None,
             providers:       ProvidersConfig::default(),
             cli:             CliConfig::default(),
             tui:             TuiConfig::default(),

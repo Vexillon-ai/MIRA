@@ -266,6 +266,10 @@ _Persistent memory system and vector search settings._
 
 - **`primary_provider`** (string; one of: `ollama`, `lmstudio`, `openrouter`, `openai`, `deepseek`, `moonshot`, `groq`, `xai`, `openai_compat`, `anthropic`, `gemini`) — The AI provider MIRA uses for chat by default. Must match the slug of a configured provider under `providers`. Can be switched at runtime with /provider-use.
 
+## failover_providers
+
+- **`failover_providers`** (array of strings, or null) — Ordered list of provider slugs used as AUTOMATIC failover after the primary provider — presence = enabled for fallback, order = priority. Null (default) is fail-closed local-only: only local providers (lmstudio, ollama, a loopback/LAN openai_compat) receive conversations automatically when the primary fails; cloud providers never do. Cloud providers stay available for EXPLICIT model selection regardless — this governs only the silent auto-failover chain, so a local 'heart' can't leak conversations off-box on a crash/timeout. An empty list disables auto-failover entirely (hard fail-closed).
+
 ## providers
 
 _AI provider connection and model settings. Only configure the providers you intend to use._

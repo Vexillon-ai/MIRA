@@ -8,6 +8,7 @@ import toast from 'react-hot-toast'
 import { api } from '@/api/client'
 import UpdatesCard from '@/components/UpdatesCard'
 import RemoteAccessCard from '@/components/RemoteAccessCard'
+import FailoverChainEditor from '@/components/FailoverChainEditor'
 import { providersApi, type StatusInfo } from '@/api/providers'
 import { ttsApi } from '@/api/tts'
 import { playBlobWithGain, type PlayHandle } from '@/api/ttsPlayback'
@@ -1011,7 +1012,7 @@ export default function SettingsPage() {
           <AppearanceTab set={set} bool={bool} str={str} />
         )}
         {tab === 'providers' && (
-          <ProvidersTab set={set} str={str} num={num} />
+          <ProvidersTab set={set} str={str} num={num} draft={draft} />
         )}
         {tab === 'agent' && (
           <AgentTab set={set} str={str} num={num} bool={bool} isAdmin={isAdmin} />
@@ -1241,12 +1242,14 @@ function AppearanceTab({
 // ── Providers tab ─────────────────────────────────────────────────────────────
 
 function ProvidersTab({
-  set, str, num,
+  set, str, num, draft,
 }: {
   set: (p: string, v: unknown) => void
   str: (p: string, fb?: string) => string
   num: (p: string, fb?: number) => number
+  draft: Config
 }) {
+  const failoverValue = getPath(draft, 'failover_providers') as string[] | null | undefined
   return (
     <div className={styles.tabBody}>
       <WslUrlHint />
@@ -1270,6 +1273,15 @@ function ProvidersTab({
             ]}
           />
         </Field>
+      </Section>
+
+      <Section title="Automatic failover">
+        <FailoverChainEditor
+          value={failoverValue}
+          primary={str('primary_provider', 'lmstudio')}
+          openaiCompatUrl={str('providers.openai_compat.base_url')}
+          onChange={(list) => set('failover_providers', list)}
+        />
       </Section>
 
       <ProviderSection title="Ollama" slug="ollama" set={set} str={str}

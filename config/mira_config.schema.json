@@ -37,6 +37,11 @@
         "gemini"
       ]
     },
+    "failover_providers": {
+      "description": "Ordered list of provider slugs used as AUTOMATIC failover after the primary provider — presence = enabled for fallback, order = priority. Null (default) is fail-closed local-only: only local providers (lmstudio, ollama, a loopback/LAN openai_compat) receive conversations automatically when the primary fails; cloud providers never do. Cloud providers stay available for EXPLICIT model selection regardless — this governs only the silent auto-failover chain, so a local 'heart' can't leak conversations off-box on a crash/timeout. An empty list disables auto-failover entirely (hard fail-closed).",
+      "type": ["array", "null"],
+      "items": { "type": "string" }
+    },
     "providers": {
       "description": "AI provider connection and model settings. Only configure the providers you intend to use.",
       "type": "object",
