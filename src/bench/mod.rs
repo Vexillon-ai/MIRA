@@ -23,6 +23,9 @@
 pub mod longmemeval;
 pub mod run;
 pub mod judge;
+pub mod context;
+
+pub use context::ContextBenchOptions;
 
 use std::path::PathBuf;
 

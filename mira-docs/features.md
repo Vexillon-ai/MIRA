@@ -113,6 +113,14 @@ Per-user accounts (JWT auth), admin vs user roles, a tool policy layer, a per-sk
 
 Optionally, MIRA can detect "hard" turns (code, math, multi-step reasoning, long or multi-question prompts) and automatically route them to a stronger reasoning model — and raise that model's reasoning effort — instead of making you flip a manual toggle. Off by default; the operator enables it and points it at a configured strong-model provider (`agent.reasoning`).
 
+## Context management
+
+MIRA fits long conversations into the model's context window intelligently instead of dropping the oldest turns on a fixed count. All of this is **opt-in and behaviour-preserving by default** (the legacy fixed `max_context_turns` window stays until you set a token window), configured under Settings → Agent:
+
+- **Token-aware context budget.** Set your model's context window (`agent.context_length_tokens`) and MIRA fills it by **token budget** — carrying far more history when it fits — reserving room for the response plus a safety margin (`agent.context_safety_margin_tokens`). In practice this keeps *many times* more history than the old fixed turn count in the same window.
+- **Auto-compaction.** When history still overflows the budget, MIRA **compacts the oldest turns into a rolling, anchored summary** rather than dropping them (`agent.compaction`). The summary keeps stable sections — hard facts / decisions / open threads / preferences — with exact numbers/constraints preserved **verbatim** (not paraphrased), and the most recent turns are always kept word-for-word (`compaction.keep_last_turns`). Compaction runs incrementally on a cheap/local model. A **write-before-compaction guarantee** means a turn is never dropped before it's captured (in the summary *and*, independently, the memory store), so aggressive compaction stays safe.
+- **Prompt caching.** With `agent.prompt_cache_enabled`, MIRA keeps the system-prompt **prefix byte-stable** turn-to-turn (per-turn retrieved memory/wiki moves into the current message instead of mutating the prefix), and emits provider cache directives where supported. On a stable prefix, **Anthropic** (explicit `cache_control`), **OpenAI/OpenRouter/DeepSeek** (automatic prefix caching), and **local backends' KV cache** reuse it — roughly **90% cheaper/faster input** on cloud repeat turns, a free speed-up locally. Per-turn cache hit/write tokens are captured into usage accounting for every provider family.
+
 ## Fallback transparency
 
 MIRA degrades gracefully when a configured backend is unavailable — but it no longer does so *silently*.

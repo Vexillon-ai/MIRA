@@ -59,7 +59,7 @@ mod tests {
     }"#;
 
     fn usage(p: u32, c: u32) -> TokenUsage {
-        TokenUsage { prompt_tokens: p, completion_tokens: c, total_tokens: p + c }
+        TokenUsage { prompt_tokens: p, completion_tokens: c, total_tokens: p + c, ..Default::default() }
     }
 
     #[test]

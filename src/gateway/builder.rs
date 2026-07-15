@@ -3062,6 +3062,9 @@ mod failover_policy_tests {
 
     #[test]
     fn host_is_local_classification() {
+        // Private-range examples must be generic RFC-1918 values, never a real
+        // internal address (the sanitizer scrubs those and could rewrite them).
+        // The test checks the range classification, not any specific host.
         for good in ["http://127.0.0.1:1234", "http://localhost:8080/v1",
                      "http://192.168.1.5:1234", "http://10.1.2.3", "https://box.local",
                      "http://[::1]:1234", "http://172.16.3.4:9"] {

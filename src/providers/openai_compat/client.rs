@@ -191,7 +191,7 @@ fn to_outbound<'a>(messages: &'a [ChatMessage]) -> Vec<OutboundMessage<'a>> {
 struct ChatResponse {
     choices: Vec<ChatResponseChoice>,
     #[serde(default)]
-    usage: Option<TokenUsage>,
+    usage: Option<crate::providers::usage::WireUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -242,7 +242,7 @@ struct InboundToolFn {
 struct StreamChunk {
     choices: Vec<StreamChoice>,
     #[serde(default)]
-    usage: Option<TokenUsage>,
+    usage: Option<crate::providers::usage::WireUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -437,7 +437,7 @@ impl OpenAiCompatClient {
             content,
             tool_calls,
             reasoning,
-            usage:       parsed.usage.unwrap_or_default(),
+            usage:       parsed.usage.map(Into::into).unwrap_or_default(),
             provider_id: self.provider_id(),
             model_name:  self.config.model.clone(),
             fallback: None,
@@ -511,7 +511,7 @@ impl OpenAiCompatClient {
                     }
                 }
                 if let Some(u) = stream_resp.usage {
-                    usage = u;
+                    usage = u.into();
                 }
             }
         }

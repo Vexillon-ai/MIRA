@@ -13,9 +13,9 @@ use tracing::{debug, warn};
 
 use crate::providers::ModelProvider;
 use crate::providers::anthropic::wire::{
-    ContentBlockHeader, MessagesRequest, MessagesResponse, Thinking,
-    StreamDelta, StreamEvent, convert_messages, convert_response_content,
-    convert_tool_choice, convert_tool_specs,
+    CacheControl, ContentBlockHeader, MessagesRequest, MessagesResponse, SystemBlock,
+    SystemPrompt, Thinking, StreamDelta, StreamEvent, convert_messages,
+    convert_response_content, convert_tool_choice, convert_tool_specs,
 };
 use crate::types::{
     ChatMessage, GenerationOptions, GenerationResponse, ProviderId, TokenUsage,
@@ -128,7 +128,24 @@ impl AnthropicProvider {
         options:  &'a GenerationOptions,
         stream:   bool,
     ) -> MessagesRequest<'a> {
-        let (system, outbound) = convert_messages(messages);
+        let (system_text, outbound) = convert_messages(messages);
+        // With prompt caching on, wrap the system prompt in a block array and
+        // attach a `cache_control` breakpoint at its end. Anthropic caches the
+        // prefix up to and including that block (tools → system), so an
+        // identical system prompt on the next turn is served from cache. The
+        // caller keeps that prefix byte-stable (Phase-0 #1: volatile per-turn
+        // context is folded into the user message, not the system prompt).
+        let system = system_text.map(|text| {
+            if options.prompt_cache {
+                SystemPrompt::Blocks(vec![SystemBlock {
+                    kind: "text",
+                    text,
+                    cache_control: Some(CacheControl { kind: "ephemeral" }),
+                }])
+            } else {
+                SystemPrompt::Text(text)
+            }
+        });
         let (tools, tool_choice) = match &options.tools {
             Some(specs) if !specs.is_empty() => {
                 // OpenAI's `"none"` is signalled by omitting tools, not
@@ -219,9 +236,11 @@ impl AnthropicProvider {
 
         let (content, tool_calls, reasoning) = convert_response_content(parsed.content);
         let usage = TokenUsage {
-            prompt_tokens:     parsed.usage.input_tokens,
-            completion_tokens: parsed.usage.output_tokens,
-            total_tokens:      parsed.usage.input_tokens + parsed.usage.output_tokens,
+            prompt_tokens:      parsed.usage.input_tokens,
+            completion_tokens:  parsed.usage.output_tokens,
+            total_tokens:       parsed.usage.input_tokens + parsed.usage.output_tokens,
+            cache_read_tokens:  parsed.usage.cache_read_input_tokens,
+            cache_write_tokens: parsed.usage.cache_creation_input_tokens,
         };
 
         Ok(GenerationResponse {
@@ -393,8 +412,10 @@ impl AnthropicProvider {
 
                     StreamEvent::MessageDelta { usage: maybe_usage, .. } => {
                         if let Some(u) = maybe_usage {
-                            usage.completion_tokens += u.output_tokens;
-                            usage.prompt_tokens     += u.input_tokens;
+                            usage.completion_tokens  += u.output_tokens;
+                            usage.prompt_tokens      += u.input_tokens;
+                            usage.cache_read_tokens  += u.cache_read_input_tokens;
+                            usage.cache_write_tokens += u.cache_creation_input_tokens;
                         }
                     }
 
@@ -625,9 +646,28 @@ mod tests {
         ];
         let opts = GenerationOptions::default();
         let req  = p.build_request(&msgs, &opts, false);
-        assert_eq!(req.system.as_deref(), Some("You are MIRA."));
+        assert_eq!(req.system.as_ref().map(|s| s.text()), Some("You are MIRA."));
+        // Default options → no caching → plain string variant, no breakpoint.
+        assert!(matches!(req.system, Some(crate::providers::anthropic::wire::SystemPrompt::Text(_))));
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.messages[0].role, "user");
+    }
+
+    #[test]
+    fn build_request_emits_cache_control_when_prompt_cache_on() {
+        let p = provider();
+        let msgs = vec![
+            ChatMessage::system("You are MIRA."),
+            ChatMessage::user("hi"),
+        ];
+        let mut opts = GenerationOptions::default();
+        opts.prompt_cache = true;
+        let req  = p.build_request(&msgs, &opts, false);
+        // Serialized system must carry a cache_control ephemeral breakpoint.
+        let json = serde_json::to_value(&req.system).unwrap();
+        assert_eq!(json[0]["type"], "text");
+        assert_eq!(json[0]["text"], "You are MIRA.");
+        assert_eq!(json[0]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]

@@ -22,6 +22,14 @@ pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Prompt tokens served from the provider's prompt cache (≈90% cheaper).
+    /// 0 when the provider doesn't report caching or nothing hit. (Phase 0.)
+    #[serde(default)]
+    pub cache_read_tokens: u32,
+    /// Prompt tokens written to the cache this request (first-time fill; on
+    /// Anthropic these carry a small write premium). 0 when N/A. (Phase 0.)
+    #[serde(default)]
+    pub cache_write_tokens: u32,
 }
 
 impl TokenUsage {

@@ -155,6 +155,7 @@ impl ModelProvider for OllamaProvider {
                 prompt_tokens: prompt_eval_count,
                 completion_tokens: eval_count,
                 total_tokens: prompt_eval_count + eval_count,
+                ..Default::default()
             },
             provider_id: ProviderId::Local(self.model.clone()),
             model_name: self.model.clone(),

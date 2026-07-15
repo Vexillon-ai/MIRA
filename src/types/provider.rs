@@ -85,6 +85,14 @@ pub struct GenerationOptions {
     /// Set by reasoning auto-routing (roadmap #13) when a turn is routed up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+
+    /// Prompt-caching hint (Phase-0). When true, providers that support
+    /// explicit cache breakpoints (Anthropic) mark the stable system prefix
+    /// with `cache_control` so identical prefixes on later turns are read from
+    /// cache. Providers with automatic prefix caching (OpenAI, Gemini) ignore
+    /// it. Set from `agent.prompt_cache_enabled`. Defaults to `false`.
+    #[serde(default)]
+    pub prompt_cache: bool,
 }
 
 fn default_temperature() -> f32 { 0.7 }
@@ -99,6 +107,7 @@ impl Default for GenerationOptions {
             tools: None,
             tool_choice: None,
             reasoning_effort: None,
+            prompt_cache: false,
         }
     }
 }

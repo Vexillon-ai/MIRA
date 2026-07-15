@@ -145,7 +145,7 @@ fn to_outbound<'a>(messages: &'a [ChatMessage]) -> Vec<OpenRouterMessage<'a>> {
 struct OpenRouterResponse {
     choices: Vec<OpenRouterResponseChoice>,
     #[serde(default)]
-    usage: Option<TokenUsage>,
+    usage: Option<crate::providers::usage::WireUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,7 +181,7 @@ struct InboundToolFn {
 struct OpenRouterStreamResponse {
     choices: Vec<OpenRouterChoice>,
     #[serde(default)]
-    usage: Option<TokenUsage>,
+    usage: Option<crate::providers::usage::WireUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,7 +364,7 @@ impl OpenRouterProvider {
             content,
             tool_calls,
             reasoning:   None,
-            usage: parsed.usage.unwrap_or_default(),
+            usage: parsed.usage.map(Into::into).unwrap_or_default(),
             provider_id: ProviderId::OpenRouter(self.model.clone()),
             model_name: self.model.clone(),
             fallback: None,
@@ -438,7 +438,7 @@ impl OpenRouterProvider {
                             }
                         }
                         if let Some(u) = stream_resp.usage {
-                            usage = u;
+                            usage = u.into();
                         }
                     }
                 }

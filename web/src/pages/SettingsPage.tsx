@@ -47,6 +47,15 @@ interface Config {
     max_tool_round_tokens?: number
     max_response_tokens?: number
     max_context_turns?: number
+    context_length_tokens?: number
+    context_safety_margin_tokens?: number
+    prompt_cache_enabled?: boolean
+    compaction?: {
+      enabled?: boolean
+      keep_last_turns?: number
+      summary_model?: string
+      max_summary_tokens?: number
+    }
     system_prompt_file?: string
     playful_easter_eggs?: boolean
     tools?: {
@@ -1773,8 +1782,26 @@ function AgentTab({
         >
           <NumberInput value={num('agent.max_response_tokens', 16384)} onChange={(v) => set('agent.max_response_tokens', v)} min={512} max={131072} />
         </Field>
-        <Field label="Max context turns" desc="Number of recent conversation turns kept in the model's context window (1 turn = user + assistant message).">
+        <Field label="Max context turns" desc="Fixed-window fallback: number of recent conversation turns kept in the model's context (1 turn = user + assistant). Used only when 'Context window (tokens)' below is 0.">
           <NumberInput value={num('agent.max_context_turns', 20)} onChange={(v) => set('agent.max_context_turns', v)} min={2} max={200} />
+        </Field>
+        <Field label="Context window (tokens)" desc="Token-aware context budgeting: your primary model's context window in tokens (e.g. 128000). When set, MIRA fills the window by token budget — carrying far more history when it fits — instead of the fixed turn count above. 0 keeps the legacy fixed-turn behaviour.">
+          <NumberInput value={num('agent.context_length_tokens', 0)} onChange={(v) => set('agent.context_length_tokens', v)} min={0} max={2000000} />
+        </Field>
+        <Field label="Context safety margin (tokens)" desc="Headroom held back from the context budget (only when 'Context window (tokens)' > 0) so a packed prompt can't overflow the model. Default 2048.">
+          <NumberInput value={num('agent.context_safety_margin_tokens', 2048)} onChange={(v) => set('agent.context_safety_margin_tokens', v)} min={0} max={32768} />
+        </Field>
+        <Field label="Prompt caching" desc="Keep the system-prompt prefix byte-stable turn-to-turn by moving per-turn retrieved context (memory + wiki) out of the system prompt and into the current message. A stable prefix lets cloud providers (Anthropic/OpenAI/Gemini) and local KV caches reuse it — ~90% cheaper/faster input on cloud, a free speedup locally. Off by default.">
+          <Toggle value={bool('agent.prompt_cache_enabled', false)} onChange={(v) => set('agent.prompt_cache_enabled', v)} />
+        </Field>
+        <Field label="Auto-compaction" desc="When token budgeting is on and the oldest turns overflow the window, compact them into a rolling anchored summary instead of dropping them. Only active when 'Context window (tokens)' > 0.">
+          <Toggle value={bool('agent.compaction.enabled', true)} onChange={(v) => set('agent.compaction.enabled', v)} />
+        </Field>
+        <Field label="Keep last turns verbatim" desc="How many of the most recent turns (1 turn = user + assistant) are kept word-for-word and never summarized by compaction. Default 6.">
+          <NumberInput value={num('agent.compaction.keep_last_turns', 6)} onChange={(v) => set('agent.compaction.keep_last_turns', v)} min={0} max={100} />
+        </Field>
+        <Field label="Max summary tokens" desc="Soft cap on the rolling compaction summary's size in tokens, so the compacted block can't grow without bound. Default 1024.">
+          <NumberInput value={num('agent.compaction.max_summary_tokens', 1024)} onChange={(v) => set('agent.compaction.max_summary_tokens', v)} min={0} max={32768} />
         </Field>
         <Field label="System prompt file" desc="Path to a custom agent.md persona file. Leave blank to use the built-in default.">
           <TextInput value={str('agent.system_prompt_file')} onChange={(v) => set('agent.system_prompt_file', v)} placeholder="~/.mira/agent.md" mono />

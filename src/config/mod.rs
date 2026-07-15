@@ -1861,6 +1861,37 @@ pub struct AgentConfig {
     #[serde(default = "default_max_context_turns")]
     pub max_context_turns: usize,
 
+    // Phase-1 token-aware context budgeting (design-docs/context-compaction.md).
+    // The model's context window in tokens. `0` (default) keeps the legacy
+    // fixed `max_context_turns` window (no behaviour change). When set (e.g.
+    // 128000), MIRA fills the window by token budget instead — carrying far
+    // more history when it fits — reserving room for the response + margin.
+    // Set this to your primary model's real context length.
+    #[serde(default)]
+    pub context_length_tokens: usize,
+
+    // Tokens held back from the context budget as headroom (only used when
+    // `context_length_tokens > 0`). Guards against token-estimate drift so a
+    // packed prompt doesn't overflow the model.
+    #[serde(default = "default_context_safety_margin")]
+    pub context_safety_margin_tokens: usize,
+
+    // Phase-0 prompt caching: when true, keep the system-prompt PREFIX
+    // byte-stable turn-to-turn by moving per-turn retrieved context (memory +
+    // wiki) OUT of the system prompt and folding it into the current user
+    // message. A stable prefix lets providers (and local backends' KV cache)
+    // reuse it — ~90% cheaper/faster on cloud, free speedup locally. Default
+    // false (unchanged prompt shape) while validating; flip on to enable.
+    #[serde(default)]
+    pub prompt_cache_enabled: bool,
+
+    // Phase-2 auto-compaction. When token budgeting (`context_length_tokens`)
+    // is on and the oldest turns overflow the window, compact them into a
+    // rolling anchored summary instead of dropping them. Inert unless token
+    // budgeting is enabled, so the default is behaviour-preserving.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
+
     #[serde(default)]
     pub tools: ToolsConfig,
 
@@ -2009,6 +2040,10 @@ impl Default for AgentConfig {
             disable_reasoning: false,
             playful_easter_eggs: default_true(),
             max_context_turns: default_max_context_turns(),
+            context_length_tokens: 0,
+            context_safety_margin_tokens: default_context_safety_margin(),
+            prompt_cache_enabled: false,
+            compaction: CompactionConfig::default(),
             tools:             ToolsConfig::default(),
             tool_selection:    ToolSelectionConfig::default(),
             reasoning:         ReasoningConfig::default(),
@@ -3485,6 +3520,52 @@ fn default_max_turns()           -> usize   { 50 }
 fn default_max_tool_rounds()     -> usize   { 8 }
 fn default_tool_mode()           -> String  { "auto".to_string() }
 fn default_max_context_turns()   -> usize   { 20 }
+fn default_context_safety_margin() -> usize { 2048 }
+fn default_compaction_enabled()    -> bool  { true }
+fn default_keep_last_turns()       -> usize { 6 }
+fn default_max_summary_tokens()    -> usize { 1024 }
+
+/// Phase-2 auto-compaction settings (`agent.compaction`). Compaction only
+/// runs when token budgeting is active (`agent.context_length_tokens > 0`)
+/// AND the oldest turns overflow the window; otherwise it's inert, so these
+/// defaults preserve today's behaviour.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionConfig {
+    /// Master switch. When off, overflowing turns are dropped (Phase-1
+    /// behaviour) instead of compacted. Default true.
+    #[serde(default = "default_compaction_enabled")]
+    pub enabled: bool,
+
+    /// How many of the most recent turns (1 turn = user + assistant) are kept
+    /// verbatim and never summarized, so recent detail is preserved exactly.
+    /// Default 6.
+    #[serde(default = "default_keep_last_turns")]
+    pub keep_last_turns: usize,
+
+    /// Model used to produce the summary. Empty = use the cheap classifier
+    /// provider when one is configured, else the primary model. A named model
+    /// is reserved for a future per-model resolver; today a non-empty value
+    /// behaves the same as empty (documented in settings-reference).
+    #[serde(default)]
+    pub summary_model: String,
+
+    /// Soft cap on the rolling summary's size in tokens; the summarizer is
+    /// asked to stay within it so the compacted block itself can't grow
+    /// unbounded. Default 1024.
+    #[serde(default = "default_max_summary_tokens")]
+    pub max_summary_tokens: usize,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled:            default_compaction_enabled(),
+            keep_last_turns:    default_keep_last_turns(),
+            summary_model:      String::new(),
+            max_summary_tokens: default_max_summary_tokens(),
+        }
+    }
+}
 fn default_max_tool_round_tokens() -> u32   { 2048 }
 fn default_max_response_tokens()   -> u32   { 16384 }
 

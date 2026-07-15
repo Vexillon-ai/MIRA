@@ -656,6 +656,81 @@ impl AgentCore {
         Ok(rx)
     }
 
+    // Phase-2 compaction. Fold the overflowing turns `history[..skip]` into the
+    // conversation's rolling anchored summary, persist it, and return the
+    // rendered summary block to inject, plus the effective coverage watermark —
+    // how many of the oldest messages the summary now actually represents.
+    //
+    // Phase-3 write-before-compaction guardrail: the caller must NOT evict past
+    // this watermark. On success it equals `skip` (everything folded); if the
+    // rewrite failed it stays at the previous, lower value so the uncaptured
+    // turns are kept verbatim this turn (retried next turn) rather than lost.
+    // Incremental: only the newly-evicted tail (`history[covered..skip]`) is
+    // summarized each turn, so the LLM call stays small. Returns `None` only
+    // when there is no durable target (no `conversation_id` / history store) —
+    // there the memory store is the sole guardrail and the caller drops as in
+    // Phase 1.
+    async fn compact_overflow(
+        &self,
+        history:  &[crate::ChatMessage],
+        skip:     usize,
+        provider: &Arc<dyn ModelProvider>,
+        context:  &TurnContext,
+    ) -> Option<(String, usize)> {
+        let conv_id = context.conversation_id.as_deref()?;
+        let store   = self.history.get()?;
+
+        // Load the persisted rolling summary (JSON), if any.
+        let mut summary: crate::summarizer::StructuredSummary = store
+            .get_context_summary(conv_id)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default();
+
+        // Fold only the turns not already covered. The watermark is best-effort
+        // relative to this (non-monotonic) in-memory buffer; clamp so a stale
+        // watermark from a rehydrated, shorter buffer can't panic or re-fold.
+        let covered = summary.covered_messages.min(skip);
+        summary.covered_messages = covered;
+        let to_fold = &history[covered..skip];
+        if !to_fold.is_empty() {
+            let comp_provider: &dyn ModelProvider = self
+                .classifier_provider
+                .get()
+                .map(|a| a.as_ref())
+                .unwrap_or_else(|| provider.as_ref());
+            let summarizer = crate::summarizer::ContextSummarizer::new();
+            match summarizer
+                .rewrite(
+                    comp_provider,
+                    &summary,
+                    to_fold,
+                    self.config.agent.compaction.max_summary_tokens,
+                )
+                .await
+            {
+                Ok(mut updated) => {
+                    updated.covered_messages = skip;
+                    if let Ok(json) = serde_json::to_string(&updated) {
+                        if let Err(e) = store.set_context_summary(conv_id, &json) {
+                            debug!("compaction: failed to persist summary: {e}");
+                        }
+                    }
+                    summary = updated;
+                }
+                Err(e) => {
+                    // Non-fatal, but do NOT advance the watermark: the caller
+                    // keeps the uncaptured turns verbatim this turn rather than
+                    // dropping them, so nothing is lost while compaction is down.
+                    warn!("compaction: rewrite failed ({e}); holding uncaptured turns verbatim");
+                }
+            }
+        }
+
+        Some((summary.render(), summary.covered_messages))
+    }
+
     // Run the full reasoning turn synchronously (called from within the
     // spawned task). Sends all events to `tx`.
     async fn run_turn(
@@ -787,9 +862,18 @@ impl AgentCore {
             String::new()
         };
 
+        // Phase-0 prefix stability: with prompt caching on, keep the per-turn
+        // retrieved context (wiki + memory) OUT of the system prompt so the
+        // system prefix stays byte-stable turn to turn (cacheable by cloud
+        // providers + local KV cache). It's folded into the current user
+        // message instead (below).
+        let cache_prefix = self.config.agent.prompt_cache_enabled;
+        let volatile_context = format!("{wiki_context}{memory_context}");
+        let sys_wiki:   &str = if cache_prefix { "" } else { wiki_context.as_str() };
+        let sys_memory: &str = if cache_prefix { "" } else { memory_context.as_str() };
         let effective_system = if profile_block.is_empty()
-            && wiki_context.is_empty()
-            && memory_context.is_empty()
+            && sys_wiki.is_empty()
+            && sys_memory.is_empty()
             && companion_addendum.is_empty()
             && tone_addendum.is_empty()
             && easter_egg_addendum.is_empty()
@@ -799,7 +883,7 @@ impl AgentCore {
         } else {
             format!(
                 "{}{}{}{}{}{}{}{}",
-                base_prompt, profile_block, wiki_context, memory_context,
+                base_prompt, profile_block, sys_wiki, sys_memory,
                 companion_addendum, tone_addendum, easter_egg_addendum, safety_addendum,
             )
         };
@@ -866,15 +950,96 @@ impl AgentCore {
         };
 
         let mut messages: Vec<ChatMessage> = Vec::new();
-        messages.push(ChatMessage::system(effective_system));
+        let system_msg = ChatMessage::system(effective_system);
 
-        // Inject recent conversation history (bounded by max_context_turns).
+        // Inject recent conversation history. Phase 1: when a context window is
+        // configured (`agent.context_length_tokens > 0`), fill it by TOKEN
+        // budget — carrying far more history when it fits — reserving room for
+        // the response + a safety margin. Otherwise keep the legacy fixed
+        // `max_context_turns` window (no behaviour change).
         let history = session.to_messages();
-        let skip = history.len().saturating_sub(self.max_context_turns * 2);
+        let acfg = &self.config.agent;
+        let mut skip = if acfg.context_length_tokens > 0 {
+            // Cap the output reservation so a small window can't underflow the
+            // budget to zero.
+            let reservation = (acfg.max_response_tokens as usize)
+                .min(acfg.context_length_tokens / 4);
+            let budget = crate::agent::context_budget::context_budget(
+                acfg.context_length_tokens, reservation, acfg.context_safety_margin_tokens);
+            // Already-committed cost: system prompt + this turn's user input.
+            let fixed = crate::agent::tokens::estimate_message(&system_msg)
+                + crate::agent::tokens::estimate_text(input);
+            let fit = crate::agent::context_budget::history_fit(&history, fixed, budget);
+            history.len().saturating_sub(fit)
+        } else {
+            history.len().saturating_sub(self.max_context_turns * 2)
+        };
+
+        // Phase-2 auto-compaction. Instead of silently dropping the overflow
+        // (`history[..skip]`), fold it into a rolling anchored summary and
+        // inject that. Gated on token budgeting being on, compaction enabled,
+        // an actual overflow, and a durable conversation to persist to.
+        let mut compaction_block = String::new();
+        if acfg.context_length_tokens > 0 && acfg.compaction.enabled && skip > 0 {
+            // Never summarize away the most recent turns — keep last-K verbatim
+            // even if that pushes slightly over budget.
+            let keep_msgs = acfg.compaction.keep_last_turns.saturating_mul(2);
+            skip = skip.min(history.len().saturating_sub(keep_msgs));
+            if skip > 0 {
+                if let Some((block, covered)) =
+                    self.compact_overflow(&history, skip, provider, context).await
+                {
+                    compaction_block = block;
+                    // Phase-3 guardrail: evict only what the summary actually
+                    // captured. If compaction couldn't fold everything (rewrite
+                    // failure), hold the uncaptured turns verbatim this turn
+                    // rather than dropping them — write-before-compaction.
+                    let eff = crate::agent::context_budget::safe_eviction(skip, covered);
+                    if eff < skip {
+                        warn!(
+                            "compaction: captured {covered}/{skip} evicted msgs; holding {} verbatim this turn",
+                            skip - eff,
+                        );
+                    }
+                    skip = eff;
+                }
+            }
+        }
+
+        messages.push(system_msg);
+        // Off-cache: inject the summary as a system block right after the main
+        // system prompt (before the verbatim recent turns). On-cache: it's
+        // folded into the current user message below instead, so the system
+        // prefix stays byte-stable (cacheable).
+        if !compaction_block.is_empty() && !cache_prefix {
+            messages.push(ChatMessage::system(compaction_block.clone()));
+        }
         messages.extend_from_slice(&history[skip..]);
 
         // Add the current user message.
-        let mut user_msg = ChatMessage::user(input.to_string());
+        // With prefix caching on, fold the per-turn volatile context — the
+        // compaction summary (Phase 2) + retrieved memory/wiki (Phase 0) — into
+        // the current user message so it sits AFTER the stable prefix (system +
+        // history). Persistence below stores the raw `input`, so session history
+        // stays clean and the augmentation is per-turn only.
+        let folded_context = if cache_prefix {
+            let mut f = String::new();
+            if !compaction_block.trim().is_empty() {
+                f.push_str(compaction_block.trim_end());
+            }
+            if !volatile_context.trim().is_empty() {
+                if !f.is_empty() { f.push('\n'); }
+                f.push_str(volatile_context.trim_end());
+            }
+            f
+        } else {
+            String::new()
+        };
+        let mut user_msg = if !folded_context.is_empty() {
+            ChatMessage::user(format!("{}\n\n{}", folded_context, input))
+        } else {
+            ChatMessage::user(input.to_string())
+        };
         if !context.attachments.is_empty() {
             user_msg.attachments = Some(context.attachments.clone());
         }
@@ -896,16 +1061,23 @@ impl AgentCore {
             });
         }
 
+        // Instrumentation: estimated input tokens for the assembled prompt +
+        // which windowing mode ran. Paired with the real `usage` after the tool
+        // loop, this lets `bench context` + logs validate the estimator and
+        // measure the gain on live turns.
+        let est_input_tokens = crate::agent::tokens::estimate_messages(&messages);
+        let window_mode = if self.config.agent.context_length_tokens > 0 { "budget" } else { "fixed" };
         debug!(
-            "AgentCore: session='{}' history_turns={} total_messages={}",
-            session_id,
-            history.len() / 2,
-            messages.len()
+            "AgentCore: session='{}' mode={} history_msgs={}/{} est_input_tokens={} messages={}",
+            session_id, window_mode,
+            history.len() - skip, history.len(),
+            est_input_tokens, messages.len()
         );
 
         // ── 3. Tool loop ──────────────────────────────────────────────────────
         let options = GenerationOptions {
             reasoning_effort: context.reasoning_effort.clone(),
+            prompt_cache: cache_prefix,
             ..GenerationOptions::default()
         };
 
@@ -964,13 +1136,34 @@ impl AgentCore {
         ).await?;
 
         // ── 4. Emit Done ──────────────────────────────────────────────────────
+        // Instrumentation: our pre-send estimate vs the provider's real
+        // prompt-token count. Validates the token estimator and measures live
+        // context usage (paired with the assembly-time est_input_tokens above).
+        if usage.prompt_tokens > 0 || usage.cache_read_tokens > 0 {
+            let actual = usage.prompt_tokens as usize;
+            debug!(
+                "AgentCore: input_tokens est={} actual={} (est/actual={:.2}) cache_read={} cache_write={} completion={}",
+                est_input_tokens, actual,
+                est_input_tokens as f64 / (actual.max(1) as f64),
+                usage.cache_read_tokens, usage.cache_write_tokens,
+                usage.completion_tokens,
+            );
+        }
         let _ = tx.send(StreamEvent::Done { usage }).await;
 
         // ── 5. Persist session ────────────────────────────────────────────────
         let mut updated = session;
         updated.add_turn("user",      input.to_string());
         updated.add_turn("assistant", response_text.clone());
-        updated.truncate_history(self.max_context_turns * 2);
+        // Retain enough history for the next turn's window. Under token
+        // budgeting keep far more (bounded, to avoid unbounded per-session
+        // growth); otherwise the legacy fixed turn-count.
+        let retain = if self.config.agent.context_length_tokens > 0 {
+            (self.config.agent.context_length_tokens / 25).clamp(self.max_context_turns * 2, 2000)
+        } else {
+            self.max_context_turns * 2
+        };
+        updated.truncate_history(retain);
         self.sessions.update(updated).await;
 
         // ── 6. Memory post-hook (fire-and-forget) ─────────────────────────────

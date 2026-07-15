@@ -183,6 +183,12 @@ pub(super) struct UsageMetadata {
     #[serde(default)]
     #[allow(dead_code)]
     pub total_token_count: u32,
+    /// Prompt tokens served from Gemini's implicit context cache (Gemini 2.5
+    /// caches automatically and reports the hit here). Folded into
+    /// `TokenUsage.cache_read_tokens` so the per-turn accounting matches the
+    /// other providers (Phase-0 #3). 0 when nothing hit / model doesn't cache.
+    #[serde(default)]
+    pub cached_content_token_count: u32,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -314,15 +320,93 @@ fn push_or_merge(out: &mut Vec<Content>, role: &str, mut parts: Vec<Part>) {
 }
 
 /// Translate an OpenAI-style `tools` array into Gemini's single
-/// `functionDeclarations` block.
+/// `functionDeclarations` block. Each tool's `parameters` is run through
+/// [`sanitize_schema_for_gemini`] first — Gemini's function-declaration schema
+/// is a strict OpenAPI 3.0 subset that hard-rejects JSON-Schema keywords MIRA
+/// uses (notably `additionalProperties`, but also `$schema`, `oneOf`, etc.)
+/// with `400 Unknown name "…": Cannot find field`, taking every tool down.
 pub(super) fn convert_tool_specs(specs: &[ToolSpec]) -> Option<Vec<ToolDeclaration>> {
     if specs.is_empty() { return None; }
     let declarations = specs.iter().map(|s| FunctionDeclaration {
         name:        s.function.name.clone(),
         description: s.function.description.clone(),
-        parameters:  s.function.parameters.clone(),
+        parameters:  sanitize_schema_for_gemini(&s.function.parameters),
     }).collect();
     Some(vec![ToolDeclaration { function_declarations: declarations }])
+}
+
+/// Recursively strip JSON-Schema keywords Gemini's schema proto doesn't
+/// understand, and flatten `oneOf`/`allOf` (whose branch `properties` are
+/// merged up, since Gemini's subset can't express them). Recurses through
+/// `properties`, `items`, and `anyOf` (which Gemini *does* support). Everything
+/// not in the drop-set is passed through, so supported constraints (`enum`,
+/// `format`, `minimum`, `required`, `nullable`, …) survive.
+fn sanitize_schema_for_gemini(schema: &serde_json::Value) -> serde_json::Value {
+    use serde_json::{Map, Value};
+    let Some(map) = schema.as_object() else { return schema.clone() };
+
+    // Keywords Gemini's function-declaration Schema proto rejects outright.
+    // `anyOf` is technically supported for type-unions, but MIRA only uses it
+    // for "at least one of" constraints whose branches are bare `{required:[…]}`
+    // objects — and Gemini rejects `required` on a non-OBJECT branch. So we
+    // flatten anyOf too (merge any branch properties up, drop the constraint,
+    // which the tool re-validates at call time).
+    const DROP: &[&str] = &[
+        "additionalProperties", "$schema", "$ref", "$defs", "definitions",
+        "oneOf", "allOf", "anyOf", "not", "patternProperties", "const", "contains",
+        "if", "then", "else", "dependentRequired", "dependencies",
+        "propertyNames", "unevaluatedProperties", "title", "default", "examples",
+    ];
+
+    // Merge oneOf/allOf/anyOf branch properties up into the object's own props.
+    let mut props: Map<String, Value> = map
+        .get("properties").and_then(|p| p.as_object()).cloned().unwrap_or_default();
+    for combinator in ["oneOf", "allOf", "anyOf"] {
+        if let Some(Value::Array(branches)) = map.get(combinator) {
+            for b in branches {
+                if let Some(bp) = b.get("properties").and_then(|p| p.as_object()) {
+                    for (k, v) in bp { props.entry(k.clone()).or_insert_with(|| v.clone()); }
+                }
+            }
+        }
+    }
+
+    let mut out: Map<String, Value> = Map::new();
+    for (k, v) in map {
+        if DROP.contains(&k.as_str()) || k == "properties" { continue; }
+        match k.as_str() {
+            "items" => { out.insert(k.clone(), sanitize_schema_for_gemini(v)); }
+            // Gemini's schema `type` is a scalar, not a JSON-Schema union array
+            // (`{"type":["string","null"]}` → 400 "Proto field is not
+            // repeating"). Collapse: keep the first non-"null" member as the
+            // type and, if "null" was present, mark the field nullable.
+            "type" if v.is_array() => {
+                let arr = v.as_array().unwrap();
+                let mut nullable = false;
+                let mut chosen: Option<Value> = None;
+                for t in arr {
+                    if t.as_str() == Some("null") { nullable = true; }
+                    else if chosen.is_none() { chosen = Some(t.clone()); }
+                }
+                out.insert("type".into(),
+                    chosen.unwrap_or_else(|| Value::String("string".into())));
+                if nullable { out.insert("nullable".into(), Value::Bool(true)); }
+            }
+            _ => { out.insert(k.clone(), v.clone()); }
+        }
+    }
+    if !props.is_empty() {
+        let cleaned: Map<String, Value> = props
+            .iter().map(|(k, v)| (k.clone(), sanitize_schema_for_gemini(v))).collect();
+        out.insert("properties".into(), Value::Object(cleaned));
+        out.entry("type").or_insert_with(|| Value::String("object".into()));
+    }
+    // Gemini: `required` is "only allowed for OBJECT type". Any schema that
+    // kept a `required` list must therefore declare type object.
+    if out.contains_key("required") {
+        out.entry("type").or_insert_with(|| Value::String("object".into()));
+    }
+    Value::Object(out)
 }
 
 /// Translate OpenAI's `tool_choice` to Gemini's `functionCallingConfig`.
@@ -405,6 +489,90 @@ mod tests {
 
     fn user(s: &str)      -> ChatMessage { ChatMessage::user(s) }
     fn assistant(s: &str) -> ChatMessage { ChatMessage::assistant(s) }
+
+    #[test]
+    fn gemini_sanitize_drops_additionalproperties_recursively() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "name": { "type": "string" },
+                "nested": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": { "x": { "type": "integer" } }
+                }
+            },
+            "required": ["name"]
+        });
+        let out = sanitize_schema_for_gemini(&schema);
+        assert!(out.get("additionalProperties").is_none(), "top-level dropped");
+        assert!(out["properties"]["nested"].get("additionalProperties").is_none(), "nested dropped");
+        // Supported keys survive.
+        assert_eq!(out["type"], "object");
+        assert_eq!(out["required"], json!(["name"]));
+        assert!(out["properties"]["name"].get("type").is_some());
+        assert!(out["properties"]["nested"]["properties"]["x"].get("type").is_some());
+    }
+
+    #[test]
+    fn gemini_sanitize_flattens_all_combinators_and_keeps_enum() {
+        // The real companion_briefing_set shape: top-level anyOf whose branches
+        // are bare {required:[…]} — Gemini rejects `required` on a non-object
+        // branch, so anyOf/oneOf/allOf are all flattened away.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "enabled": { "type": "boolean" },
+                "mode": { "type": "string", "enum": ["a", "b"] }
+            },
+            "oneOf": [ { "properties": { "hour": { "type": "integer" } } } ],
+            "anyOf": [ { "required": ["enabled"] }, { "required": ["mode"] } ]
+        });
+        let out = sanitize_schema_for_gemini(&schema);
+        assert!(out.get("oneOf").is_none(), "oneOf flattened");
+        assert!(out.get("anyOf").is_none(), "anyOf flattened (constraint re-validated at call time)");
+        assert!(out["properties"].get("hour").is_some(), "oneOf branch property merged up");
+        assert_eq!(out["properties"]["mode"]["enum"], json!(["a", "b"]), "enum survives");
+        assert_eq!(out["type"], "object");
+    }
+
+    #[test]
+    fn gemini_sanitize_adds_object_type_when_required_present() {
+        let schema = json!({ "required": ["x"], "properties": { "x": { "type": "string" } } });
+        let out = sanitize_schema_for_gemini(&schema);
+        assert_eq!(out["type"], "object", "required implies OBJECT type for Gemini");
+    }
+
+    #[test]
+    fn gemini_sanitize_collapses_type_arrays() {
+        // ["string","integer"] → "string"; ["string","null"] → string + nullable.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": ["string", "integer"] },
+                "b": { "type": ["string", "null"] }
+            }
+        });
+        let out = sanitize_schema_for_gemini(&schema);
+        assert_eq!(out["properties"]["a"]["type"], "string");
+        assert!(out["properties"]["a"].get("nullable").is_none());
+        assert_eq!(out["properties"]["b"]["type"], "string");
+        assert_eq!(out["properties"]["b"]["nullable"], true);
+    }
+
+    #[test]
+    fn gemini_sanitize_cleans_array_items() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": { "type": "array", "items": { "type": "string", "additionalProperties": false } }
+            }
+        });
+        let out = sanitize_schema_for_gemini(&schema);
+        assert!(out["properties"]["tags"]["items"].get("additionalProperties").is_none());
+        assert_eq!(out["properties"]["tags"]["items"]["type"], "string");
+    }
 
     #[test]
     fn system_messages_become_system_instruction() {

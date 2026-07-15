@@ -193,8 +193,12 @@ impl GeminiProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body   = response.text().await.unwrap_or_default();
+            let detail = extract_gemini_error(&body).unwrap_or_else(|| {
+                if body.trim().is_empty() { "<empty response body>".into() } else { body.clone() }
+            });
+            warn!("gemini: {status} (non-stream) — {detail}");
             return Err(crate::MiraError::ProviderError(
-                format!("gemini: {status} — {body}")
+                format!("gemini: {status} — {detail}")
             ));
         }
 
@@ -215,6 +219,8 @@ impl GeminiProvider {
             prompt_tokens:     u.prompt_token_count,
             completion_tokens: u.candidates_token_count,
             total_tokens:      u.prompt_token_count + u.candidates_token_count,
+            cache_read_tokens: u.cached_content_token_count,
+            ..Default::default()
         }).unwrap_or_default();
 
         Ok(GenerationResponse {
@@ -251,8 +257,12 @@ impl GeminiProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body   = response.text().await.unwrap_or_default();
+            let detail = extract_gemini_error(&body).unwrap_or_else(|| {
+                if body.trim().is_empty() { "<empty response body>".into() } else { body.clone() }
+            });
+            warn!("gemini: {status} (streaming) — {detail}");
             return Err(crate::MiraError::ProviderError(
-                format!("gemini: {status} — {body}")
+                format!("gemini: {status} — {detail}")
             ));
         }
 
@@ -279,7 +289,17 @@ impl GeminiProvider {
                 let frame: GenerateContentResponse = match serde_json::from_str(json_data) {
                     Ok(f) => f,
                     Err(e) => {
-                        debug!("gemini: skipping unparseable frame ({e}): {json_data}");
+                        // Gemini can deliver a fatal error mid-stream as a
+                        // `data: {"error":{…}}` frame — surface it instead of
+                        // silently dropping the turn (which looked like a hang).
+                        if let Some(detail) = extract_gemini_error(json_data) {
+                            warn!("gemini: stream error frame — {detail}");
+                            return Err(crate::MiraError::ProviderError(
+                                format!("gemini: stream error — {detail}")
+                            ));
+                        }
+                        warn!("gemini: skipping unparseable frame ({e}): {}",
+                              json_data.chars().take(400).collect::<String>());
                         continue;
                     }
                 };
@@ -310,6 +330,8 @@ impl GeminiProvider {
                         prompt_tokens:     u.prompt_token_count,
                         completion_tokens: u.candidates_token_count,
                         total_tokens:      u.prompt_token_count + u.candidates_token_count,
+                        cache_read_tokens: u.cached_content_token_count,
+                        ..Default::default()
                     };
                 }
             }
@@ -369,6 +391,37 @@ impl ModelProvider for GeminiProvider {
     }
 }
 
+/// Pull a human-readable reason out of a Gemini error payload so the log shows
+/// *why* a request failed instead of a bare status. Gemini reports errors as
+/// `{"error":{"code","message","status","details":[…fieldViolations…]}}` — on a
+/// 400 as the whole response body, and sometimes mid-stream as a
+/// `data: {"error":{…}}` frame (optionally wrapped in a JSON array). Returns the
+/// message plus the first offending field path when present. `None` if `raw`
+/// isn't a recognizable Gemini error.
+fn extract_gemini_error(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    let s = s.strip_prefix("data:").map(str::trim).unwrap_or(s);
+    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+    // Accept both `{error:…}` and `[{error:…}]` shapes.
+    let err = v.get("error").or_else(|| {
+        v.as_array().and_then(|a| a.iter().find_map(|e| e.get("error")))
+    })?;
+    let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("(no message)");
+    let field = err
+        .get("details").and_then(|d| d.as_array())
+        .and_then(|arr| arr.iter().find_map(|d| {
+            d.get("fieldViolations")
+                .and_then(|fv| fv.as_array())
+                .and_then(|fv| fv.first())
+                .and_then(|f| f.get("field"))
+                .and_then(|f| f.as_str())
+        }));
+    Some(match field {
+        Some(f) => format!("{msg} (field: {f})"),
+        None    => msg.to_string(),
+    })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -376,6 +429,22 @@ impl ModelProvider for GeminiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_error_pulls_message_and_field() {
+        let body = r#"{"error":{"code":400,"message":"Unknown name \"type\": Proto field is not repeating.","status":"INVALID_ARGUMENT","details":[{"@type":"x","fieldViolations":[{"field":"tools[0].function_declarations[0].parameters.properties[0].value","description":"..."}]}]}}"#;
+        let got = extract_gemini_error(body).unwrap();
+        assert!(got.contains("Proto field is not repeating"));
+        assert!(got.contains("field: tools[0].function_declarations[0].parameters.properties[0].value"));
+    }
+
+    #[test]
+    fn extract_error_handles_sse_prefix_and_array_and_none() {
+        assert!(extract_gemini_error("data: {\"error\":{\"message\":\"boom\"}}").unwrap().contains("boom"));
+        assert!(extract_gemini_error("[{\"error\":{\"message\":\"arr\"}}]").unwrap().contains("arr"));
+        assert!(extract_gemini_error("{\"candidates\":[]}").is_none()); // not an error payload
+        assert!(extract_gemini_error("not json").is_none());
+    }
 
     fn provider() -> GeminiProvider {
         GeminiProvider::new(

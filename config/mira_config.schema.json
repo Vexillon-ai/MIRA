@@ -1300,9 +1300,48 @@
           "type": "boolean"
         },
         "max_context_turns": {
-          "description": "Maximum conversation turns injected into the model context per request. Older turns are silently omitted (they remain in the session store). Tune to fit your model's context window.",
+          "description": "Maximum conversation turns injected into the model context per request (used when context_length_tokens is 0). Older turns are silently omitted (they remain in the session store). Tune to fit your model's context window.",
           "type": "integer",
           "minimum": 1
+        },
+        "context_length_tokens": {
+          "description": "Phase-1 token-aware context budgeting: the model's context window in tokens. 0 (default) keeps the legacy fixed max_context_turns window (no behaviour change). When set (e.g. 128000), MIRA fills the window by token budget instead — carrying far more history when it fits — while reserving room for the response (agent.max_response_tokens) and a safety margin (agent.context_safety_margin_tokens). Set to your primary model's real context length.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "context_safety_margin_tokens": {
+          "description": "Tokens held back from the context budget as headroom (only when context_length_tokens > 0), guarding against token-estimate drift so a packed prompt doesn't overflow the model. Default 2048.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "prompt_cache_enabled": {
+          "description": "Phase-0 prompt caching: when true, keep the system-prompt PREFIX byte-stable turn-to-turn by moving per-turn retrieved context (memory + wiki) out of the system prompt and folding it into the current user message. A stable prefix lets cloud providers (Anthropic/OpenAI/Gemini) and local backends' KV cache reuse it — roughly 90% cheaper/faster input on cloud, a free speedup locally. Default false (unchanged prompt shape).",
+          "type": "boolean"
+        },
+        "compaction": {
+          "description": "Phase-2 auto-compaction. When token budgeting (context_length_tokens > 0) is on and the oldest turns overflow the window, compact them into a rolling anchored summary instead of dropping them. Inert unless token budgeting is enabled, so defaults preserve current behaviour.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Master switch. When off, overflowing turns are dropped (Phase-1 behaviour) instead of compacted. Default true.",
+              "type": "boolean"
+            },
+            "keep_last_turns": {
+              "description": "How many of the most recent turns (1 turn = user + assistant) are kept verbatim and never summarized. Default 6.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "summary_model": {
+              "description": "Model used to produce the summary. Empty = use the cheap classifier provider when configured, else the primary model. A named model is reserved for a future per-model resolver; today a non-empty value behaves the same as empty.",
+              "type": "string"
+            },
+            "max_summary_tokens": {
+              "description": "Soft cap on the rolling summary's size in tokens, so the compacted block can't grow unbounded. Default 1024.",
+              "type": "integer",
+              "minimum": 0
+            }
+          }
         },
         "avatar": {
           "description": "Assistant avatar. Encoded as 'preset:<key>' for bundled icons, or 'upload:<ext>' when a file exists at {data_dir}/avatars/agent.{ext}. Null = built-in MIRA logo.",

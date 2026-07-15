@@ -14,6 +14,7 @@ pub mod failover;
 pub mod signal_cli;
 pub mod catalog;
 pub mod overlays;
+pub(crate) mod usage;
 
 use async_trait::async_trait;
 use crate::types::{ChatMessage, GenerationOptions, GenerationResponse};

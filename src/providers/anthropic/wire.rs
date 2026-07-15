@@ -22,7 +22,7 @@ pub(super) struct MessagesRequest<'a> {
     pub model: &'a str,
     pub max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<SystemPrompt>,
     pub messages: Vec<OutboundMessage>,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -41,6 +41,50 @@ pub(super) struct MessagesRequest<'a> {
     /// builder enforces both).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<Thinking>,
+}
+
+/// Top-level `system` field. Anthropic accepts either a bare string or an
+/// array of content blocks; the block form is required to attach a
+/// `cache_control` breakpoint. We serialize as a plain string in the common
+/// (no-cache) case so the wire shape is unchanged, and as a one-block array
+/// when prompt caching is on.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(super) enum SystemPrompt {
+    Text(String),
+    Blocks(Vec<SystemBlock>),
+}
+
+impl SystemPrompt {
+    /// The system text regardless of variant — handy for tests/logging.
+    #[cfg(test)]
+    pub(super) fn text(&self) -> &str {
+        match self {
+            SystemPrompt::Text(s) => s,
+            SystemPrompt::Blocks(b) => b.first().map(|x| x.text.as_str()).unwrap_or(""),
+        }
+    }
+}
+
+/// One `system` content block. Only `text` blocks are used; a trailing
+/// `cache_control` marks the end of the cacheable prefix (tools + system).
+#[derive(Debug, Serialize)]
+pub(super) struct SystemBlock {
+    #[serde(rename = "type")]
+    pub kind: &'static str, // always "text"
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+/// Anthropic cache breakpoint. `{"type":"ephemeral"}` = the default ~5-minute
+/// TTL cache. A breakpoint on the last system block caches everything before
+/// it (tools → system), so identical prefixes on later turns are read from
+/// cache at ~10% of the input cost.
+#[derive(Debug, Serialize)]
+pub(super) struct CacheControl {
+    #[serde(rename = "type")]
+    pub kind: &'static str, // "ephemeral"
 }
 
 /// Anthropic `thinking` request block. `kind` is always `"enabled"`.
@@ -150,6 +194,12 @@ pub(super) struct ResponseUsage {
     pub input_tokens: u32,
     #[serde(default)]
     pub output_tokens: u32,
+    /// Prompt-cache accounting (Phase 0). Present only when prompt caching is
+    /// in play; absent → 0.
+    #[serde(default)]
+    pub cache_read_input_tokens: u32,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -374,8 +424,53 @@ pub(super) fn convert_tool_specs(specs: &[ToolSpec]) -> Vec<OutboundToolSpec> {
     specs.iter().map(|s| OutboundToolSpec {
         name:         s.function.name.clone(),
         description:  s.function.description.clone(),
-        input_schema: s.function.parameters.clone(),
+        input_schema: sanitize_input_schema(&s.function.parameters),
     }).collect()
+}
+
+/// Anthropic rejects `oneOf` / `anyOf` / `allOf` at the top level of a tool's
+/// `input_schema` (`400 invalid_request_error: input_schema does not support
+/// oneOf, allOf, or anyOf at the top level`) — which makes the whole
+/// tool-enabled request fail, taking every tool down with one offending schema.
+/// OpenAI-shaped schemas (which MIRA authors) freely use these combinators for
+/// "at least one of" constraints.
+///
+/// Sanitize by flattening: union any `properties` from the top level and from
+/// inside the combinator branches into one `type: object` schema, then drop the
+/// combinators. The dropped constraint is only mutual-exclusivity / conditional
+/// `required`, which the tools re-validate at call time anyway (e.g.
+/// `companion_briefing_set` returns an error if neither field is passed), so
+/// nothing is lost functionally — the model still sees every parameter.
+/// Non-object schemas and schemas without top-level combinators pass through
+/// untouched.
+fn sanitize_input_schema(schema: &serde_json::Value) -> serde_json::Value {
+    use serde_json::{Map, Value};
+    let Some(obj) = schema.as_object() else { return schema.clone() };
+    if !obj.contains_key("oneOf") && !obj.contains_key("anyOf") && !obj.contains_key("allOf") {
+        return schema.clone();
+    }
+    let mut out: Map<String, Value> = obj.clone();
+    let mut props: Map<String, Value> = out
+        .get("properties")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(Value::Array(branches)) = out.remove(key) {
+            for b in branches {
+                if let Some(bp) = b.get("properties").and_then(|v| v.as_object()) {
+                    for (k, v) in bp {
+                        props.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+            }
+        }
+    }
+    if !props.is_empty() {
+        out.insert("properties".into(), Value::Object(props));
+    }
+    out.entry("type").or_insert_with(|| Value::String("object".into()));
+    Value::Object(out)
 }
 
 /// Translate OpenAI's `tool_choice` shape to Anthropic's `OutboundToolChoice`.
@@ -450,6 +545,47 @@ mod tests {
 
     fn user(s: &str)      -> ChatMessage { ChatMessage::user(s) }
     fn assistant(s: &str) -> ChatMessage { ChatMessage::assistant(s) }
+
+    #[test]
+    fn sanitize_strips_top_level_anyof_and_keeps_properties() {
+        // The real companion_briefing_set shape that made Anthropic 400.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "enabled": { "type": "boolean" },
+                "hour": { "type": "integer" }
+            },
+            "anyOf": [ { "required": ["enabled"] }, { "required": ["hour"] } ]
+        });
+        let out = sanitize_input_schema(&schema);
+        assert!(out.get("anyOf").is_none(), "top-level anyOf must be dropped");
+        assert_eq!(out["type"], "object");
+        assert!(out["properties"].get("enabled").is_some());
+        assert!(out["properties"].get("hour").is_some());
+    }
+
+    #[test]
+    fn sanitize_merges_branch_properties_when_top_level_has_none() {
+        // A schema that is purely a top-level oneOf — branch props must be
+        // lifted so the model still sees the parameter names.
+        let schema = json!({
+            "oneOf": [
+                { "properties": { "a": { "type": "string" } } },
+                { "properties": { "b": { "type": "number" } } }
+            ]
+        });
+        let out = sanitize_input_schema(&schema);
+        assert!(out.get("oneOf").is_none());
+        assert_eq!(out["type"], "object");
+        assert!(out["properties"].get("a").is_some());
+        assert!(out["properties"].get("b").is_some());
+    }
+
+    #[test]
+    fn sanitize_passes_through_plain_object_schema() {
+        let schema = json!({ "type": "object", "properties": { "x": { "type": "string" } } });
+        assert_eq!(sanitize_input_schema(&schema), schema);
+    }
 
     #[test]
     fn system_messages_are_lifted_to_top_level() {

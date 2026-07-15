@@ -429,6 +429,33 @@ pub enum BenchAction {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    // Measurement-only context baseline (no API spend): reports how many
+    // tokens MIRA's CURRENT fixed-turn window sends on synthetic
+    // conversations, its context-window utilisation, and turns dropped.
+    // The "before" numbers for the context-compaction work.
+    Context {
+        // Conversation lengths (turns) to measure, comma-separated.
+        #[arg(long, value_name = "N,N,…", default_value = "10,40,100,300", value_delimiter = ',')]
+        turns: Vec<usize>,
+        // Average characters per message (≈ 4 chars/token).
+        #[arg(long, default_value_t = 320)]
+        avg_msg_chars: usize,
+        // Model context window (tokens) used for the utilisation %.
+        #[arg(long, default_value_t = 128_000)]
+        context_length: usize,
+        // Fixed system-prompt + memory overhead estimate (tokens).
+        #[arg(long, default_value_t = 1500)]
+        system_tokens: usize,
+        // Output reservation for the budget column. 0 = agent.max_response_tokens.
+        #[arg(long, default_value_t = 0)]
+        max_response_tokens: usize,
+        // Safety margin held back in the budget column (tokens).
+        #[arg(long, default_value_t = 1024)]
+        safety_margin: usize,
+        // Write a CSV report to this path.
+        #[arg(long, value_name = "PATH")]
+        out: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1416,6 +1443,13 @@ async fn run_bench_command(config: &Arc<MiraConfig>, action: BenchAction) -> Res
                 dry_run,
             };
             mira::bench::run::run_memory_bench(opts, Arc::clone(config)).await?;
+            Ok(())
+        }
+        BenchAction::Context { turns, avg_msg_chars, context_length, system_tokens, max_response_tokens, safety_margin, out } => {
+            let opts = mira::bench::ContextBenchOptions {
+                turns, avg_msg_chars, context_length, system_tokens, max_response_tokens, safety_margin, out,
+            };
+            mira::bench::context::run_context_bench(opts, Arc::clone(config)).await?;
             Ok(())
         }
     }

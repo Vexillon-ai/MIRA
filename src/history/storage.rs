@@ -92,6 +92,10 @@ impl HistoryStore {
         // sets `TurnContext.skip_wiki_hooks = true` so this thread
         // doesn't see wiki context injection. Default 0 = wiki on.
         add_column("ALTER TABLE conversations ADD COLUMN skip_wiki INTEGER NOT NULL DEFAULT 0")?;
+        // Phase-2 context compaction: the rolling anchored summary (JSON) of
+        // the compacted/evicted turns for this conversation. NULL = none yet.
+        // Additive + nullable, so older builds simply ignore it.
+        add_column("ALTER TABLE conversations ADD COLUMN context_summary TEXT")?;
 
         // Step 3: indexes that reference columns added in step 2. Safe on both
         // fresh and upgraded databases now that the column is guaranteed.
@@ -406,6 +410,36 @@ impl HistoryStore {
         if rows == 0 {
             return Err(MiraError::NotFound(format!("Conversation not found: {}", id)));
         }
+        Ok(())
+    }
+
+    /// Phase-2 — load the persisted rolling compaction summary (JSON) for a
+    /// conversation, if any. Narrow accessor so the summary stays out of the
+    /// shared `Conversation` row mapper (and its many SELECT sites).
+    pub fn get_context_summary(&self, id: &str) -> Result<Option<String>, MiraError> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT context_summary FROM conversations WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        );
+        match result {
+            Ok(s)                                     => Ok(s),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e)                                    => Err(MiraError::HistoryError(e.to_string())),
+        }
+    }
+
+    /// Phase-2 — persist the rolling compaction summary (JSON) for a
+    /// conversation so it survives session eviction / restart. No-op error if
+    /// the conversation row doesn't exist yet (nothing to attach it to).
+    pub fn set_context_summary(&self, id: &str, summary_json: &str) -> Result<(), MiraError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE conversations SET context_summary=?1 WHERE id=?2",
+            params![summary_json, id],
+        )
+        .map_err(|e| MiraError::HistoryError(e.to_string()))?;
         Ok(())
     }
 
