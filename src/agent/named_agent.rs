@@ -327,7 +327,7 @@ pub(crate) fn build_provider_for_alias(
             }
         }
     }
-    crate::gateway::builder::build_provider_chain(&c)
+    crate::gateway::builder::build_provider_chain(&c, None)
 }
 
 #[cfg(test)]

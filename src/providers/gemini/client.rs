@@ -391,35 +391,12 @@ impl ModelProvider for GeminiProvider {
     }
 }
 
-/// Pull a human-readable reason out of a Gemini error payload so the log shows
-/// *why* a request failed instead of a bare status. Gemini reports errors as
-/// `{"error":{"code","message","status","details":[…fieldViolations…]}}` — on a
-/// 400 as the whole response body, and sometimes mid-stream as a
-/// `data: {"error":{…}}` frame (optionally wrapped in a JSON array). Returns the
-/// message plus the first offending field path when present. `None` if `raw`
-/// isn't a recognizable Gemini error.
+/// Pull a human-readable reason out of a Gemini error payload (message + first
+/// offending field). Delegates to the shared [`crate::providers::errors`]
+/// extractor, which handles the Google shape plus an SSE `data:` prefix and a
+/// `[{…}]` array wrapper (Gemini streams errors this way).
 fn extract_gemini_error(raw: &str) -> Option<String> {
-    let s = raw.trim();
-    let s = s.strip_prefix("data:").map(str::trim).unwrap_or(s);
-    let v: serde_json::Value = serde_json::from_str(s).ok()?;
-    // Accept both `{error:…}` and `[{error:…}]` shapes.
-    let err = v.get("error").or_else(|| {
-        v.as_array().and_then(|a| a.iter().find_map(|e| e.get("error")))
-    })?;
-    let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("(no message)");
-    let field = err
-        .get("details").and_then(|d| d.as_array())
-        .and_then(|arr| arr.iter().find_map(|d| {
-            d.get("fieldViolations")
-                .and_then(|fv| fv.as_array())
-                .and_then(|fv| fv.first())
-                .and_then(|f| f.get("field"))
-                .and_then(|f| f.as_str())
-        }));
-    Some(match field {
-        Some(f) => format!("{msg} (field: {f})"),
-        None    => msg.to_string(),
-    })
+    crate::providers::errors::clean_provider_error(raw)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

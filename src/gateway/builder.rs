@@ -262,7 +262,7 @@ impl GatewayBuilder {
         info!("Memory system initialised");
 
         // ── Provider chain ───────────────────────────────────────────
-        let provider = build_provider_chain(&config)?;
+        let provider = build_provider_chain(&config, Some(Arc::clone(&degradation_tracker)))?;
         if provider.health_check().await {
             info!("Provider health check: ok");
         } else {
@@ -912,7 +912,7 @@ impl GatewayBuilder {
         if config.agent.reasoning.enabled && !config.agent.reasoning.provider.trim().is_empty() {
             let mut rc = (*config).clone();
             rc.primary_provider = config.agent.reasoning.provider.clone();
-            match build_provider_chain(&rc) {
+            match build_provider_chain(&rc, None) {
                 Ok(rp) => {
                     info!("Reasoning auto-routing enabled → provider '{}'", config.agent.reasoning.provider);
                     agent_core.set_reasoning_provider(rp);
@@ -935,7 +935,7 @@ impl GatewayBuilder {
             if !clf_id.is_empty() {
                 let mut cc = (*config).clone();
                 cc.primary_provider = clf_id.to_string();
-                match build_provider_chain(&cc) {
+                match build_provider_chain(&cc, None) {
                     Ok(cp) => {
                         info!("Reasoning classifier → provider '{}'", clf_id);
                         agent_core.set_classifier_provider(cp);
@@ -1717,6 +1717,7 @@ async fn probe_embedding_endpoint(base_url: &str) -> bool {
 
 pub(crate) fn build_provider_chain(
     config: &MiraConfig,
+    degradations: Option<Arc<crate::health::degradation::DegradationTracker>>,
 ) -> Result<Arc<dyn crate::providers::ModelProvider>, MiraError> {
     use crate::providers::{
         failover::FailoverProvider,
@@ -1949,7 +1950,83 @@ pub(crate) fn build_provider_chain(
     for (_, fb) in fallbacks {
         chain = chain.with_fallback(fb);
     }
+    if let Some(tracker) = degradations {
+        chain = chain.with_degradation_tracker(tracker);
+    }
     Ok(Arc::new(chain))
+}
+
+/// Build a SINGLE provider by slug for a one-shot per-turn override (the web
+/// chat model/provider picker). Reuses the same construction as
+/// [`build_provider_chain`] so **every** provider — not just a hand-picked few —
+/// can be selected for a turn (previously only openrouter/lmstudio were built,
+/// so picking Anthropic/DeepSeek/Gemini silently fell back to the default
+/// chain). `model_override` swaps the model when the caller picked a specific
+/// one. Returns `None` for an unknown slug or a provider that isn't configured
+/// (no key / no URL), so the caller falls back to the default provider.
+pub(crate) fn build_single_provider(
+    config: &MiraConfig,
+    slug: &str,
+    model_override: Option<&str>,
+) -> Option<Arc<dyn crate::providers::ModelProvider>> {
+    use crate::providers::{
+        lmstudio::LmStudioProvider,
+        local::OllamaProvider,
+        openrouter::OpenRouterProvider,
+        openai_compat::{AuthHeader, OpenAiCompatClient, OpenAiCompatConfig},
+        anthropic::AnthropicProvider,
+        gemini::GeminiProvider,
+    };
+    type P = Arc<dyn crate::providers::ModelProvider>;
+    let model_of = |default: &str| model_override
+        .map(str::to_string)
+        .unwrap_or_else(|| default.to_string());
+    // Cloud providers need a non-empty key; local ones need only their URL.
+    let keyed = |k: &Option<String>| k.as_ref().filter(|s| !s.is_empty()).cloned();
+    // The OpenAI-compat providers (openai/deepseek/moonshot/groq/xai) share a
+    // wire shape but distinct config types, so each arm passes its own fields in.
+    let compat = |name: &str, key: String, base_url: String, model: String, timeout: u64| -> P {
+        Arc::new(OpenAiCompatClient::new(OpenAiCompatConfig {
+            provider_name: name.into(), base_url, api_key: key, model,
+            timeout_secs: timeout, auth_header: AuthHeader::Bearer, extra_headers: vec![],
+        }))
+    };
+
+    let out: P = match slug {
+        // Local — the URL is the contract; explicit selection ignores `enabled`.
+        "lmstudio" => Arc::new(
+            LmStudioProvider::new(config.providers.lmstudio.url.clone(),
+                                  model_of(&config.providers.lmstudio.default_model))
+                .with_token_caps(config.agent.max_tool_round_tokens, config.agent.max_response_tokens)),
+        "ollama" => Arc::new(
+            OllamaProvider::new(config.providers.ollama.url.clone(),
+                                model_of(&config.providers.ollama.default_model))),
+        "openrouter" => Arc::new(OpenRouterProvider::new(
+            keyed(&config.providers.openrouter.api_key)?,
+            model_of(&config.providers.openrouter.default_model))),
+        "anthropic" => {
+            let ac = &config.providers.anthropic;
+            Arc::new(AnthropicProvider::new(keyed(&ac.api_key)?, model_of(&ac.default_model),
+                                            ac.base_url.clone(), ac.timeout_secs))
+        }
+        "gemini" => {
+            let gc = &config.providers.gemini;
+            Arc::new(GeminiProvider::new(keyed(&gc.api_key)?, model_of(&gc.default_model),
+                                         gc.base_url.clone(), gc.timeout_secs))
+        }
+        "openai" => { let c = &config.providers.openai;
+            compat("openai", keyed(&c.api_key)?, c.base_url.clone(), model_of(&c.default_model), c.timeout_secs) }
+        "deepseek" => { let c = &config.providers.deepseek;
+            compat("deepseek", keyed(&c.api_key)?, c.base_url.clone(), model_of(&c.default_model), c.timeout_secs) }
+        "moonshot" => { let c = &config.providers.moonshot;
+            compat("moonshot", keyed(&c.api_key)?, c.base_url.clone(), model_of(&c.default_model), c.timeout_secs) }
+        "groq" => { let c = &config.providers.groq;
+            compat("groq", keyed(&c.api_key)?, c.base_url.clone(), model_of(&c.default_model), c.timeout_secs) }
+        "xai" => { let c = &config.providers.xai;
+            compat("xai", keyed(&c.api_key)?, c.base_url.clone(), model_of(&c.default_model), c.timeout_secs) }
+        _ => return None,
+    };
+    Some(out)
 }
 
 /// The ordered fallback slugs to use as the automatic-failover tail, given the
@@ -3010,6 +3087,27 @@ mod failover_policy_tests {
         let c = cfg(); // failover_providers = None → local-only default
         let cands = ["ollama", "openrouter", "anthropic", "gemini"];
         assert_eq!(select_failover_slugs("lmstudio", &cands, &c), vec!["ollama"]);
+    }
+
+    #[test]
+    fn single_provider_builds_any_configured_provider_not_just_two() {
+        let mut c = cfg();
+        // Local providers build without a key (URL is the contract).
+        assert!(build_single_provider(&c, "lmstudio", None).is_some());
+        assert!(build_single_provider(&c, "ollama", None).is_some());
+        // Cloud providers need a key: absent → None (caller falls back).
+        c.providers.anthropic.api_key = None;
+        assert!(build_single_provider(&c, "anthropic", None).is_none());
+        // With a key, Anthropic/DeepSeek/Gemini now build (regression: these
+        // used to silently fall back to the default chain).
+        c.providers.anthropic.api_key = Some("sk-test".into());
+        c.providers.deepseek.api_key  = Some("sk-test".into());
+        c.providers.gemini.api_key    = Some("sk-test".into());
+        assert!(build_single_provider(&c, "anthropic", Some("claude-x")).is_some());
+        assert!(build_single_provider(&c, "deepseek", None).is_some());
+        assert!(build_single_provider(&c, "gemini", None).is_some());
+        // Unknown slug → None.
+        assert!(build_single_provider(&c, "nope", None).is_none());
     }
 
     #[test]

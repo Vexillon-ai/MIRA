@@ -148,8 +148,8 @@ impl Tool for CalendarListEventsTool {
         json!({
             "type": "object",
             "properties": {
-                "from":  { "type": ["string", "integer"], "description": "Earliest start time (ISO-8601 or epoch ms)." },
-                "to":    { "type": ["string", "integer"], "description": "Latest start time (ISO-8601 or epoch ms)." },
+                "from":  { "type": "string", "description": "Earliest start time (ISO-8601 or epoch ms)." },
+                "to":    { "type": "string", "description": "Latest start time (ISO-8601 or epoch ms)." },
                 "limit": { "type": "integer", "description": "Max events to return (default 100, max 500)." }
             }
         })
@@ -206,8 +206,8 @@ impl Tool for CalendarCreateEventTool {
             "properties": {
                 "summary":     { "type": "string" },
                 "description": { "type": "string" },
-                "starts_at":   { "type": ["string", "integer"] },
-                "ends_at":     { "type": ["string", "integer"] },
+                "starts_at":   { "type": "string" },
+                "ends_at":     { "type": "string" },
                 "all_day":     { "type": "boolean" },
                 "location":    { "type": "string" },
                 "rrule":       { "type": "string", "description": "RFC 5545 RRULE without the leading 'RRULE:' tag." },
@@ -262,8 +262,8 @@ impl Tool for CalendarUpdateEventTool {
                 "id":          { "type": "string" },
                 "summary":     { "type": "string" },
                 "description": { "type": "string" },
-                "starts_at":   { "type": ["string", "integer"] },
-                "ends_at":     { "type": ["string", "integer"] },
+                "starts_at":   { "type": "string" },
+                "ends_at":     { "type": "string" },
                 "all_day":     { "type": "boolean" },
                 "location":    { "type": "string" },
                 "rrule":       { "type": "string" },

@@ -133,6 +133,9 @@ impl Gateway {
         let proxy               = self.proxy;
         let channel_manager     = Arc::clone(&self.channel_manager);
         let restart_notify      = Arc::clone(&self.server.restart_notify);
+        // Where the clean-shutdown marker lives, so the next boot knows this
+        // stop was intentional (not a crash) — see health::boot.
+        let data_dir            = self.config.data_dir_path();
 
         // when running under the Windows SCM, the install
         // module populates a shared notify that the SCM Stop /
@@ -155,9 +158,27 @@ impl Gateway {
                     None    => std::future::pending::<()>().await,
                 }
             };
+            // SIGTERM (what `systemctl stop/restart` and most supervisors send)
+            // must reach this graceful path too — otherwise an operator restart
+            // kills the process uncleanly, skipping teardown AND looking like a
+            // crash to the restart-count detector. `pending()` on non-unix.
+            let sigterm = async {
+                #[cfg(unix)]
+                {
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                        Ok(mut s) => { s.recv().await; }
+                        Err(_)    => std::future::pending::<()>().await,
+                    }
+                }
+                #[cfg(not(unix))]
+                { std::future::pending::<()>().await }
+            };
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     info!("ctrl_c received — stopping MIRA");
+                }
+                _ = sigterm => {
+                    info!("SIGTERM received — stopping MIRA (supervisor should relaunch)");
                 }
                 _ = restart_notify.notified() => {
                     info!("Restart requested via API — stopping MIRA (supervisor should relaunch)");
@@ -165,6 +186,12 @@ impl Gateway {
                 _ = scm => {
                     info!("SCM stop received — stopping MIRA");
                 }
+            }
+
+            // This is a graceful stop from a known source → mark it clean so the
+            // next boot isn't counted as a crash by the restart-loop detector.
+            if let Err(e) = crate::health::boot::mark_clean_shutdown(&data_dir) {
+                warn!("could not write clean-shutdown marker (non-fatal): {e}");
             }
 
             // Stop all per-account signal-cli daemons + listeners.

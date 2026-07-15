@@ -82,6 +82,19 @@ export const providersApi = {
     api.get<OpenRouterCatalog>('/api/providers/openrouter/models', {
       params: refresh ? { refresh: true } : {},
     }).then(r => r.data),
+  /** Verify a provider+model actually generates (a real 1-token call) — catches
+   *  a deprecated/quota'd/unauthorized model that catalog listing would miss. */
+  test: (slug: string, model?: string) =>
+    api.post<ProviderTestResult>(`/api/providers/${slug}/test`, model ? { model } : {})
+      .then(r => r.data),
+}
+
+export interface ProviderTestResult {
+  ok:         boolean
+  provider:   string
+  model:      string
+  latency_ms?: number
+  error?:     string
 }
 
 // ── Pricing helpers ──────────────────────────────────────────────────────────

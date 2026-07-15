@@ -114,8 +114,10 @@ impl ModelProvider for OllamaProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            let detail = crate::providers::errors::provider_error_detail(&body);
+            warn!("Ollama {} — {}", status, detail);
             return Err(crate::MiraError::ProviderError(
-                format!("Ollama returned {}: {}", status, body)
+                format!("Ollama returned {}: {}", status, detail)
             ));
         }
         

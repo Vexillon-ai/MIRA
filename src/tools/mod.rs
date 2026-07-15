@@ -38,6 +38,7 @@ pub mod guardian_inspect;
 pub mod guardian_decide;
 pub mod guardian_propose;
 pub mod settings;
+pub mod schema_lint;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -273,6 +274,14 @@ impl ToolRegistry {
     pub fn register<T: Tool + 'static>(&mut self, tool: T) {
         let name = tool.name().to_string();
         debug!("Registered tool: {}", name);
+        // Portability guard: a single non-portable keyword in a tool's schema
+        // makes a whole provider (Anthropic/Gemini) 400 every tool-enabled turn.
+        // Warn at load time so it's caught in dev, not as a mid-turn 400.
+        let issues = schema_lint::lint_tool_schema(&tool.args_schema());
+        if !issues.is_empty() {
+            let list = issues.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("; ");
+            warn!("tool '{name}': non-portable schema — {list}. See src/tools/schema_lint.rs for the portable dialect.");
+        }
         self.tools.insert(name, Arc::new(tool));
     }
 

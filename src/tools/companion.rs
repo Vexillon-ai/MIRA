@@ -781,11 +781,10 @@ impl Tool for CompanionBriefingSetTool {
                     "maximum": 23,
                     "description": "Local hour (0-23) the briefing fires at. Defaults to 7 (07:00 local) on first enable."
                 }
-            },
-            "anyOf": [
-                { "required": ["enabled"] },
-                { "required": ["hour"] }
-            ]
+            }
+            // Portable dialect: no top-level `anyOf` (Anthropic/Gemini reject it).
+            // The "pass at least one of enabled/hour" rule is enforced in
+            // execute() instead (see the failure return below).
         })
     }
 

@@ -26,8 +26,6 @@ use crate::onboarding::{
 };
 use crate::server::handlers::onboarding::DataDir;
 use crate::providers::ModelProvider;
-use crate::providers::lmstudio::LmStudioProvider;
-use crate::providers::openrouter::OpenRouterProvider;
 use crate::types::{ChatMessage as ProviderChatMessage, MessageRole as ProviderMessageRole};
 use crate::web::LiveConfig;
 
@@ -193,31 +191,21 @@ pub async fn chat_handler(
     }
 
     // Build an optional one-shot provider for this turn when the user has
-    // selected a specific model / provider from the frontend dropdown.
+    // selected a specific model / provider from the frontend dropdown. This
+    // provider is used for the WHOLE turn (tool rounds + final answer), so the
+    // picked model actually answers. Handles every provider via the shared
+    // factory — not just openrouter/lmstudio, which used to silently fall back
+    // to the default chain for Anthropic/DeepSeek/Gemini/etc.
     let turn_provider: Option<Arc<dyn ModelProvider>> = match req.provider_override.as_deref() {
-        Some("openrouter") => {
-            if let Some(ref api_key) = config.providers.openrouter.api_key {
-                let model = req.model_override.clone()
-                    .unwrap_or_else(|| config.providers.openrouter.default_model.clone());
-                Some(Arc::new(OpenRouterProvider::new(api_key.clone(), model))
-                    as Arc<dyn ModelProvider>)
-            } else {
-                warn!("OpenRouter selected but no API key configured — falling back to default");
-                None
+        Some(slug) => {
+            let built = crate::gateway::builder::build_single_provider(
+                &config, slug, req.model_override.as_deref());
+            if built.is_none() {
+                warn!("provider '{slug}' selected but not configured (missing key/URL) — using default provider");
             }
+            built
         }
-        Some("lmstudio") => {
-            let model = req.model_override.clone()
-                .unwrap_or_else(|| config.providers.lmstudio.default_model.clone());
-            Some(Arc::new(
-                LmStudioProvider::new(config.providers.lmstudio.url.clone(), model)
-                    .with_token_caps(
-                        config.agent.max_tool_round_tokens,
-                        config.agent.max_response_tokens,
-                    )
-            ) as Arc<dyn ModelProvider>)
-        }
-        _ => None, // use the agent's default provider
+        None => None, // use the agent's default provider
     };
 
     let session_id    = format!("web-{}", conv_id);

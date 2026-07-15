@@ -452,8 +452,16 @@ function ProviderSection({
     const t0 = performance.now()
     try {
       const cat = await catalogApi.fetch(slug, true)
+      // Catalog listing can succeed while the *configured model* is
+      // deprecated/quota'd/unauthorized — so also do a real 1-token generation
+      // and surface that error (e.g. Gemini "model no longer available").
+      const gen = await providersApi.test(slug)
       const ms  = Math.round(performance.now() - t0)
-      setStatus({ kind: 'ok', count: cat.entries.length, latencyMs: ms })
+      if (!gen.ok) {
+        setStatus({ kind: 'error', message: gen.error || `model ${gen.model} failed to generate` })
+      } else {
+        setStatus({ kind: 'ok', count: cat.entries.length, latencyMs: ms })
+      }
       // ModelSelect listens to this query key — invalidating makes
       // the dropdown re-render with the freshly-fetched catalog.
       qc.invalidateQueries({ queryKey: ['provider-catalog', slug] })

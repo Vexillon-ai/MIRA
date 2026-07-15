@@ -398,8 +398,10 @@ impl OpenAiCompatClient {
         if !response.status().is_success() {
             let status = response.status();
             let body   = response.text().await.unwrap_or_default();
+            let detail = crate::providers::errors::provider_error_detail(&body);
+            warn!("{}: {status} — {detail}", self.config.provider_name);
             return Err(crate::MiraError::ProviderError(
-                format!("{}: {status} — {body}", self.config.provider_name)
+                format!("{}: {status} — {detail}", self.config.provider_name)
             ));
         }
 
@@ -469,8 +471,10 @@ impl OpenAiCompatClient {
         if !response.status().is_success() {
             let status = response.status();
             let body   = response.text().await.unwrap_or_default();
+            let detail = crate::providers::errors::provider_error_detail(&body);
+            warn!("{}: {status} — {detail}", self.config.provider_name);
             return Err(crate::MiraError::ProviderError(
-                format!("{}: {status} — {body}", self.config.provider_name)
+                format!("{}: {status} — {detail}", self.config.provider_name)
             ));
         }
 

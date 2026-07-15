@@ -1097,8 +1097,18 @@ impl AgentCore {
         let ts_cfg = self.tool_selection_config().await;
         let pool: Vec<String> = context.allowed_tool_names.clone()
             .unwrap_or_else(|| self.tools.list_tools());
+        // Prompt caching vs adaptive tool selection: the cached prefix includes
+        // the tool schemas (for Anthropic the order is tools → system), so a
+        // tool set that changes per turn breaks the stable prefix and forces a
+        // cache-write every turn — defeating the cache. When caching is on we
+        // therefore keep the FULL tool set stable: turn 1 pays the tool tokens
+        // once (cache write), every later turn reads them back at ~10% cost,
+        // which beats JIT's per-turn savings on a multi-turn conversation.
+        if cache_prefix && ts_cfg.mode == "adaptive" && !context.tools_flow_restricted {
+            debug!("prompt_cache on → skipping adaptive tool selection to keep the cacheable prefix stable");
+        }
         let adaptive_allowed: Option<Vec<String>> =
-            if ts_cfg.mode == "adaptive" && !context.tools_flow_restricted {
+            if ts_cfg.mode == "adaptive" && !context.tools_flow_restricted && !cache_prefix {
                 self.select_adaptive_tools(input, &messages, &ts_cfg, &pool).await
             } else {
                 None
@@ -1136,19 +1146,20 @@ impl AgentCore {
         ).await?;
 
         // ── 4. Emit Done ──────────────────────────────────────────────────────
-        // Instrumentation: our pre-send estimate vs the provider's real
-        // prompt-token count. Validates the token estimator and measures live
-        // context usage (paired with the assembly-time est_input_tokens above).
-        if usage.prompt_tokens > 0 || usage.cache_read_tokens > 0 {
-            let actual = usage.prompt_tokens as usize;
-            debug!(
-                "AgentCore: input_tokens est={} actual={} (est/actual={:.2}) cache_read={} cache_write={} completion={}",
-                est_input_tokens, actual,
-                est_input_tokens as f64 / (actual.max(1) as f64),
-                usage.cache_read_tokens, usage.cache_write_tokens,
-                usage.completion_tokens,
-            );
-        }
+        // Per-turn summary at INFO so a single grep-able line shows the shape of
+        // every turn without raising the global log level: windowing mode,
+        // whether compaction ran, how much history was kept, our token estimate
+        // vs the provider's real prompt count, and cache hit/write + completion.
+        let compaction_suffix = if compaction_block.is_empty() { "" } else { "+compact" };
+        info!(
+            "turn: session='{session_id}' channel={channel} mode={window_mode}{compaction_suffix} \
+             history={kept}/{total} tokens[in est={est_input_tokens} actual={actual} \
+             cache_r={cr} cache_w={cw} out={out}]",
+            kept = history.len() - skip, total = history.len(),
+            actual = usage.prompt_tokens,
+            cr = usage.cache_read_tokens, cw = usage.cache_write_tokens,
+            out = usage.completion_tokens,
+        );
         let _ = tx.send(StreamEvent::Done { usage }).await;
 
         // ── 5. Persist session ────────────────────────────────────────────────

@@ -17,10 +17,18 @@ fn short_reason(e: &crate::MiraError) -> String {
     if s.chars().count() > 140 { format!("{}…", s.chars().take(139).collect::<String>()) } else { s }
 }
 
+/// Subsystem key for the "primary LLM provider unreachable" degradation.
+const PRIMARY_DOWN_SUBSYSTEM: &str = "provider.primary";
+
 /// A provider that falls back to alternatives on failure
 pub struct FailoverProvider {
     primary: Box<dyn ModelProvider>,
     fallbacks: Vec<Box<dyn ModelProvider>>,
+    /// When set, a primary failure raises a persistent health degradation
+    /// (so the System Health page proactively shows "primary provider down"
+    /// instead of the user only learning via a per-turn inline warning), and a
+    /// primary success clears it. Only wired on the main chain.
+    degradations: Option<std::sync::Arc<crate::health::degradation::DegradationTracker>>,
 }
 
 impl FailoverProvider {
@@ -32,13 +40,37 @@ impl FailoverProvider {
         // `build_provider_chain`; keep only a debug breadcrumb here.
         tracing::debug!("FailoverProvider::new: primary={} (+{} fallbacks at construction)",
                         primary.name(), fallbacks.len());
-        Self { primary, fallbacks }
+        Self { primary, fallbacks, degradations: None }
     }
-    
+
     /// Add a fallback provider
     pub fn with_fallback(mut self, fallback: Box<dyn ModelProvider>) -> Self {
         self.fallbacks.push(fallback);
         self
+    }
+
+    /// Attach a degradation tracker so primary-provider failures surface on the
+    /// System Health page. Only the main provider chain should set this (not
+    /// the auxiliary reasoning/classifier chains).
+    pub fn with_degradation_tracker(
+        mut self,
+        tracker: std::sync::Arc<crate::health::degradation::DegradationTracker>,
+    ) -> Self {
+        self.degradations = Some(tracker);
+        self
+    }
+
+    /// Raise/clear the primary-down degradation.
+    fn note_primary_down(&self, reason: &str, answered_by: &str) {
+        if let Some(d) = &self.degradations {
+            d.record(PRIMARY_DOWN_SUBSYSTEM, "Primary model provider",
+                     self.primary.name(), answered_by, reason, true);
+        }
+    }
+    fn note_primary_ok(&self) {
+        if let Some(d) = &self.degradations {
+            d.clear(PRIMARY_DOWN_SUBSYSTEM);
+        }
     }
 }
 
@@ -56,7 +88,7 @@ impl ModelProvider for FailoverProvider {
         // Try primary first
         debug!("Trying primary provider: {}", self.primary.name());
         let primary_reason = match self.primary.generate(messages, options).await {
-            Ok(response) => return Ok(response),
+            Ok(response) => { self.note_primary_ok(); return Ok(response); }
             Err(e) => {
                 warn!("Primary provider '{}' failed: {}, trying fallbacks...",
                      self.primary.name(), e);
@@ -64,12 +96,15 @@ impl ModelProvider for FailoverProvider {
             }
         };
 
-        // Try each fallback in order
+        // Try each fallback in order, remembering why each one failed so the
+        // final error names the actual reasons instead of a bare "unavailable".
+        let mut reasons = vec![format!("{}={}", self.primary.name(), primary_reason)];
         for (i, fallback) in self.fallbacks.iter().enumerate() {
             debug!("Trying fallback {} ({})", i + 1, fallback.name());
             match fallback.generate(messages, options).await {
                 Ok(mut response) => {
                     info!("Fallback provider '{}' succeeded", fallback.name());
+                    self.note_primary_down(&primary_reason, fallback.name());
                     response.fallback = Some(FallbackNotice {
                         from:   self.primary.name().to_string(),
                         to:     fallback.name().to_string(),
@@ -79,12 +114,14 @@ impl ModelProvider for FailoverProvider {
                 }
                 Err(e) => {
                     warn!("Fallback provider '{}' failed: {}", fallback.name(), e);
+                    reasons.push(format!("{}={}", fallback.name(), short_reason(&e)));
                 }
             }
         }
-        
-        // All providers failed
-        Err(crate::MiraError::AllProvidersUnavailable)
+
+        // All providers failed — surface each one's reason.
+        self.note_primary_down(&primary_reason, "none (all providers failed)");
+        Err(crate::MiraError::AllProvidersUnavailable(reasons.join("; ")))
     }
     
     async fn generate_stream(
@@ -95,17 +132,19 @@ impl ModelProvider for FailoverProvider {
     ) -> Result<GenerationResponse, crate::MiraError> {
         debug!("Trying primary provider (streaming): {}", self.primary.name());
         let primary_reason = match self.primary.generate_stream(messages, options, on_token).await {
-            Ok(r) => return Ok(r),
+            Ok(r) => { self.note_primary_ok(); return Ok(r); }
             Err(e) => {
                 warn!("Primary provider '{}' stream failed: {}, trying fallbacks…", self.primary.name(), e);
                 short_reason(&e)
             }
         };
+        let mut reasons = vec![format!("{}={}", self.primary.name(), primary_reason)];
         for (i, fallback) in self.fallbacks.iter().enumerate() {
             debug!("Trying fallback {} ({}) for streaming", i + 1, fallback.name());
             match fallback.generate_stream(messages, options, on_token).await {
                 Ok(mut r) => {
                     info!("Fallback provider '{}' stream succeeded", fallback.name());
+                    self.note_primary_down(&primary_reason, fallback.name());
                     r.fallback = Some(FallbackNotice {
                         from:   self.primary.name().to_string(),
                         to:     fallback.name().to_string(),
@@ -113,10 +152,14 @@ impl ModelProvider for FailoverProvider {
                     });
                     return Ok(r);
                 }
-                Err(e) => warn!("Fallback provider '{}' stream failed: {}", fallback.name(), e),
+                Err(e) => {
+                    warn!("Fallback provider '{}' stream failed: {}", fallback.name(), e);
+                    reasons.push(format!("{}={}", fallback.name(), short_reason(&e)));
+                }
             }
         }
-        Err(crate::MiraError::AllProvidersUnavailable)
+        self.note_primary_down(&primary_reason, "none (all providers failed)");
+        Err(crate::MiraError::AllProvidersUnavailable(reasons.join("; ")))
     }
 
     async fn health_check(&self) -> bool {
@@ -208,7 +251,7 @@ mod tests {
             vec![Box::new(AlwaysFails), Box::new(AlwaysFails)],
         );
         let err = provider.generate(&msgs(), &opts()).await.unwrap_err();
-        assert!(matches!(err, crate::MiraError::AllProvidersUnavailable));
+        assert!(matches!(err, crate::MiraError::AllProvidersUnavailable(_)));
     }
 
     #[tokio::test]

@@ -937,3 +937,72 @@ pub async fn provider_catalog(
         }
     }
 }
+
+// ── POST /api/providers/{slug}/test ───────────────────────────────────────────
+//
+// Verify a provider+model actually works by making a real 1-token generation —
+// not just a catalog listing. Catalog/`/models` can succeed while the configured
+// model is deprecated/quota'd/unauthorized (we hit exactly this: Gemini listed a
+// model that then 400'd "no longer available to new users"). This surfaces that
+// at config time with the clean provider error (see providers::errors), instead
+// of failing silently on the user's next chat.
+
+#[derive(Deserialize, Default)]
+pub struct ProviderTestReq {
+    /// Optional model to test; defaults to the provider's configured model.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ProviderTestResult {
+    pub ok:         bool,
+    pub provider:   String,
+    pub model:      String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error:      Option<String>,
+}
+
+pub async fn provider_test(
+    _user:               AuthUser,
+    Extension(live_cfg): Extension<Arc<LiveConfig>>,
+    AxumPath(slug):      AxumPath<String>,
+    body:                Option<axum::Json<ProviderTestReq>>,
+) -> axum::Json<ProviderTestResult> {
+    use crate::types::{ChatMessage, GenerationOptions};
+
+    let cfg = live_cfg.get().await;
+    let model_override = body.and_then(|b| b.0.model).filter(|m| !m.trim().is_empty());
+
+    let provider = match crate::gateway::builder::build_single_provider(
+        &cfg, &slug, model_override.as_deref(),
+    ) {
+        Some(p) => p,
+        None => return axum::Json(ProviderTestResult {
+            ok: false, provider: slug.clone(),
+            model: model_override.unwrap_or_default(), latency_ms: None,
+            error: Some(format!("provider '{slug}' is not configured (missing API key / URL) or unknown")),
+        }),
+    };
+
+    // Smallest legal generation: one user message, one output token.
+    let messages = [ChatMessage::user("ping".to_string())];
+    let opts = GenerationOptions { temperature: 0.0, max_tokens: Some(1), ..Default::default() };
+    let started = Instant::now();
+    match provider.generate(&messages, &opts).await {
+        Ok(resp) => axum::Json(ProviderTestResult {
+            ok: true, provider: slug,
+            model: if resp.model_name.is_empty() { model_override.unwrap_or_default() } else { resp.model_name },
+            latency_ms: Some(started.elapsed().as_millis() as u64), error: None,
+        }),
+        Err(e) => axum::Json(ProviderTestResult {
+            ok: false, provider: slug,
+            model: model_override.unwrap_or_default(), latency_ms: None,
+            // Item 3 makes this a clean reason (e.g. "gemini: 400 — model … no
+            // longer available (field: …)") rather than a raw JSON blob.
+            error: Some(e.to_string()),
+        }),
+    }
+}

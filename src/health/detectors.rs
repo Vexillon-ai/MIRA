@@ -726,26 +726,31 @@ impl Detector for ProcessUptimeDetector {
 }
 
 // Restart count in last 24h. Crash-loop signal. Reads
-// `<data_dir>/boot_history.json` (written by the gateway on each
-// startup). Y ≥2, R ≥5.
+// `<data_dir>/boot_history.json` (written by the gateway on each startup).
+// Only **unclean** (crash) restarts drive the level — operator-initiated
+// restarts (config change, upgrade, `systemctl restart`) shut down gracefully,
+// leave a clean-shutdown marker, and are excluded so they don't false-alarm.
+// Crashes: Y ≥2, R ≥5.
 pub struct ProcessRestartCountDetector;
 impl Detector for ProcessRestartCountDetector {
     fn name(&self) -> &'static str { "process.restart_count_24h" }
     fn run(&self, ctx: &DetectorContext) -> DetectorReport {
         let now = chrono::Utc::now().timestamp();
         let since = now - 24 * 60 * 60;
-        let count = match super::boot::count_boots_since(&ctx.data_dir, since) {
+        let total = match super::boot::count_boots_since(&ctx.data_dir, since) {
             Ok(n)  => n,
             Err(e) => return err_yellow(self.name(), e.to_string()),
         };
-        let level = if count >= 5 { HealthLevel::Red }
-                    else if count >= 2 { HealthLevel::Yellow }
+        let crashes = super::boot::count_crashes_since(&ctx.data_dir, since).unwrap_or(0);
+        let level = if crashes >= 5 { HealthLevel::Red }
+                    else if crashes >= 2 { HealthLevel::Yellow }
                     else { HealthLevel::Green };
+        let planned = total.saturating_sub(crashes);
         DetectorReport {
             name: self.name().into(), level,
-            message: format!("{count} restart(s) in last 24h"),
-            value: Some(count as f64),
-            payload: json!({ "restart_count_24h": count }),
+            message: format!("{crashes} unclean restart(s) in last 24h ({planned} planned)"),
+            value: Some(crashes as f64),
+            payload: json!({ "restart_count_24h": total, "crash_count_24h": crashes, "planned_24h": planned }),
             auto_action_eligible: false,
             analytics: None,
         }

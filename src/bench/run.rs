@@ -442,5 +442,5 @@ fn build_provider_for(
                 format!("--model override not supported for provider '{other}'"))),
         }
     }
-    crate::gateway::builder::build_provider_chain(&c)
+    crate::gateway::builder::build_provider_chain(&c, None)
 }

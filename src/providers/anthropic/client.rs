@@ -224,8 +224,10 @@ impl AnthropicProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body   = response.text().await.unwrap_or_default();
+            let detail = crate::providers::errors::provider_error_detail(&body);
+            warn!("anthropic: {status} — {detail}");
             return Err(crate::MiraError::ProviderError(
-                format!("anthropic: {status} — {body}")
+                format!("anthropic: {status} — {detail}")
             ));
         }
 

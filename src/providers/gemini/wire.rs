@@ -491,6 +491,24 @@ mod tests {
     fn assistant(s: &str) -> ChatMessage { ChatMessage::assistant(s) }
 
     #[test]
+    fn sanitizer_output_is_gemini_clean_conformance() {
+        use crate::tools::schema_lint::residual_for_gemini;
+        // Real shapes that 400'd Gemini before the sanitizer. After sanitizing,
+        // none may retain a keyword Gemini rejects (checked recursively).
+        let schemas = [
+            json!({"type":"object","additionalProperties":false,"properties":{"from":{"type":["string","integer"]}}}),
+            json!({"type":"object","properties":{"enabled":{"type":"boolean"}},"anyOf":[{"required":["enabled"]}]}),
+            json!({"type":"object","properties":{"x":{"type":"string","additionalProperties":false}}}),
+            json!({"type":"object","properties":{"tags":{"type":"array","items":{"type":"string","$ref":"#/x"}}}}),
+        ];
+        for s in schemas {
+            let cleaned = sanitize_schema_for_gemini(&s);
+            let residual = residual_for_gemini(&cleaned);
+            assert!(residual.is_empty(), "residual {residual:?} after sanitizing {s}");
+        }
+    }
+
+    #[test]
     fn gemini_sanitize_drops_additionalproperties_recursively() {
         let schema = json!({
             "type": "object",

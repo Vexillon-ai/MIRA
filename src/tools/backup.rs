@@ -98,7 +98,7 @@ impl Tool for BackupCreateTool {
     fn tier(&self) -> Tier { Tier::Pure }
 
     fn args_schema(&self) -> Value {
-        json!({ "type": "object", "properties": {}, "additionalProperties": false })
+        json!({ "type": "object", "properties": {} })
     }
 
     async fn execute(&self, _args: ToolArgs) -> Result<ToolResult, MiraError> {
@@ -144,7 +144,7 @@ impl Tool for BackupListTool {
     fn tier(&self) -> Tier { Tier::Pure }
 
     fn args_schema(&self) -> Value {
-        json!({ "type": "object", "properties": {}, "additionalProperties": false })
+        json!({ "type": "object", "properties": {} })
     }
 
     async fn execute(&self, _args: ToolArgs) -> Result<ToolResult, MiraError> {
@@ -213,7 +213,6 @@ impl Tool for BackupRestoreTool {
     fn args_schema(&self) -> Value {
         json!({
             "type": "object",
-            "additionalProperties": false,
             "required": ["filename", "confirm"],
             "properties": {
                 "filename": {

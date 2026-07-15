@@ -547,6 +547,23 @@ mod tests {
     fn assistant(s: &str) -> ChatMessage { ChatMessage::assistant(s) }
 
     #[test]
+    fn sanitizer_output_is_anthropic_clean_conformance() {
+        use crate::tools::schema_lint::residual_for_anthropic;
+        // Real shapes that 400'd Anthropic before the sanitizer. After
+        // sanitizing, none may retain a top-level combinator.
+        let schemas = [
+            json!({"type":"object","properties":{"enabled":{"type":"boolean"}},"anyOf":[{"required":["enabled"]},{"required":["hour"]}]}),
+            json!({"type":"object","oneOf":[{"properties":{"a":{"type":"string"}}}]}),
+            json!({"allOf":[{"properties":{"b":{"type":"integer"}}}]}),
+        ];
+        for s in schemas {
+            let cleaned = sanitize_input_schema(&s);
+            let residual = residual_for_anthropic(&cleaned);
+            assert!(residual.is_empty(), "residual {residual:?} after sanitizing {s}");
+        }
+    }
+
+    #[test]
     fn sanitize_strips_top_level_anyof_and_keeps_properties() {
         // The real companion_briefing_set shape that made Anthropic 400.
         let schema = json!({

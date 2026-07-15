@@ -83,7 +83,7 @@ use crate::server::handlers::{
         finalize as onboarding_finalize, get_state as onboarding_state, post_complete_chat,
         reset_onboarding, restart_group, start_onboarding, DataDir,
     },
-    providers::{openrouter_models, provider_catalog, providers_health, providers_models},
+    providers::{openrouter_models, provider_catalog, provider_test, providers_health, providers_models},
     sessions::{evict_session, list_sessions},
     status::status_handler,
     stt::{status as stt_status, transcribe as stt_transcribe},
@@ -731,6 +731,7 @@ pub fn build_router(
             .route("/api/providers/models", get(providers_models))
             .route("/api/providers/openrouter/models", get(openrouter_models))
             .route("/api/providers/{slug}/catalog", get(provider_catalog))
+            .route("/api/providers/{slug}/test", post(provider_test))
             // Status
             .route("/api/status", get(status_handler))
             // Host hardware probe (K2 / Q2 #10) — GPU + CUDA/Vulkan detection

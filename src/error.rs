@@ -26,8 +26,8 @@ pub enum MiraError {
     #[error("Max iterations reached without completion")]
     MaxIterationsReached,
     
-    #[error("All providers unavailable")]
-    AllProvidersUnavailable,
+    #[error("All providers unavailable — {0}")]
+    AllProvidersUnavailable(String),
     
     #[error("Provider not found: {0}")]
     ProviderNotFound(ProviderId),
