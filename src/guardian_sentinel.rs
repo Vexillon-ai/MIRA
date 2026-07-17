@@ -171,6 +171,66 @@ fn down_message(health: Option<&str>) -> String {
     }
 }
 
+/// Hard bound on the standalone triage LLM call. A down-alarm was already
+/// detected over several probe intervals, so a short reasoning delay is fine —
+/// but never let a slow/unreachable model stall the alarm: on timeout we fall
+/// back to the deterministic message.
+const LLM_TRIAGE_TIMEOUT_SECS: u64 = 25;
+
+/// The user-turn prompt for standalone triage. Pure — unit-tested. The health
+/// context is pre-fetched (2a) and handed to the model, so this first cut needs
+/// no tool loop; the model reasons over what it's given.
+fn triage_prompt(health: &str, misses: u32, url: &str) -> String {
+    let health = if health.trim().is_empty() {
+        "unknown (no recent health snapshot on disk)"
+    } else {
+        health.trim()
+    };
+    format!(
+        "You are watching over MIRA — the household's assistant — and it has just become \
+         unreachable: {misses} consecutive failed health checks at {url}. Its last known health \
+         was: {health} In one or two calm, clear sentences, tell the household what appears to be \
+         wrong and the single most useful next step to get MIRA back. Do not speculate beyond the \
+         evidence. Begin with \"MIRA-Guardian:\"."
+    )
+}
+
+/// Increment 2b(i) — run a REAL Guardian triage turn **in the sentinel process**,
+/// independent of the (down) MIRA. Builds the Guardian's own local provider from
+/// config (fail-closed local-only per the tier's `model_check`) and does a single
+/// generation over the pre-fetched health context — no tool loop needed for this
+/// first cut, since the sentinel already reads the health snapshot (2a). Returns
+/// `None` (→ caller falls back to the deterministic alarm) when no local model is
+/// configured/allowed, the provider won't build, or the call errors/times out —
+/// so this never weakens the guarantee that a down-alarm still fires.
+async fn llm_triage(config: &MiraConfig, health: &str, misses: u32, url: &str) -> Option<String> {
+    use crate::agent::guardian::{self, GuardianTier};
+    // Fail-closed: the triage tier must resolve to a LOCAL model, or we don't
+    // reach for it at all (never egress what we're guarding).
+    let chk = guardian::model_check_for(config, GuardianTier::Triage);
+    if !chk.allowed {
+        warn!("guardian-watch: standalone triage skipped (fail-closed) — {}", chk.reason);
+        return None;
+    }
+    let (prov, model) = guardian::tier_model(config, GuardianTier::Triage);
+    let provider = match crate::agent::named_agent::build_provider_for_alias(config, &prov, model.as_deref()) {
+        Ok(p)  => p,
+        Err(e) => { warn!("guardian-watch: triage provider build failed: {e}"); return None; }
+    };
+    let messages = vec![
+        crate::types::ChatMessage::system(guardian::definition().system_prompt),
+        crate::types::ChatMessage::user(triage_prompt(health, misses, url)),
+    ];
+    let opts = crate::types::GenerationOptions { max_tokens: Some(300), ..Default::default() };
+    let fut = provider.generate(&messages, &opts);
+    match tokio::time::timeout(std::time::Duration::from_secs(LLM_TRIAGE_TIMEOUT_SECS), fut).await {
+        Ok(Ok(r)) if !r.content.trim().is_empty() => Some(r.content.trim().to_string()),
+        Ok(Ok(_))  => None,
+        Ok(Err(e)) => { warn!("guardian-watch: standalone triage call failed: {e}"); None }
+        Err(_)     => { warn!("guardian-watch: standalone triage timed out after {LLM_TRIAGE_TIMEOUT_SECS}s"); None }
+    }
+}
+
 /// Run the sentinel loop. Blocks (a long-running process) until the task is
 /// cancelled / the process exits. A no-op (returns immediately) when
 /// `guardian.process.enabled` is false.
@@ -235,7 +295,13 @@ pub async fn run(config: Arc<MiraConfig>) -> Result<(), MiraError> {
                 let hsum = health.as_ref()
                     .and_then(|h| h.latest().ok().flatten())
                     .and_then(|snap| health_summary(Some(&snap), now));
-                let msg = down_message(hsum.as_deref());
+                // 2b(i): try a REAL standalone Guardian triage (own local model,
+                // out-of-process). Fall back to the deterministic alarm if no
+                // local model is configured/reachable — the alarm always fires.
+                let msg = match llm_triage(&config, hsum.as_deref().unwrap_or(""), state.misses(), &url).await {
+                    Some(t) => { info!("guardian-watch: delivering standalone-triaged alarm"); t }
+                    None    => down_message(hsum.as_deref()),
+                };
                 error!("guardian-watch: MIRA DOWN ({} failed probes of {url}) — {msg}", state.misses());
                 push_notice(webpush.as_ref(), notify_uid.as_deref(), &msg).await;
                 // Audit the down-alarm. Safe to write the shared HMAC chain here:
@@ -371,6 +437,21 @@ mod tests {
         assert_eq!(down_message(None), DOWN_MSG);
         let m = down_message(Some("Its last health check 2h ago showed Red: db.integrity."));
         assert!(m.contains("MIRA appears to be down") && m.contains("Red: db.integrity"));
+    }
+
+    #[test]
+    fn triage_prompt_includes_context_and_handles_empty() {
+        let p = triage_prompt(
+            "Its last health check 2h ago showed Red: db.integrity.", 3,
+            "http://127.0.0.1:8087/health",
+        );
+        assert!(p.contains("MIRA-Guardian"), "{p}");
+        assert!(p.contains("3 consecutive"));
+        assert!(p.contains("http://127.0.0.1:8087/health"));
+        assert!(p.contains("db.integrity"));
+        // Empty health → a placeholder, never a dangling "was: ".
+        let p2 = triage_prompt("   ", 1, "http://x/health");
+        assert!(p2.contains("no recent health snapshot"), "{p2}");
     }
 
     #[test]
