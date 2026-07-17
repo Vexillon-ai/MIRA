@@ -200,6 +200,10 @@ _MIRA-Guardian — the built-in, code-defined system watchdog agent. Identity (p
 - **`guardian.isolation_dry_run`** (boolean) — Isolation autonomy dry-run. When true (default), on detecting it can't reach you the Guardian only logs + audits what it *would* do, without executing. Set false to permit real autonomous remediation under isolation. Only relevant in `active` mode.
 - **`guardian.isolation_grace_secs`** (integer; min 0) — Grace period after a failed approval delivery before the Guardian may act autonomously (a window for any web-side decision). Default 180. Only relevant when `isolation_dry_run = false`.
 - **`guardian.provision_model`** (string) — Ollama-registry model the provisioning flow pulls + binds the Guardian to when no local provider is configured, so a fresh install runs the Guardian without manual LLM setup. Default `qwen2.5:3b-instruct`.
+- **`guardian.routine_provider`** (string or null) — Tiered model: the local provider (`lmstudio`/`ollama`) for the light always-on **routine** tier used on low-severity ticks. Empty/absent = fall back to the `guardian` llm-alias, then the primary provider. Still subject to the fail-closed local-only check (cloud refused).
+- **`guardian.routine_model`** (string or null) — Model id on `routine_provider` for the routine tier. Empty/absent = the provider's/alias's default model.
+- **`guardian.triage_provider`** (string or null) — Tiered model: the local provider (`lmstudio`/`ollama`) for the stronger **triage** tier, reached only when a detector goes red. Empty/absent = fall back to the `guardian` llm-alias, then the primary provider. Still subject to the fail-closed local-only check (cloud refused).
+- **`guardian.triage_model`** (string or null) — Model id on `triage_provider` for the triage tier. Empty/absent = the provider's/alias's default model.
 
 ## logging
 

@@ -347,30 +347,35 @@ impl AgentCore {
     // local. Used by the proactive watch loop (P3) and any internal Guardian
     // invocation. Memory/wiki hooks are skipped — Guardian turns aren't the
     // user's conversation.
-    pub async fn run_guardian_turn(self: &Arc<Self>, user_id: &str, task: &str)
-        -> Result<String, MiraError>
+    pub async fn run_guardian_turn(
+        self: &Arc<Self>, user_id: &str, task: &str, tier: crate::agent::guardian::GuardianTier,
+    ) -> Result<String, MiraError>
     {
-        use crate::agent::guardian;
+        use crate::agent::guardian::{self, GuardianTier};
         let gmode = guardian::mode(&self.config);
         if gmode == guardian::GuardianMode::Off {
             return Err(MiraError::ConfigError("guardian disabled (guardian.mode=off)".into()));
         }
-        let chk = guardian::model_check(&self.config);
+        // Fail-closed local-only check for THIS tier (not just the aggregate).
+        let chk = guardian::model_check_for(&self.config, tier);
         if !chk.allowed {
             return Err(MiraError::ConfigError(format!("guardian refused (fail-closed): {}", chk.reason)));
         }
-        // Build the Guardian's *local* provider from its alias (or primary
-        // fallback — already confirmed local by `model_check`).
-        let (prov, model) = self.config.agent.llm_aliases.get(guardian::GUARDIAN_ALIAS)
-            .map(|a| (a.provider.clone(), a.model.clone()))
-            .unwrap_or_else(|| (self.config.primary_provider.clone(), None));
+        // Build the Guardian's *local* provider for this tier (explicit tier
+        // model → `guardian` alias → primary; already confirmed local above).
+        let (prov, model) = guardian::tier_model(&self.config, tier);
         let provider = crate::agent::named_agent::build_provider_for_alias(
             &self.config, &prov, model.as_deref(),
         )?;
 
-        let def = guardian::definition();
+        // Prompt matches the tier: the full charter governs triage; the
+        // condensed operational prompt runs the light routine tier.
+        let system_prompt = match tier {
+            GuardianTier::Triage  => guardian::definition().system_prompt,
+            GuardianTier::Routine => guardian::routine_system_prompt().to_string(),
+        };
         let ctx = TurnContext {
-            system_prompt_override: Some(def.system_prompt.clone()),
+            system_prompt_override: Some(system_prompt),
             // Ring-0 always; the Ring-1 propose tool is added only in active mode.
             allowed_tool_names:     Some(guardian::tools_for_mode(gmode)),
             skip_memory_hooks:      true,

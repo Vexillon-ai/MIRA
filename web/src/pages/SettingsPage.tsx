@@ -2011,6 +2011,46 @@ function GuardianTab({
         </Field>
       </Section>
 
+      <Section title="Model tiers">
+        <p className={styles.sectionDesc}>
+          The Guardian runs a <strong>tiered</strong> local model: a light
+          always-on model for routine, low-severity ticks, escalating to a
+          stronger model only for real triage (when a detector goes red). Leave a
+          tier empty to reuse the Guardian's default model (the <code>guardian</code>
+          alias, else the primary provider). Both tiers stay
+          <strong> fail-closed local-only</strong> — a cloud provider is refused.
+          Changes take effect on the next service restart.
+        </p>
+        <Field label="Routine provider" desc="Light always-on model for routine ticks. Empty = use the Guardian's default (guardian alias / primary).">
+          <SelectInput
+            value={str('guardian.routine_provider', '')}
+            onChange={(v) => set('guardian.routine_provider', v)}
+            options={[
+              { value: '',         label: 'Default (guardian alias / primary)' },
+              { value: 'lmstudio', label: 'LM Studio' },
+              { value: 'ollama',   label: 'Ollama' },
+            ]}
+          />
+        </Field>
+        <Field label="Routine model" desc="Model id on the routine provider. Empty = the provider's/alias's default model.">
+          <TextInput value={str('guardian.routine_model', '')} onChange={(v) => set('guardian.routine_model', v)} placeholder="qwen2.5:3b-instruct" mono />
+        </Field>
+        <Field label="Triage provider" desc="Stronger model reached only when a detector goes red. Empty = use the Guardian's default (guardian alias / primary).">
+          <SelectInput
+            value={str('guardian.triage_provider', '')}
+            onChange={(v) => set('guardian.triage_provider', v)}
+            options={[
+              { value: '',         label: 'Default (guardian alias / primary)' },
+              { value: 'lmstudio', label: 'LM Studio' },
+              { value: 'ollama',   label: 'Ollama' },
+            ]}
+          />
+        </Field>
+        <Field label="Triage model" desc="Model id on the triage provider. Empty = the provider's/alias's default model.">
+          <TextInput value={str('guardian.triage_model', '')} onChange={(v) => set('guardian.triage_model', v)} placeholder="a stronger local model" mono />
+        </Field>
+      </Section>
+
       <Section title="Isolation autonomy">
         <p className={styles.sectionDesc}>
           Only relevant in <strong>active</strong> mode. If the Guardian detects it

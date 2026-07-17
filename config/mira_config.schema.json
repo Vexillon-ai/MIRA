@@ -1649,6 +1649,22 @@
         "provision_model": {
           "description": "Ollama-registry model the provisioning flow (P2b) pulls + binds the Guardian to when no local provider is configured, so a fresh install can run the Guardian without manual LLM setup. Default 'qwen2.5:3b-instruct'.",
           "type": "string"
+        },
+        "routine_provider": {
+          "description": "Tiered model (guardian-scope §6): the local provider (lmstudio/ollama) for the light always-on routine tier used on low-severity ticks. Empty/absent = fall back to the 'guardian' llm-alias, then the primary provider. Still subject to the fail-closed local-only check (cloud refused).",
+          "type": ["string", "null"]
+        },
+        "routine_model": {
+          "description": "Tiered model (guardian-scope §6): the model id on 'routine_provider' for the light routine tier. Empty/absent = the provider's/alias's default model.",
+          "type": ["string", "null"]
+        },
+        "triage_provider": {
+          "description": "Tiered model (guardian-scope §6): the local provider (lmstudio/ollama) for the stronger triage tier, reached only when a detector goes Red. Empty/absent = fall back to the 'guardian' llm-alias, then the primary provider. Still subject to the fail-closed local-only check (cloud refused).",
+          "type": ["string", "null"]
+        },
+        "triage_model": {
+          "description": "Tiered model (guardian-scope §6): the model id on 'triage_provider' for the stronger triage tier. Empty/absent = the provider's/alias's default model.",
+          "type": ["string", "null"]
         }
       }
     },

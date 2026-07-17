@@ -1458,6 +1458,29 @@ pub struct GuardianConfig {
     // reliable-tool-calling default; override to taste.
     #[serde(default = "default_guardian_provision_model")]
     pub provision_model: String,
+
+    // ── Tiered model (design-docs/guardian-scope.md §6) ──────────────────────
+    // The Guardian runs a *tiered* local model: a light always-on model for
+    // routine ticks (low-severity notes), escalating to a stronger model only
+    // for real triage (a Red detector). Each tier is (provider, model); when a
+    // tier's provider is unset/empty it falls back to the `guardian` llm-alias,
+    // then the primary provider — so existing installs (alias only) are
+    // unchanged. Both tiers are still subject to the fail-closed local-only
+    // `model_check` (cloud is refused). Provider must be a local one
+    // (`lmstudio`/`ollama`).
+    //
+    // Routine tier — light model for low-severity ticks. Empty = use the
+    // `guardian` alias / primary.
+    #[serde(default)]
+    pub routine_provider: Option<String>,
+    #[serde(default)]
+    pub routine_model: Option<String>,
+    // Triage tier — stronger model reached only when a detector goes Red.
+    // Empty = use the `guardian` alias / primary.
+    #[serde(default)]
+    pub triage_provider: Option<String>,
+    #[serde(default)]
+    pub triage_model: Option<String>,
 }
 
 impl Default for GuardianConfig {
@@ -1468,6 +1491,10 @@ impl Default for GuardianConfig {
             isolation_dry_run: true,
             isolation_grace_secs: default_guardian_isolation_grace(),
             provision_model: default_guardian_provision_model(),
+            routine_provider: None,
+            routine_model: None,
+            triage_provider: None,
+            triage_model: None,
         }
     }
 }
