@@ -1481,6 +1481,14 @@ pub struct GuardianConfig {
     pub triage_provider: Option<String>,
     #[serde(default)]
     pub triage_model: Option<String>,
+
+    // ── Separate-process independence (design-docs/guardian-separate-process.md) ─
+    // The out-of-process liveness sentinel (`mira guardian-watch`): a sibling
+    // process that watches whether MIRA itself is alive and raises a DIRECT
+    // alarm if MIRA goes down — the one failure the co-resident watch can't
+    // catch (it shares MIRA's fate). Off by default.
+    #[serde(default)]
+    pub process: GuardianProcessConfig,
 }
 
 impl Default for GuardianConfig {
@@ -1495,6 +1503,7 @@ impl Default for GuardianConfig {
             routine_model: None,
             triage_provider: None,
             triage_model: None,
+            process: GuardianProcessConfig::default(),
         }
     }
 }
@@ -1503,6 +1512,51 @@ fn default_guardian_mode() -> String { "off".to_owned() }
 fn default_guardian_watch_interval() -> u64 { 900 }
 fn default_guardian_isolation_grace() -> u64 { 180 }
 fn default_guardian_provision_model() -> String { "qwen2.5:3b-instruct".to_owned() }
+
+/// The out-of-process Guardian liveness sentinel (`mira guardian-watch`). A
+/// separate supervised process that probes MIRA's `/health` and, if MIRA is
+/// unreachable for a sustained window, delivers a DIRECT web-push alarm to the
+/// household (cold from the shared data dir — no dependency on the down MIRA).
+/// Observe-and-alarm only in this increment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardianProcessConfig {
+    // Master switch for the sentinel process. Off by default; the sentinel is a
+    // separate service the operator enables + supervises.
+    #[serde(default)]
+    pub enabled: bool,
+    // How often (seconds) to probe MIRA's liveness. Default 30; minimum 5.
+    #[serde(default = "default_sentinel_probe_interval")]
+    pub probe_interval_secs: u64,
+    // Consecutive failed probes before declaring MIRA down + alarming. Default 3
+    // (so a normal restart, which recovers within one window, doesn't alarm).
+    #[serde(default = "default_sentinel_down_after")]
+    pub down_after_failures: u32,
+    // Explicit liveness URL to probe. Empty/absent = derive
+    // `http://127.0.0.1:<server.port>/health` (the unauthenticated readiness
+    // route). Override for a non-default bind / reverse-proxy.
+    #[serde(default)]
+    pub probe_url: Option<String>,
+    // The user id whose registered push devices receive the "MIRA is down"
+    // alarm. Empty/absent = no push target (the sentinel still logs + audits);
+    // set it to the household admin so the phone actually buzzes.
+    #[serde(default)]
+    pub notify_user_id: Option<String>,
+}
+
+impl Default for GuardianProcessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            probe_interval_secs: default_sentinel_probe_interval(),
+            down_after_failures: default_sentinel_down_after(),
+            probe_url: None,
+            notify_user_id: None,
+        }
+    }
+}
+
+fn default_sentinel_probe_interval() -> u64 { 30 }
+fn default_sentinel_down_after() -> u32 { 3 }
 
 // Temporal knowledge-graph memory (see `design-docs/graph-memory.md`). Additive and
 // **off by default**: when enabled, the post-turn extractor also writes typed,

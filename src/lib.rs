@@ -25,6 +25,7 @@ pub mod db;
 pub mod error;
 pub mod events;
 pub mod gateway;
+pub mod guardian_sentinel;
 pub mod hardware;
 pub mod health;
 pub mod discord;

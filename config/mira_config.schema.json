@@ -1665,6 +1665,35 @@
         "triage_model": {
           "description": "Tiered model (guardian-scope §6): the model id on 'triage_provider' for the stronger triage tier. Empty/absent = the provider's/alias's default model.",
           "type": ["string", "null"]
+        },
+        "process": {
+          "description": "Out-of-process liveness sentinel (mira guardian-watch): a separate supervised process that probes MIRA's /health and raises a direct web-push alarm if MIRA goes down. Off by default.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Master switch for the sentinel process. Off by default; the sentinel is a separate service the operator enables + supervises.",
+              "type": "boolean"
+            },
+            "probe_interval_secs": {
+              "description": "How often (seconds) the sentinel probes MIRA's liveness. Default 30; minimum 5.",
+              "type": "integer",
+              "minimum": 5
+            },
+            "down_after_failures": {
+              "description": "Consecutive failed probes before declaring MIRA down + alarming. Default 3, so a normal restart doesn't alarm.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "probe_url": {
+              "description": "Explicit liveness URL to probe. Empty/absent = derive http://127.0.0.1:<server.port>/health. Override for a non-default bind / reverse-proxy.",
+              "type": ["string", "null"]
+            },
+            "notify_user_id": {
+              "description": "User id whose registered push devices receive the 'MIRA is down' alarm. Empty/absent = no push target (sentinel still logs + audits). Set to the household admin so the phone buzzes.",
+              "type": ["string", "null"]
+            }
+          }
         }
       }
     },

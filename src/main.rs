@@ -382,6 +382,13 @@ pub enum Command {
         #[command(subcommand)]
         action: BenchAction,
     },
+    // Out-of-process MIRA-Guardian liveness sentinel. A separate supervised
+    // process that probes the main MIRA server's /health and raises a direct
+    // web-push alarm if MIRA goes down — the one failure the co-resident watch
+    // can't catch (it shares MIRA's fate). Driven by `guardian.process.*` config
+    // (off by default). Use the global `--data-dir` to point at MIRA's data dir.
+    // See design-docs/guardian-separate-process.md.
+    GuardianWatch,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1143,6 +1150,9 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
             Command::Tts     { action } => run_tts_command(&config, action).await,
             Command::Wiki    { action } => run_wiki_command(&config, action),
             Command::Bench   { action } => run_bench_command(&config, action).await,
+            Command::GuardianWatch => mira::guardian_sentinel::run(std::sync::Arc::clone(&config))
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>),
             // Install/Uninstall, service-control, upgrade, and skill commands
             // are all dispatched before config load above.
             Command::Install { .. }

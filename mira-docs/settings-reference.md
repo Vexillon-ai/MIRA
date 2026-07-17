@@ -204,6 +204,11 @@ _MIRA-Guardian — the built-in, code-defined system watchdog agent. Identity (p
 - **`guardian.routine_model`** (string or null) — Model id on `routine_provider` for the routine tier. Empty/absent = the provider's/alias's default model.
 - **`guardian.triage_provider`** (string or null) — Tiered model: the local provider (`lmstudio`/`ollama`) for the stronger **triage** tier, reached only when a detector goes red. Empty/absent = fall back to the `guardian` llm-alias, then the primary provider. Still subject to the fail-closed local-only check (cloud refused).
 - **`guardian.triage_model`** (string or null) — Model id on `triage_provider` for the triage tier. Empty/absent = the provider's/alias's default model.
+- **`guardian.process.enabled`** (boolean) — Master switch for the out-of-process liveness sentinel (`mira guardian-watch`), a separate supervised process that probes MIRA's `/health` and raises a direct web-push alarm if MIRA goes down. Off by default.
+- **`guardian.process.probe_interval_secs`** (integer; min 5) — How often the sentinel probes MIRA's liveness. Default 30.
+- **`guardian.process.down_after_failures`** (integer; min 1) — Consecutive failed probes before declaring MIRA down and alarming. Default 3 (so a normal restart doesn't alarm).
+- **`guardian.process.probe_url`** (string or null) — Explicit liveness URL. Empty/absent = derive `http://127.0.0.1:<server.port>/health`. Override for a non-default bind / reverse-proxy.
+- **`guardian.process.notify_user_id`** (string or null) — User id whose registered push devices receive the "MIRA is down" alarm. Empty/absent = no push target (sentinel still logs). Set to the household admin so the phone buzzes.
 
 ## logging
 

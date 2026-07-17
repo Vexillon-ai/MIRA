@@ -2051,6 +2051,34 @@ function GuardianTab({
         </Field>
       </Section>
 
+      <Section title="Liveness sentinel (separate process)">
+        <p className={styles.sectionDesc}>
+          The Guardian's watch loop runs <em>inside</em> MIRA, so it can't catch
+          the one failure that matters most — <strong>MIRA itself going down</strong>.
+          The optional <strong>liveness sentinel</strong> is a separate process
+          (<code>mira guardian-watch</code>) that probes MIRA's <code>/health</code>
+          and, if MIRA is unreachable for a sustained window, sends a
+          <strong> direct web-push alarm</strong> to your device — no dependency on
+          the down MIRA. Observe-and-alarm only. You run it as its own service
+          (e.g. a second systemd unit) alongside MIRA; these settings drive it.
+        </p>
+        <Field label="Enable sentinel" desc="Master switch. The sentinel is a separate service you supervise; this only tells it (and the UI) it's meant to run.">
+          <Toggle value={bool('guardian.process.enabled', false)} onChange={(v) => set('guardian.process.enabled', v)} />
+        </Field>
+        <Field label="Probe interval (seconds)" desc="How often the sentinel probes MIRA's /health. Minimum 5; default 30.">
+          <NumberInput value={num('guardian.process.probe_interval_secs', 30)} onChange={(v) => set('guardian.process.probe_interval_secs', v)} min={5} max={3600} />
+        </Field>
+        <Field label="Down after N misses" desc="Consecutive failed probes before declaring MIRA down and alarming. Default 3 — high enough that a normal restart (which recovers within a window) doesn't alarm.">
+          <NumberInput value={num('guardian.process.down_after_failures', 3)} onChange={(v) => set('guardian.process.down_after_failures', v)} min={1} max={100} />
+        </Field>
+        <Field label="Alarm push recipient (user id)" desc="Whose registered push devices get the 'MIRA is down' alarm. Leave empty and the sentinel only logs (no push). Set it to the household admin so a phone actually buzzes.">
+          <TextInput value={str('guardian.process.notify_user_id', '')} onChange={(v) => set('guardian.process.notify_user_id', v)} placeholder="(user id)" mono />
+        </Field>
+        <Field label="Probe URL (optional)" desc="Override the liveness URL. Empty = http://127.0.0.1:<server port>/health. Set for a non-default bind or reverse proxy.">
+          <TextInput value={str('guardian.process.probe_url', '')} onChange={(v) => set('guardian.process.probe_url', v)} placeholder="http://127.0.0.1:8087/health" mono />
+        </Field>
+      </Section>
+
       <Section title="Isolation autonomy">
         <p className={styles.sectionDesc}>
           Only relevant in <strong>active</strong> mode. If the Guardian detects it
