@@ -127,11 +127,49 @@ async fn push_notice(
     }
 }
 
-/// The alarm message on MIRA going down.
+/// The base alarm message on MIRA going down. [`down_message`] appends the
+/// last-known health summary when one is available.
 const DOWN_MSG: &str =
     "MIRA appears to be down — the assistant isn't responding. Someone may need to check the server.";
 /// The reassurance message on recovery.
 const RECOVER_MSG: &str = "MIRA is back up — the assistant is responding again.";
+
+/// Humanize an age in seconds for alarm text: `2h` / `45m` / `30s`.
+fn humanize_age(secs: i64) -> String {
+    let s = secs.max(0);
+    if s >= 3600 { format!("{}h", s / 3600) }
+    else if s >= 60 { format!("{}m", s / 60) }
+    else { format!("{s}s") }
+}
+
+/// A one-line summary of MIRA's last-known health for the down-alarm, or `None`
+/// when there's no snapshot. Pure — unit-tested. When non-green, lists up to 4
+/// triggered detectors (sorted, `+N more` beyond that).
+fn health_summary(snap: Option<&crate::health::HealthSnapshot>, now: i64) -> Option<String> {
+    let snap = snap?;
+    let ago = humanize_age(now - snap.taken_at);
+    if matches!(snap.worst_level(), crate::health::HealthLevel::Green) {
+        return Some(format!("Its last health check {ago} ago was all-green."));
+    }
+    let mut det: Vec<&str> = snap.reports.iter()
+        .filter(|r| !matches!(r.level, crate::health::HealthLevel::Green))
+        .map(|r| r.name.as_str())
+        .collect();
+    det.sort_unstable();
+    let shown = det.len().min(4);
+    let more  = det.len() - shown;
+    let list  = det[..shown].join(", ");
+    let tail  = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+    Some(format!("Its last health check {ago} ago showed {:?}: {list}{tail}.", snap.worst_level()))
+}
+
+/// The MIRA-down alarm text, optionally enriched with the last-known health.
+fn down_message(health: Option<&str>) -> String {
+    match health {
+        Some(h) => format!("{DOWN_MSG} {h}"),
+        None    => DOWN_MSG.to_string(),
+    }
+}
 
 /// Run the sentinel loop. Blocks (a long-running process) until the task is
 /// cancelled / the process exits. A no-op (returns immediately) when
@@ -169,6 +207,14 @@ pub async fn run(config: Arc<MiraConfig>) -> Result<(), MiraError> {
         None,
     ).map_err(|e| warn!("guardian-watch: web-push unavailable: {e}")).ok();
 
+    // Read-only handle on MIRA's health snapshots, so a MIRA-down alarm can
+    // carry the last-known health state ("… last check 2h ago showed Red: …").
+    // Best-effort: absent/locked DB just means a plainer alarm. (2a — the
+    // out-of-process health-read plumbing the future triage turn builds on.)
+    let health = crate::health::store::HealthStore::open(&data_dir.join("health.db"))
+        .map_err(|e| warn!("guardian-watch: health store unavailable (alarms won't include last-known health): {e}"))
+        .ok();
+
     info!(
         "guardian-watch: probing {url} every {}s; MIRA declared down after {down_after} consecutive misses; \
          push target = {}",
@@ -184,11 +230,17 @@ pub async fn run(config: Arc<MiraConfig>) -> Result<(), MiraError> {
         let alive = probe(&client, &url).await;
         match state.observe(alive, down_after) {
             SentinelAction::RaiseAlarm => {
-                error!("guardian-watch: MIRA DOWN — {} consecutive failed probes of {url}", state.misses());
-                push_notice(webpush.as_ref(), notify_uid.as_deref(), DOWN_MSG).await;
+                // Enrich the alarm with MIRA's last-known health, if we can read it.
+                let now  = chrono::Utc::now().timestamp();
+                let hsum = health.as_ref()
+                    .and_then(|h| h.latest().ok().flatten())
+                    .and_then(|snap| health_summary(Some(&snap), now));
+                let msg = down_message(hsum.as_deref());
+                error!("guardian-watch: MIRA DOWN ({} failed probes of {url}) — {msg}", state.misses());
+                push_notice(webpush.as_ref(), notify_uid.as_deref(), &msg).await;
                 // Audit the down-alarm. Safe to write the shared HMAC chain here:
                 // MIRA is confirmed down, so it isn't concurrently writing.
-                audit_down(&data_dir, &url, state.misses());
+                audit_down(&data_dir, &url, state.misses(), hsum.as_deref());
             }
             SentinelAction::Recover => {
                 info!("guardian-watch: MIRA recovered — responding again at {url}");
@@ -208,10 +260,15 @@ pub async fn run(config: Arc<MiraConfig>) -> Result<(), MiraError> {
 /// Append a tamper-evident audit record for a down-alarm. Best-effort + isolated
 /// so an audit failure never stops the watch. Only called when MIRA is down
 /// (single-writer, so the HMAC chain stays ordered).
-fn audit_down(data_dir: &Path, url: &str, misses: u32) {
+fn audit_down(data_dir: &Path, url: &str, misses: u32, health: Option<&str>) {
     let Ok(store) = crate::agent::audit::AuditStore::open(&data_dir.join("agent_audit.db")) else {
         return;
     };
+    let mut detail = format!("{misses} consecutive failed probes of {url}");
+    if let Some(h) = health {
+        detail.push_str(" — ");
+        detail.push_str(h);
+    }
     let _ = store.record(
         crate::agent::audit::guardian_agent_id(),
         None,
@@ -219,7 +276,7 @@ fn audit_down(data_dir: &Path, url: &str, misses: u32) {
             action_id:   format!("sentinel-down-{url}"),
             action_kind: "sentinel_liveness".to_string(),
             decision:    "mira_down".to_string(),
-            detail:      Some(format!("{misses} consecutive failed probes of {url}")),
+            detail:      Some(detail),
         },
     );
 }
@@ -260,6 +317,60 @@ mod tests {
         let mut s = SentinelState::default();
         assert_eq!(s.observe(false, 1), SentinelAction::RaiseAlarm);
         assert_eq!(s.observe(true, 1),  SentinelAction::Recover);
+    }
+
+    fn rep(name: &str, level: crate::health::HealthLevel) -> crate::health::DetectorReport {
+        crate::health::DetectorReport {
+            name: name.to_string(), level, message: String::new(), value: None,
+            payload: serde_json::Value::Null, auto_action_eligible: false, analytics: None,
+        }
+    }
+
+    #[test]
+    fn health_summary_lists_triggered_detectors_worst_first() {
+        use crate::health::{HealthSnapshot, HealthLevel, DetectorReport};
+        let snap = HealthSnapshot {
+            taken_at: 1000, duration_ms: 0,
+            reports: vec![
+                DetectorReport::green("proc.ok", "fine"),
+                rep("db.integrity", HealthLevel::Red),
+                rep("disk.free", HealthLevel::Yellow),
+            ],
+        };
+        let s = health_summary(Some(&snap), 1000 + 7200).unwrap(); // 2h later
+        assert!(s.contains("2h ago"), "{s}");
+        assert!(s.contains("Red"), "worst level shown: {s}");
+        assert!(s.contains("db.integrity") && s.contains("disk.free"));
+        assert!(!s.contains("proc.ok"), "green detectors omitted: {s}");
+    }
+
+    #[test]
+    fn health_summary_all_green_and_none() {
+        use crate::health::{HealthSnapshot, DetectorReport};
+        let snap = HealthSnapshot {
+            taken_at: 500, duration_ms: 0,
+            reports: vec![DetectorReport::green("a", "")],
+        };
+        let s = health_summary(Some(&snap), 500 + 90).unwrap(); // 90s → "1m"
+        assert!(s.contains("all-green"), "{s}");
+        assert!(s.contains("1m ago"), "{s}");
+        assert_eq!(health_summary(None, 0), None);
+    }
+
+    #[test]
+    fn humanize_age_units() {
+        assert_eq!(humanize_age(30), "30s");
+        assert_eq!(humanize_age(90), "1m");
+        assert_eq!(humanize_age(7200), "2h");
+        assert_eq!(humanize_age(-5), "0s");
+    }
+
+    #[test]
+    fn down_message_enriches_when_health_present() {
+        assert!(down_message(None).starts_with("MIRA appears to be down"));
+        assert_eq!(down_message(None), DOWN_MSG);
+        let m = down_message(Some("Its last health check 2h ago showed Red: db.integrity."));
+        assert!(m.contains("MIRA appears to be down") && m.contains("Red: db.integrity"));
     }
 
     #[test]
