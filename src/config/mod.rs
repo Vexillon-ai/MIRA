@@ -3668,6 +3668,15 @@ pub fn data_dir_env_override() -> Option<PathBuf> {
         .map(|v| expand_path(&v))
 }
 
+/// Process-wide lock any test that sets/clears `MIRA_DATA_DIR` must hold for the
+/// duration of its env mutation. `MIRA_DATA_DIR` is global mutable state, and
+/// cargo runs tests in parallel threads within one process — without this, a
+/// test asserting the default layout can observe an override another test set
+/// mid-run (and vice-versa). Acquire it as the first line of any such test:
+/// `let _env = crate::config::ENV_TEST_LOCK.lock().unwrap();`
+#[cfg(test)]
+pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // Expand a leading `~` to the home directory.
 pub fn expand_path(s: &str) -> PathBuf {
     if let Some(rest) = s.strip_prefix("~/") {
@@ -4820,6 +4829,7 @@ mod tests {
 
     #[test]
     fn data_dir_env_override_wins_over_config_field() {
+        let _env = ENV_TEST_LOCK.lock().unwrap();
         // The fix for the supervised-service data-dir divergence: MIRA_DATA_DIR
         // (set by the --data-dir flag / baked into the service launch) must win
         // over the config's `data_dir` field so the service reads the operator-

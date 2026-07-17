@@ -151,6 +151,15 @@ impl Tool for SpawnBackgroundTaskTool {
 
     fn tier(&self) -> Tier { Tier::System }
 
+    // Explicitly `User`-visible (not the implicit default) so it stays in the
+    // `chat` flow palette — the set `list_for_flow("chat")` hands to normal
+    // chat AND to the automation `Prompt` action. A scheduled automation the
+    // user builds must be able to spawn work; dropping this to `System` would
+    // silently make `tool_allowed` reject the call in those flows. `tier` above
+    // is `System` (what it *touches* — internal supervisor machinery); that is
+    // orthogonal to visibility (*who may call it*). Keep the two distinct.
+    fn visibility(&self) -> ToolVisibility { ToolVisibility::User }
+
     fn args_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -1253,6 +1262,45 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("get_task_result never reported completed");
+    }
+
+    /// Two regressions that keep automation-seeded conversations able to spawn
+    /// work: (1) the tool stays `User`-visible so it lands in the `chat` flow
+    /// palette automations run with, and (2) it hard-requires caller identity —
+    /// the reason `process_with_context` injects `_user_id` centrally.
+    #[tokio::test]
+    async fn spawn_tool_stays_user_visible_and_requires_identity() {
+        let dir = tempdir().unwrap();
+        let bus = Arc::new(EventBus::new());
+        let registry = Arc::new(AgentRegistry::new());
+        let sup = Arc::new(
+            Supervisor::new(Arc::clone(&registry)).with_event_bus(Arc::clone(&bus))
+        );
+        let store = Arc::new(
+            AutomationsStore::open(&dir.path().join("automations.db")).unwrap()
+        );
+        let config = Arc::new(MiraConfig::default());
+        let tool = SpawnBackgroundTaskTool::new(
+            Arc::clone(&sup), Arc::clone(&registry), Some(store), config,
+        );
+
+        // Flow guard: User-visible → part of `list_for_flow("chat")`, the set
+        // the automation `Prompt` action and normal chat both use. Flipping
+        // this to System would silently make automations unable to spawn work.
+        assert_eq!(tool.visibility(), ToolVisibility::User);
+
+        // Identity guard: no `_user_id` → refused before any work. This is the
+        // instant rejection automation-seeded convs used to hit, now prevented
+        // by central identity injection in `AgentCore::process_with_context`.
+        // The tool propagates this as `Err(MiraError)` (via `?`), which the tool
+        // loop turns into a soft failure to the model.
+        let err = tool.execute(json!({ "skill": "com.mira.test", "brief": "x" }))
+            .await
+            .expect_err("a call with no caller identity must be rejected");
+        assert!(
+            err.to_string().contains("caller identity"),
+            "rejection should name the missing caller identity; got: {err}",
+        );
     }
 
     /// Unknown skill → tool returns a clear failure rather than spawning

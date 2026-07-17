@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback, type KeyboardEvent } from 'react'
 import { useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import {
@@ -783,6 +783,18 @@ function AssistantCard({
 
 // ── Streaming card ────────────────────────────────────────────────────────────
 
+// Links the assistant surfaces (web-app/game URLs, doc links, references) open
+// in a NEW browser tab, so clicking one never navigates away from the MIRA chat.
+// This matters most for a built web-app link at `http://<id>.localhost:<port>/`,
+// which is a separate browser origin. `rel="noopener noreferrer"` stops the
+// opened page reaching back through `window.opener`. `node` is destructured off
+// so react-markdown's AST node isn't spread onto the DOM anchor.
+const MarkdownLink: Components['a'] = ({ href, children, node: _node, ...props }) => (
+  <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+    {children}
+  </a>
+)
+
 function StreamingMarkdownContent({ content }: { content: string }) {
   const segments = splitThinking(content)
   return (
@@ -790,7 +802,7 @@ function StreamingMarkdownContent({ content }: { content: string }) {
       {segments.map((seg, i) =>
         seg.type === 'thinking'
           ? <ThinkingBlock key={i} text={seg.text} streaming={!seg.complete} />
-          : <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>{seg.text}</ReactMarkdown>
+          : <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>{seg.text}</ReactMarkdown>
       )}
     </div>
   )
@@ -1314,6 +1326,7 @@ function MarkdownContent({ content }: { content: string }) {
       rehypePlugins={[rehypeHighlight]}
       urlTransform={safeUrlTransform}
       components={{
+        a: MarkdownLink,
         pre({ children }) {
           return <CodeBlock>{children}</CodeBlock>
         },

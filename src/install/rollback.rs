@@ -189,6 +189,9 @@ mod tests {
 
     #[test]
     fn save_list_and_prune_snapshots() {
+        // Serialize against every other test that touches MIRA_DATA_DIR (global
+        // env), so a parallel test can't observe this temp override or vice-versa.
+        let _env = crate::config::ENV_TEST_LOCK.lock().unwrap();
         // Point the data dir at a temp dir so we don't touch a real ~/.mira.
         let tmp = tempfile::tempdir().unwrap();
         // Safe in a single-threaded test; resolves rollback_root() → tmp/rollback.

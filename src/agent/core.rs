@@ -592,6 +592,28 @@ impl AgentCore {
             );
         }
 
+        // Trusted caller-identity injection. Tools like `spawn_background_task`
+        // hard-require `_user_id` (and read `_conversation_id` for delivery
+        // routing); the chat/onboarding handlers inject these explicitly, but
+        // every *other* entry point — automations firing a `Prompt` action,
+        // channel dispatchers — went through here without them, so a scheduled
+        // task that tried to spawn work was rejected instantly with "called
+        // without caller identity". Fill them centrally from the turn's
+        // authenticated `user_id` + `session_id` (== conversation id on every
+        // path) so identity follows the turn everywhere. `or_insert` keeps any
+        // value a caller set deliberately (chat/onboarding already pass the
+        // identical value, so this is a no-op for them).
+        if !user_id.is_empty() {
+            context.inject_tool_args
+                .entry("_user_id".to_string())
+                .or_insert_with(|| serde_json::Value::String(user_id.to_string()));
+        }
+        if !session_id.is_empty() {
+            context.inject_tool_args
+                .entry("_conversation_id".to_string())
+                .or_insert_with(|| serde_json::Value::String(session_id.to_string()));
+        }
+
         let (tx, rx) = mpsc::channel::<StreamEvent>(512);
 
         let session = self

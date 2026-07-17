@@ -190,6 +190,18 @@ impl TaskArtifactsStore {
         } else {
             dir
         };
+
+        // A coding build that named its single page something other than
+        // `index.html` (e.g. `game.html`, `snake.html`) would be invisible to
+        // the web-app server — which only serves `output/index.html` — so
+        // `list_web_apps`/`get_task_result` would surface no link and the
+        // `/a/<id>/` route would 404. If the build completed and left exactly
+        // one top-level `*.html` in `output/` with no `index.html`, promote it
+        // so the one deliverable is reachable. See [`promote_sole_html`].
+        if status == "completed" {
+            promote_sole_html(&final_dir.join("output"));
+        }
+
         Ok(Some(final_dir))
     }
 
@@ -296,6 +308,46 @@ pub struct FileEntry {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/// Make a single-page build reachable by the web-app server, which serves only
+/// `output/index.html`. If `output_dir` has no `index.html` but contains
+/// **exactly one** top-level `*.html` file, rename that file to `index.html`.
+///
+/// Deliberately conservative — a no-op when:
+///   * an `index.html` already exists (nothing to fix),
+///   * there are zero `*.html` files (not a web app), or
+///   * there are two or more (ambiguous — which is the entry point? don't
+///     guess and risk hiding the real one).
+/// Only top-level files are considered; a page nested under a subdir
+/// (`output/dist/app.html`) is left alone. Any IO error is logged and ignored —
+/// promotion is best-effort and must never fail finalize.
+fn promote_sole_html(output_dir: &Path) {
+    let index = output_dir.join("index.html");
+    if index.exists() {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(output_dir) else { return };
+    let mut htmls: Vec<PathBuf> = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        let is_html = p.is_file()
+            && p.extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x.eq_ignore_ascii_case("html"));
+        if is_html {
+            htmls.push(p);
+        }
+    }
+    if htmls.len() == 1 {
+        let sole = &htmls[0];
+        match std::fs::rename(sole, &index) {
+            Ok(())  => debug!("artifacts.finalize: promoted {} → index.html", sole.display()),
+            Err(e)  => warn!(
+                "artifacts.finalize: promote {} → index.html failed: {e}", sole.display()
+            ),
+        }
+    }
+}
 
 pub fn write_manifest(dir: &Path, m: &Manifest) -> Result<(), MiraError> {
     let json = serde_json::to_vec_pretty(m)
@@ -465,6 +517,54 @@ mod tests {
         let name = final_dir.file_name().unwrap().to_string_lossy().to_string();
         assert_eq!(name, "pong-game-modern_01234567");
         assert!(read_manifest(&final_dir).unwrap().status == "completed");
+    }
+
+    #[test]
+    fn finalize_promotes_sole_html_to_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskArtifactsStore::new(dir.path().to_path_buf());
+        let p = store.allocate("com.mira.claudecode", "abcdef0123456789", None, None, "snake").unwrap();
+        // The build wrote its one page as `snake.html`, not `index.html`.
+        std::fs::write(p.join("output/snake.html"), b"<canvas></canvas>").unwrap();
+
+        let final_dir = store.finalize("abcdef0123456789", "completed").unwrap().unwrap();
+        // Promoted: served path now exists, the odd name is gone.
+        assert!(final_dir.join("output/index.html").exists(), "sole html promoted to index.html");
+        assert!(!final_dir.join("output/snake.html").exists(), "original renamed, not copied");
+        assert_eq!(
+            std::fs::read(final_dir.join("output/index.html")).unwrap(),
+            b"<canvas></canvas>",
+            "content preserved across the rename",
+        );
+    }
+
+    #[test]
+    fn finalize_leaves_existing_index_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskArtifactsStore::new(dir.path().to_path_buf());
+        let p = store.allocate("com.mira.claudecode", "1111222233334444", None, None, "app").unwrap();
+        std::fs::write(p.join("output/index.html"), b"REAL").unwrap();
+        std::fs::write(p.join("output/other.html"), b"OTHER").unwrap();
+
+        let final_dir = store.finalize("1111222233334444", "completed").unwrap().unwrap();
+        // index.html present → no promotion, no clobber.
+        assert_eq!(std::fs::read(final_dir.join("output/index.html")).unwrap(), b"REAL");
+        assert!(final_dir.join("output/other.html").exists());
+    }
+
+    #[test]
+    fn finalize_does_not_guess_among_multiple_html() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskArtifactsStore::new(dir.path().to_path_buf());
+        let p = store.allocate("com.mira.claudecode", "aaaabbbbccccdddd", None, None, "multi").unwrap();
+        std::fs::write(p.join("output/a.html"), b"A").unwrap();
+        std::fs::write(p.join("output/b.html"), b"B").unwrap();
+
+        let final_dir = store.finalize("aaaabbbbccccdddd", "completed").unwrap().unwrap();
+        // Ambiguous → don't invent an index.html; leave both in place.
+        assert!(!final_dir.join("output/index.html").exists());
+        assert!(final_dir.join("output/a.html").exists());
+        assert!(final_dir.join("output/b.html").exists());
     }
 
     #[test]

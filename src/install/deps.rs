@@ -71,9 +71,18 @@ impl DepsManifest {
 }
 
 /// Where a dep gets extracted on disk. `~/.mira/deps/<name>/`.
+///
+/// Resolved via [`crate::config::resolve_state_path`], so when the process runs
+/// with a `--data-dir` / `MIRA_DATA_DIR` override — the case for a supervised
+/// service — the deps root follows the operator's data dir instead of being
+/// re-expanded against the *service account's* home. Without this a Windows
+/// LocalSystem service resolves `dirs::home_dir()` to
+/// `…\systemprofile\.mira\deps`, so an auto-installed CLI (`claude`, `opencode`)
+/// under the real user's `~/.mira/deps` is invisible and every spawn fails with
+/// "CLI not on PATH". With NO override (the normal same-user case) this is the
+/// unchanged `~/.mira/deps/<name>` layout.
 pub fn dep_install_dir(name: &str) -> Result<PathBuf, Box<dyn Error>> {
-    let home = dirs::home_dir().ok_or("could not determine home dir")?;
-    Ok(home.join(".mira").join("deps").join(name))
+    Ok(crate::config::resolve_state_path(&format!("~/.mira/deps/{name}")))
 }
 
 /// Current platform key used to look up a `PlatformEntry`. Maps
@@ -451,7 +460,19 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
 /// bins so a CLI's own `node`/`npm` subprocess resolves too.
 pub fn external_cli_search_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    let home = dirs::home_dir();
+
+    // Home candidates to hang the per-user bin dirs off of: the process's own
+    // home, PLUS — when a `--data-dir`/`MIRA_DATA_DIR` override is active — the
+    // *owning user's* home derived from it. Under a supervised service
+    // `dirs::home_dir()` resolves to the service account (Windows LocalSystem →
+    // `…\systemprofile`, systemd `--system` → the `mira` user), so the override
+    // is what points us at the operator's real `~/.local/bin`, `~/.bun/bin`,
+    // scoop shims, etc. Non-existent candidates are harmless (probed, skipped).
+    let mut homes: Vec<PathBuf> = Vec::new();
+    if let Some(h) = dirs::home_dir() { homes.push(h); }
+    if let Some(h) = override_user_home() {
+        if !homes.contains(&h) { homes.push(h); }
+    }
 
     #[cfg(windows)]
     {
@@ -464,7 +485,7 @@ pub fn external_cli_search_dirs() -> Vec<PathBuf> {
             dirs.push(local.join("Programs").join("opencode"));
             dirs.push(local.join("Programs").join("claude"));
         }
-        if let Some(h) = home.as_ref() {
+        for h in &homes {
             dirs.push(h.join("scoop").join("shims"));
             dirs.push(h.join(".bun").join("bin"));
             dirs.push(h.join(".opencode").join("bin"));
@@ -473,7 +494,7 @@ pub fn external_cli_search_dirs() -> Vec<PathBuf> {
     }
     #[cfg(not(windows))]
     {
-        if let Some(h) = home.as_ref() {
+        for h in &homes {
             dirs.push(h.join(".local").join("bin"));
             dirs.push(h.join(".npm-global").join("bin"));
             dirs.push(h.join(".bun").join("bin"));
@@ -487,6 +508,19 @@ pub fn external_cli_search_dirs() -> Vec<PathBuf> {
     // `node`/`npm`/`uv` still resolves when nothing else provides them.
     dirs.extend(managed_runtime_bin_dirs());
     dirs
+}
+
+/// The owning user's home directory derived from an active `--data-dir` /
+/// `MIRA_DATA_DIR` override, or `None` when no override is set. By convention
+/// the data dir is `<home>/.mira/data`, so its grandparent is the user's home.
+/// This lets a supervised service (whose own `dirs::home_dir()` is the service
+/// account) still find CLIs the operator installed under their real home.
+fn override_user_home() -> Option<PathBuf> {
+    crate::config::data_dir_env_override()
+        .as_deref()
+        .and_then(Path::parent)   // `<home>/.mira`   (the MIRA home)
+        .and_then(Path::parent)   // `<home>`         (the user's home)
+        .map(Path::to_path_buf)
 }
 
 /// Path to a CLI MIRA installed via `ensure_cli_via_npm` (an `npm i -g
@@ -930,13 +964,51 @@ mod tests {
         assert!(!parts[1].is_empty());
     }
 
+    // Both the default layout AND the `--data-dir`/`MIRA_DATA_DIR` override are
+    // asserted in ONE test: they mutate the same process-global env var, so
+    // splitting them into two `#[test]`s would race under cargo's parallel
+    // runner. Sequenced here, deterministically.
     #[test]
-    fn dep_install_dir_resolves_under_home() {
+    fn dep_dirs_resolve_under_home_and_follow_data_dir_override() {
+        // Serialize against every other test that touches MIRA_DATA_DIR — this
+        // test both reads (default phase) and writes (override phase) it.
+        let _env = crate::config::ENV_TEST_LOCK.lock().unwrap();
+        // SAFETY: single-threaded within this test; we set/clear the env around
+        // each phase. rustc 2024 marks env mutators unsafe for the cross-thread
+        // risk that this sequential usage avoids.
+
+        // ── Default (no override): the classic `~/.mira/deps/...` layout. ──
+        unsafe { std::env::remove_var("MIRA_DATA_DIR"); }
         let p = dep_install_dir("onnxruntime").expect("home dir resolves");
         // Normalize separators so the assert holds on Windows (backslashes) too.
         let s = p.to_string_lossy().replace('\\', "/");
         assert!(s.contains(".mira/deps/onnxruntime"),
             "expected ~/.mira/deps/onnxruntime, got {s}");
+        // No override → no phantom owning-user home is injected.
+        assert_eq!(override_user_home(), None);
+
+        // ── Override active (the supervised-service case). ──
+        // A service launches with `--data-dir` → MIRA_DATA_DIR set. The deps
+        // root and owning-user home must follow the operator's data dir, NOT the
+        // service account's `dirs::home_dir()` (Windows LocalSystem →
+        // `…\systemprofile`). Regression for "CLI not on PATH under the service".
+        unsafe { std::env::set_var("MIRA_DATA_DIR", "/srv/backed-up/mira/data"); }
+
+        let deps = dep_install_dir("claude").expect("resolves under override");
+        assert_eq!(deps, PathBuf::from("/srv/backed-up/mira/deps/claude"));
+
+        // Owning-user home = grandparent of the data dir (`<home>/.mira/data`).
+        assert_eq!(override_user_home(), Some(PathBuf::from("/srv/backed-up")));
+
+        // And the derived home's user bin dirs appear in the CLI search path,
+        // so a hand-installed CLI under the operator's real home is found too.
+        let search = external_cli_search_dirs();
+        assert!(
+            search.iter().any(|d| d.ends_with("srv/backed-up/.local/bin")),
+            "override-derived ~/.local/bin should be searched; got {search:?}",
+        );
+
+        unsafe { std::env::remove_var("MIRA_DATA_DIR"); }
     }
 
     #[test]
