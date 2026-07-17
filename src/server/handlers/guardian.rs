@@ -38,6 +38,75 @@ fn admin_only(caller: &AuthUser) -> Option<Response> {
     } else { None }
 }
 
+// ── Out-of-process sentinel relay (2c) ───────────────────────────────────────
+
+/// The wrapped shared secret the sentinel authenticates with. Injected as an
+/// Extension on the (non-`/api`) relay sub-router.
+#[derive(Clone)]
+pub struct GuardianRelayToken(pub Arc<String>);
+
+#[derive(Deserialize)]
+pub struct GuardianRelayBody {
+    pub message: String,
+    pub user_id: Option<String>,
+}
+
+/// `POST /internal/guardian/relay` — the out-of-process `guardian-watch` sentinel
+/// hands MIRA a message to deliver **in its own voice, across the user's
+/// channels** (Signal/Telegram/email/… + web/push), when MIRA is up. Auth is a
+/// constant-time bearer check against the shared-secret token (a 0600 file in the
+/// data dir the sentinel also reads). This is a **non-`/api` path**, so it
+/// bypasses the user-JWT AuthLayer by design — the token IS the authentication.
+/// Mirrors the co-resident watch loop's delivery pair (NotificationBus + the
+/// companion dispatcher).
+pub async fn guardian_relay(
+    Extension(token): Extension<GuardianRelayToken>,
+    Extension(agent): Extension<Arc<crate::agent::core::AgentCore>>,
+    Extension(bus):   Extension<Arc<crate::notifications::NotificationBus>>,
+    headers:          axum::http::HeaderMap,
+    Json(body):       Json<GuardianRelayBody>,
+) -> Response {
+    // Constant-time bearer check against the shared secret.
+    let presented = headers.get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    use subtle::ConstantTimeEq;
+    let authorized: bool = presented.as_bytes().ct_eq(token.0.as_bytes()).into();
+    if !authorized {
+        warn!("guardian relay: rejected request with bad/absent bearer token");
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let msg = body.message.trim();
+    if msg.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty message").into_response();
+    }
+    let uid = body.user_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    let mut delivered: Vec<String> = Vec::new();
+    // Web + push + FCM (the bus forwarder fans this out to subscribed devices).
+    bus.send(crate::notifications::Notification {
+        kind:            crate::notifications::NotificationKind::GuardianAlert,
+        conversation_id: None,
+        channel:         Some("web".to_string()),
+        user_id:         uid.map(str::to_string),
+        message:         Some(msg.to_string()),
+        category:        None,
+    });
+    delivered.push("web".to_string());
+    // Messaging channels (Signal/Telegram/email/…) in MIRA's voice.
+    if let (Some(u), Some(disp)) = (uid, agent.companion_dispatcher()) {
+        use crate::companion::dispatcher::DeliveryOutcome;
+        match disp.deliver_to_user(u, msg).await {
+            DeliveryOutcome::Delivered(ch) => delivered.push(ch),
+            DeliveryOutcome::NoChannel     => {}
+            DeliveryOutcome::Failed(ch, e) => warn!("guardian relay: delivery to '{ch}' failed: {e}"),
+        }
+    }
+    info!("guardian relay: delivered a sentinel message via {:?}", delivered);
+    Json(serde_json::json!({ "ok": true, "delivered": delivered })).into_response()
+}
+
 fn err(code: StatusCode, msg: &str) -> Response {
     (code, Json(serde_json::json!({ "error": msg }))).into_response()
 }

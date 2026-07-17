@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::MiraConfig;
 use crate::MiraError;
@@ -96,6 +96,87 @@ pub fn probe_url(config: &MiraConfig) -> String {
 /// only a transport error (connection refused / timeout / DNS) means down.
 async fn probe(client: &reqwest::Client, url: &str) -> bool {
     client.get(url).send().await.is_ok()
+}
+
+// ── Surface-through-MIRA relay (2c) ──────────────────────────────────────────
+
+/// Path to the shared secret the sentinel presents to MIRA's relay endpoint.
+/// Minted by MIRA at boot (0600), read by the sentinel.
+pub fn relay_token_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("guardian_relay.token")
+}
+
+/// Load the relay token, minting a fresh 256-bit random one (0600) if absent.
+/// MIRA calls this at boot so the file exists for the sentinel to read; the
+/// pattern mirrors the VAPID keypair mint. `None` only if the write fails.
+pub fn load_or_create_relay_token(data_dir: &Path) -> Option<String> {
+    let path = relay_token_path(data_dir);
+    if let Some(existing) = read_relay_token(data_dir) {
+        return Some(existing);
+    }
+    use rand::RngCore;
+    let mut buf = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut buf);
+    let token = hex::encode(buf);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, &token) {
+        warn!("guardian relay token: write {} failed: {e}", path.display());
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Some(token)
+}
+
+/// Read the relay token if present (the sentinel side — never mints).
+pub fn read_relay_token(data_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(relay_token_path(data_dir))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Deliver a Guardian message: **prefer routing THROUGH MIRA** (its own voice +
+/// full channel reach — Signal/Telegram/email/web/push) when MIRA is reachable;
+/// **fall back to a direct web-push** when it isn't (the MIRA-down safety net).
+/// Best-effort throughout; a down-alarm naturally takes the push path since MIRA
+/// is unreachable, while a recovery notice / future while-up triage goes through
+/// MIRA.
+async fn deliver(
+    config:  &MiraConfig,
+    client:  &reqwest::Client,
+    webpush: Option<&crate::notifications::web_push::WebPushService>,
+    user_id: Option<&str>,
+    message: &str,
+) {
+    let uid = user_id.map(str::trim).filter(|s| !s.is_empty());
+    if relay_through_mira(config, client, uid, message).await {
+        info!("guardian-watch: delivered through MIRA (full channel reach)");
+        return;
+    }
+    push_notice(webpush, uid, message).await;
+}
+
+/// POST the message to MIRA's loopback relay endpoint with the shared-secret
+/// bearer token. `true` on a 2xx (MIRA accepted + will deliver it in its voice);
+/// `false` when MIRA is unreachable, the token is missing, or the call fails —
+/// the caller then falls back to a direct push.
+async fn relay_through_mira(
+    config: &MiraConfig, client: &reqwest::Client, user_id: Option<&str>, message: &str,
+) -> bool {
+    let Some(token) = read_relay_token(&config.data_dir_path()) else { return false };
+    let url = format!("http://127.0.0.1:{}/internal/guardian/relay", config.server.port);
+    let body = serde_json::json!({ "message": message, "user_id": user_id });
+    match client.post(&url).bearer_auth(token).json(&body).send().await {
+        Ok(r) if r.status().is_success() => true,
+        Ok(r)  => { warn!("guardian-watch: MIRA relay returned {} — using direct push", r.status()); false }
+        Err(e) => { debug!("guardian-watch: MIRA relay unreachable ({e}) — using direct push"); false }
+    }
 }
 
 /// Deliver the direct out-of-process alarm/notice via web push (cold from the
@@ -171,15 +252,35 @@ fn down_message(health: Option<&str>) -> String {
     }
 }
 
-/// Hard bound on the standalone triage LLM call. A down-alarm was already
-/// detected over several probe intervals, so a short reasoning delay is fine —
-/// but never let a slow/unreachable model stall the alarm: on timeout we fall
-/// back to the deterministic message.
-const LLM_TRIAGE_TIMEOUT_SECS: u64 = 25;
+/// Hard bound on the standalone triage tool loop (a few generate↔tool rounds). A
+/// down-alarm was already detected over several probe intervals, so a short
+/// reasoning delay is fine — but never let a slow/unreachable model or a stuck
+/// tool stall the alarm: on timeout we fall back to the deterministic message.
+const LLM_TRIAGE_TIMEOUT_SECS: u64 = 45;
 
-/// The user-turn prompt for standalone triage. Pure — unit-tested. The health
-/// context is pre-fetched (2a) and handed to the model, so this first cut needs
-/// no tool loop; the model reasons over what it's given.
+/// Bound on building the optional `recall_history` tool (opening the history DB +
+/// loading the embedding model). Kept short so a slow/absent embedding stack
+/// never eats the triage budget — we just proceed without recall.
+const RECALL_INIT_TIMEOUT_SECS: u64 = 12;
+
+/// Best-effort construction of the read-only `recall_history` tool for the
+/// sentinel: opens the history DB + a semantic `MemorySystem` (default
+/// "internal" embedding — local, standalone) from the shared data dir. `None`
+/// when either won't build (e.g. embeddings disabled/unavailable), so the caller
+/// simply omits recall from the turn.
+async fn build_recall_tool(config: &MiraConfig) -> Option<crate::tools::recall::RecallHistoryTool> {
+    let data_dir = config.data_dir_path();
+    let history  = crate::history::HistoryStore::open(&data_dir.join("history.db")).ok()?;
+    let memory   = crate::memory::MemorySystem::new_from_embedding_config(
+        data_dir.join("memory.db"), &config.memory,
+    ).await.ok()?;
+    Some(crate::tools::recall::RecallHistoryTool::new(Arc::new(history), Arc::new(memory)))
+}
+
+/// The user-turn prompt for standalone triage. Pure — unit-tested. The last-known
+/// health is pre-fed so even a non-tool-calling model has context; the model MAY
+/// also call `guardian_inspect` for the full snapshot + logs and `mira_help` for
+/// how MIRA works.
 fn triage_prompt(health: &str, misses: u32, url: &str) -> String {
     let health = if health.trim().is_empty() {
         "unknown (no recent health snapshot on disk)"
@@ -189,21 +290,61 @@ fn triage_prompt(health: &str, misses: u32, url: &str) -> String {
     format!(
         "You are watching over MIRA — the household's assistant — and it has just become \
          unreachable: {misses} consecutive failed health checks at {url}. Its last known health \
-         was: {health} In one or two calm, clear sentences, tell the household what appears to be \
-         wrong and the single most useful next step to get MIRA back. Do not speculate beyond the \
-         evidence. Begin with \"MIRA-Guardian:\"."
+         was: {health} You may call `guardian_inspect` to read the full latest health snapshot, \
+         active degradations, and recent logs, and `mira_help` to check how MIRA works — use them \
+         only if they'd sharpen your assessment. Then, in one or two calm, clear sentences, tell \
+         the household what appears to be wrong and the single most useful next step to get MIRA \
+         back. Do not speculate beyond the evidence. Begin with \"MIRA-Guardian:\"."
     )
+}
+
+/// The user-turn prompt for a while-MIRA-is-up health triage (2d, `owns_watch`).
+/// Pure — the model is told a health problem was flagged (deterministic summary
+/// pre-fed) and may pull full detail via the tools.
+fn health_watch_prompt(health: &str) -> String {
+    let health = if health.trim().is_empty() {
+        "a non-green health state (details unavailable)"
+    } else {
+        health.trim()
+    };
+    format!(
+        "MIRA — the household's assistant — is running, but its health check just flagged a \
+         problem: {health} You may call `guardian_inspect` for the full snapshot + active \
+         degradations + recent logs, `mira_help` for how MIRA works, and `recall_history` for \
+         relevant context. Then, in one or two calm, clear sentences, tell the household what's \
+         wrong and the single most useful next step. Do not speculate beyond the evidence. Begin \
+         with \"MIRA-Guardian:\"."
+    )
+}
+
+/// Fingerprint of a snapshot's triggered (non-green) detectors — sorted names,
+/// joined. Empty when all-green. Dedups while-up health triage so an unchanged
+/// non-green state doesn't re-alert. Mirrors the co-resident loop's fingerprint.
+fn health_fingerprint(snap: &crate::health::HealthSnapshot) -> String {
+    let mut t: Vec<&str> = snap.reports.iter()
+        .filter(|r| !matches!(r.level, crate::health::HealthLevel::Green))
+        .map(|r| r.name.as_str())
+        .collect();
+    t.sort_unstable();
+    t.join(",")
 }
 
 /// Increment 2b(i) — run a REAL Guardian triage turn **in the sentinel process**,
 /// independent of the (down) MIRA. Builds the Guardian's own local provider from
-/// config (fail-closed local-only per the tier's `model_check`) and does a single
-/// generation over the pre-fetched health context — no tool loop needed for this
-/// first cut, since the sentinel already reads the health snapshot (2a). Returns
-/// `None` (→ caller falls back to the deterministic alarm) when no local model is
+/// config (fail-closed local-only per the tier's `model_check`) and drives MIRA's
+/// actual tool loop with a minimal read-only registry, so the model can actively
+/// pull the full health snapshot + logs (`guardian_inspect`) and consult the docs
+/// (`mira_help`) — reusing the battle-tested loop, no `AgentCore` needed. The
+/// last-known health is also pre-fed, so a model that doesn't tool-call still has
+/// context (the loop then degrades to a single generation). Returns `None`
+/// (→ caller falls back to the deterministic alarm) when no local model is
 /// configured/allowed, the provider won't build, or the call errors/times out —
 /// so this never weakens the guarantee that a down-alarm still fires.
-async fn llm_triage(config: &MiraConfig, health: &str, misses: u32, url: &str) -> Option<String> {
+async fn llm_triage(
+    config:       &MiraConfig,
+    health_store: Option<&Arc<crate::health::store::HealthStore>>,
+    task:         &str,
+) -> Option<String> {
     use crate::agent::guardian::{self, GuardianTier};
     // Fail-closed: the triage tier must resolve to a LOCAL model, or we don't
     // reach for it at all (never egress what we're guarding).
@@ -217,18 +358,58 @@ async fn llm_triage(config: &MiraConfig, health: &str, misses: u32, url: &str) -
         Ok(p)  => p,
         Err(e) => { warn!("guardian-watch: triage provider build failed: {e}"); return None; }
     };
-    let messages = vec![
-        crate::types::ChatMessage::system(guardian::definition().system_prompt),
-        crate::types::ChatMessage::user(triage_prompt(health, misses, url)),
-    ];
-    let opts = crate::types::GenerationOptions { max_tokens: Some(300), ..Default::default() };
-    let fut = provider.generate(&messages, &opts);
-    match tokio::time::timeout(std::time::Duration::from_secs(LLM_TRIAGE_TIMEOUT_SECS), fut).await {
-        Ok(Ok(r)) if !r.content.trim().is_empty() => Some(r.content.trim().to_string()),
-        Ok(Ok(_))  => None,
-        Ok(Err(e)) => { warn!("guardian-watch: standalone triage call failed: {e}"); None }
-        Err(_)     => { warn!("guardian-watch: standalone triage timed out after {LLM_TRIAGE_TIMEOUT_SECS}s"); None }
+
+    // A minimal, read-only tool registry — the Guardian's Ring-0 diagnostic
+    // tools, opened out-of-process from the shared data dir. (recall_history is
+    // deferred: it needs the async embedding stack. DegradationTracker is empty
+    // out-of-process — the live state is in the down MIRA — so pass None.)
+    let mut registry = crate::tools::ToolRegistry::new();
+    registry.register(crate::tools::guardian_inspect::GuardianInspectTool::new(
+        health_store.cloned(), None, Some(config.log_file_path()),
+    ));
+    registry.register(crate::tools::mira_help::MiraHelpTool);
+    let mut allowed = vec![ "guardian_inspect".to_string(), "mira_help".to_string() ];
+    // recall_history (2b(i)-3): best-effort — needs the history DB + a semantic
+    // embedding provider. Bounded init so a slow/absent embedding stack can't
+    // stall the alarm; if it won't build we just don't offer recall.
+    match tokio::time::timeout(std::time::Duration::from_secs(RECALL_INIT_TIMEOUT_SECS), build_recall_tool(config)).await {
+        Ok(Some(recall)) => { registry.register(recall); allowed.push("recall_history".to_string()); }
+        Ok(None) => warn!("guardian-watch: recall_history unavailable (history/embedding init failed) — proceeding without it"),
+        Err(_)   => warn!("guardian-watch: recall_history init timed out — proceeding without it"),
     }
+    let tools = Arc::new(registry);
+
+    let mut messages = vec![
+        crate::types::ChatMessage::system(guardian::definition().system_prompt),
+        crate::types::ChatMessage::user(task.to_string()),
+    ];
+    let opts = crate::types::GenerationOptions { max_tokens: Some(400), ..Default::default() };
+    // recall_history scopes results per-user via a trusted injected `_user_id`;
+    // supply the configured notify user so recall (when present) is usable.
+    let mut inject = serde_json::Map::new();
+    if let Some(uid) = config.guardian.process.notify_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        inject.insert("_user_id".to_string(), serde_json::Value::String(uid.to_string()));
+    }
+
+    // The loop streams events; we only want the returned final text, so drain the
+    // channel in the background (an absent receiver would drop events).
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::agent::stream::StreamEvent>(256);
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+    let fut = crate::agent::tool_loop::run_tool_loop_with_context(
+        &provider, &tools, &mut messages, &opts,
+        &crate::agent::tool_loop::ToolMode::Auto, 4, &tx,
+        Some(allowed.as_slice()), &inject, crate::agent::tool_loop::ToolEventCtx::NONE, None, None,
+    );
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(LLM_TRIAGE_TIMEOUT_SECS), fut).await {
+        Ok(Ok((text, _usage))) if !text.trim().is_empty() => Some(text.trim().to_string()),
+        Ok(Ok(_))  => None,
+        Ok(Err(e)) => { warn!("guardian-watch: standalone triage tool-loop failed: {e}"); None }
+        Err(_)     => { warn!("guardian-watch: standalone triage timed out after {LLM_TRIAGE_TIMEOUT_SECS}s"); None }
+    };
+    drop(tx);          // close the channel so the drain task finishes
+    let _ = drain.await;
+    out
 }
 
 /// Run the sentinel loop. Blocks (a long-running process) until the task is
@@ -273,7 +454,8 @@ pub async fn run(config: Arc<MiraConfig>) -> Result<(), MiraError> {
     // out-of-process health-read plumbing the future triage turn builds on.)
     let health = crate::health::store::HealthStore::open(&data_dir.join("health.db"))
         .map_err(|e| warn!("guardian-watch: health store unavailable (alarms won't include last-known health): {e}"))
-        .ok();
+        .ok()
+        .map(Arc::new); // Arc so the standalone triage tool loop can share it.
 
     info!(
         "guardian-watch: probing {url} every {}s; MIRA declared down after {down_after} consecutive misses; \
@@ -283,6 +465,9 @@ pub async fn run(config: Arc<MiraConfig>) -> Result<(), MiraError> {
     );
 
     let mut state  = SentinelState::default();
+    // Dedup for the while-up health watch (2d) — the triggered-detector
+    // fingerprint of the last health state we triaged.
+    let mut last_health_fp: Option<String> = None;
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -298,25 +483,51 @@ pub async fn run(config: Arc<MiraConfig>) -> Result<(), MiraError> {
                 // 2b(i): try a REAL standalone Guardian triage (own local model,
                 // out-of-process). Fall back to the deterministic alarm if no
                 // local model is configured/reachable — the alarm always fires.
-                let msg = match llm_triage(&config, hsum.as_deref().unwrap_or(""), state.misses(), &url).await {
+                let msg = match llm_triage(&config, health.as_ref(),
+                    &triage_prompt(hsum.as_deref().unwrap_or(""), state.misses(), &url)).await
+                {
                     Some(t) => { info!("guardian-watch: delivering standalone-triaged alarm"); t }
                     None    => down_message(hsum.as_deref()),
                 };
                 error!("guardian-watch: MIRA DOWN ({} failed probes of {url}) — {msg}", state.misses());
-                push_notice(webpush.as_ref(), notify_uid.as_deref(), &msg).await;
+                // Prefer through-MIRA; a truly-down MIRA fails the relay → direct push.
+                deliver(&config, &client, webpush.as_ref(), notify_uid.as_deref(), &msg).await;
                 // Audit the down-alarm. Safe to write the shared HMAC chain here:
                 // MIRA is confirmed down, so it isn't concurrently writing.
                 audit_down(&data_dir, &url, state.misses(), hsum.as_deref());
             }
             SentinelAction::Recover => {
                 info!("guardian-watch: MIRA recovered — responding again at {url}");
-                push_notice(webpush.as_ref(), notify_uid.as_deref(), RECOVER_MSG).await;
+                // MIRA is back up → this goes THROUGH MIRA (its voice, all channels).
+                deliver(&config, &client, webpush.as_ref(), notify_uid.as_deref(), RECOVER_MSG).await;
                 // No audit write on recovery: MIRA is back up and writing the
                 // chain itself; a concurrent sentinel write could interleave.
             }
             SentinelAction::Nothing => {
                 if !alive {
                     warn!("guardian-watch: probe miss {}/{down_after} for {url}", state.misses());
+                }
+            }
+        }
+
+        // 2d — when the sentinel OWNS the watch and MIRA is UP, it also triages
+        // non-green health snapshots (surfacing THROUGH MIRA), taking over the
+        // co-resident loop's job (which stands down under the same flag). Deduped
+        // by triggered-detector fingerprint so an unchanged non-green state
+        // doesn't re-alert; an all-green snapshot clears the dedup.
+        if alive && config.guardian.process.owns_watch {
+            if let Some(snap) = health.as_ref().and_then(|h| h.latest().ok().flatten()) {
+                let fp = health_fingerprint(&snap);
+                if fp.is_empty() {
+                    last_health_fp = None;
+                } else if last_health_fp.as_deref() != Some(fp.as_str()) {
+                    last_health_fp = Some(fp.clone());
+                    let now = chrono::Utc::now().timestamp();
+                    let summary = health_summary(Some(&snap), now).unwrap_or_default();
+                    info!("guardian-watch: non-green health while MIRA up — triaging [{fp}]");
+                    let msg = llm_triage(&config, health.as_ref(), &health_watch_prompt(&summary)).await
+                        .unwrap_or_else(|| format!("MIRA-Guardian: MIRA flagged a health issue. {summary}"));
+                    deliver(&config, &client, webpush.as_ref(), notify_uid.as_deref(), &msg).await;
                 }
             }
         }
@@ -449,9 +660,32 @@ mod tests {
         assert!(p.contains("3 consecutive"));
         assert!(p.contains("http://127.0.0.1:8087/health"));
         assert!(p.contains("db.integrity"));
+        // The model is offered the read-only diagnostic tools.
+        assert!(p.contains("guardian_inspect") && p.contains("mira_help"));
         // Empty health → a placeholder, never a dangling "was: ".
         let p2 = triage_prompt("   ", 1, "http://x/health");
         assert!(p2.contains("no recent health snapshot"), "{p2}");
+    }
+
+    #[test]
+    fn health_fingerprint_sorts_and_ignores_green() {
+        use crate::health::{HealthSnapshot, HealthLevel, DetectorReport};
+        let snap = HealthSnapshot { taken_at: 0, duration_ms: 0, reports: vec![
+            DetectorReport::green("z.ok", ""),
+            rep("disk.free", HealthLevel::Yellow),
+            rep("db.integrity", HealthLevel::Red),
+        ]};
+        assert_eq!(health_fingerprint(&snap), "db.integrity,disk.free"); // sorted, green omitted
+        let green = HealthSnapshot { taken_at: 0, duration_ms: 0, reports: vec![DetectorReport::green("a", "")] };
+        assert_eq!(health_fingerprint(&green), ""); // all-green → empty (clears dedup)
+    }
+
+    #[test]
+    fn health_watch_prompt_mentions_tools_and_handles_empty() {
+        let p = health_watch_prompt("Its last check showed Red: db.integrity.");
+        assert!(p.contains("MIRA-Guardian") && p.contains("running") && p.contains("db.integrity"), "{p}");
+        assert!(p.contains("guardian_inspect"));
+        assert!(health_watch_prompt("  ").contains("details unavailable"));
     }
 
     #[test]

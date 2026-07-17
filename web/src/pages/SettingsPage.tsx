@@ -2066,6 +2066,9 @@ function GuardianTab({
         <Field label="Enable sentinel" desc="Master switch. The sentinel is a separate service you supervise; this only tells it (and the UI) it's meant to run.">
           <Toggle value={bool('guardian.process.enabled', false)} onChange={(v) => set('guardian.process.enabled', v)} />
         </Field>
+        <Field label="Sentinel owns health watch" desc="When on, the sentinel also triages non-green health while MIRA is up (surfacing through MIRA), and MIRA's in-process watch loop stands down so the two don't double-alert. Off = the in-process loop owns health triage and the sentinel watches only liveness. Requires the sentinel enabled + running.">
+          <Toggle value={bool('guardian.process.owns_watch', false)} onChange={(v) => set('guardian.process.owns_watch', v)} />
+        </Field>
         <Field label="Probe interval (seconds)" desc="How often the sentinel probes MIRA's /health. Minimum 5; default 30.">
           <NumberInput value={num('guardian.process.probe_interval_secs', 30)} onChange={(v) => set('guardian.process.probe_interval_secs', v)} min={5} max={3600} />
         </Field>

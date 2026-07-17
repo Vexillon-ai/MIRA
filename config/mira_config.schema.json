@@ -1692,6 +1692,10 @@
             "notify_user_id": {
               "description": "User id whose registered push devices receive the 'MIRA is down' alarm. Empty/absent = no push target (sentinel still logs + audits). Set to the household admin so the phone buzzes.",
               "type": ["string", "null"]
+            },
+            "owns_watch": {
+              "description": "When true, the out-of-process sentinel owns health watch + triage: it also triages non-green health while MIRA is up (surfacing through MIRA), and MIRA's co-resident watch loop stands down so the two don't double-alert. Default false (co-resident loop still owns health triage; sentinel watches liveness only). Requires enabled=true.",
+              "type": "boolean"
             }
           }
         }

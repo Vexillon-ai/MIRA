@@ -485,6 +485,20 @@ pub fn build_router(
         router = router.merge(ingest);
     }
 
+    // Out-of-process Guardian sentinel relay (2c): when MIRA is up, the separate
+    // `guardian-watch` process hands its triage here so MIRA delivers it in its
+    // own voice across the user's channels. Non-`/api` path → bypasses the
+    // user-JWT AuthLayer by design; the shared-secret bearer token (a 0600 file
+    // in the data dir the sentinel also reads) is the authentication.
+    if let Some(tok) = crate::guardian_sentinel::load_or_create_relay_token(&config.data_dir_path()) {
+        let relay = Router::new()
+            .route("/internal/guardian/relay", post(crate::server::handlers::guardian::guardian_relay))
+            .layer(Extension(crate::server::handlers::guardian::GuardianRelayToken(Arc::new(tok))))
+            .layer(Extension(Arc::clone(&agent_core)))
+            .layer(Extension(Arc::clone(&notification_bus)));
+        router = router.merge(relay);
+    }
+
     // /api/artifacts/{id} — public (capability URL), wired only when the
     // store initialised cleanly. Lives outside `api_routes` so AuthLayer's
     // bearer-token requirement doesn't reject browser <img> requests.

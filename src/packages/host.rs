@@ -429,12 +429,25 @@ mod tests {
             ProbeOutcome::Pass
         ));
         drop(listener);
-        // A port nobody is listening on → fail (best-effort: a transient bind by
-        // another process is astronomically unlikely on a fresh ephemeral port).
-        assert!(matches!(
-            host.run_probe(&ResolvedProbe::Tcp { host: "127.0.0.1".into(), port }),
-            ProbeOutcome::Fail(_)
-        ));
+        // A port nobody is listening on → fail. Deriving a "closed" port is
+        // inherently racy under the parallel test runner: the OS can immediately
+        // hand a just-freed ephemeral port to another test. So retry with fresh
+        // ports until one genuinely probes closed — the race would have to recur
+        // every iteration to fail, which is astronomically unlikely.
+        let mut fail_seen = false;
+        for _ in 0..20 {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            if matches!(
+                host.run_probe(&ResolvedProbe::Tcp { host: "127.0.0.1".into(), port: p }),
+                ProbeOutcome::Fail(_)
+            ) {
+                fail_seen = true;
+                break;
+            }
+        }
+        assert!(fail_seen, "a freshly-closed port should probe as Fail");
         // A roundtrip with no resolved account reports skipped, not fail.
         assert!(matches!(
             host.run_probe(&ResolvedProbe::Roundtrip {

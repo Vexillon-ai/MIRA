@@ -1541,6 +1541,15 @@ pub struct GuardianProcessConfig {
     // set it to the household admin so the phone actually buzzes.
     #[serde(default)]
     pub notify_user_id: Option<String>,
+
+    // When true, the out-of-process sentinel OWNS health watch + triage: it
+    // also triages non-green health snapshots while MIRA is up (surfacing
+    // through MIRA), and MIRA's co-resident watch loop stands down (no-ops its
+    // health triage) so the two don't double-alert. Default false = the
+    // co-resident loop still owns health triage; the sentinel only watches
+    // liveness. Requires `enabled = true`.
+    #[serde(default)]
+    pub owns_watch: bool,
 }
 
 impl Default for GuardianProcessConfig {
@@ -1551,6 +1560,7 @@ impl Default for GuardianProcessConfig {
             down_after_failures: default_sentinel_down_after(),
             probe_url: None,
             notify_user_id: None,
+            owns_watch: false,
         }
     }
 }

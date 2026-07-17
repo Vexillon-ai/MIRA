@@ -492,6 +492,11 @@ pub fn spawn_watch_loop(
                 }
             }
             if gmode == GuardianMode::Off { last_fingerprint = None; continue; }
+            // 2d — when the out-of-process sentinel owns health watch+triage
+            // (`guardian.process.owns_watch`), the co-resident loop stands down
+            // here so the two don't double-alert. (Reconcile delivery above still
+            // runs; only the health-snapshot triage is handed off.)
+            if config.guardian.process.owns_watch { last_fingerprint = None; continue; }
             let snap = match health.latest() { Ok(Some(s)) => s, _ => continue };
             if matches!(snap.worst_level(), crate::health::HealthLevel::Green) {
                 last_fingerprint = None; // Green clears dedup → a re-trigger re-alerts
