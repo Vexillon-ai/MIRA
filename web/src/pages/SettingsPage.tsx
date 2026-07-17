@@ -2059,8 +2059,9 @@ function GuardianTab({
           (<code>mira guardian-watch</code>) that probes MIRA's <code>/health</code>
           and, if MIRA is unreachable for a sustained window, sends a
           <strong> direct web-push alarm</strong> to your device — no dependency on
-          the down MIRA. Observe-and-alarm only. You run it as its own service
-          (e.g. a second systemd unit) alongside MIRA; these settings drive it.
+          the down MIRA. Observe-and-alarm only. After enabling it here, install
+          it as its own supervised service by running <code>mira guardian-install</code>
+          on the host (Linux/systemd today), then restart it. These settings drive it.
         </p>
         <Field label="Enable sentinel" desc="Master switch. The sentinel is a separate service you supervise; this only tells it (and the UI) it's meant to run.">
           <Toggle value={bool('guardian.process.enabled', false)} onChange={(v) => set('guardian.process.enabled', v)} />

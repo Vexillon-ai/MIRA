@@ -139,8 +139,16 @@ const RECOVER_MSG: &str = "MIRA is back up — the assistant is responding again
 pub async fn run(config: Arc<MiraConfig>) -> Result<(), MiraError> {
     let pc = &config.guardian.process;
     if !pc.enabled {
-        warn!("guardian-watch: guardian.process.enabled is false — nothing to watch; exiting");
-        return Ok(());
+        // Park instead of exiting. This process is meant to run under a
+        // supervisor with `Restart=always`, so an immediate `exit(0)` would spin
+        // the unit in a tight restart loop. Idle quietly instead; the operator
+        // enables `guardian.process.enabled` and restarts this unit to begin
+        // watching. (A manual `mira guardian-watch` here just idles — Ctrl-C to
+        // stop.)
+        warn!("guardian-watch: guardian.process.enabled is false — idling (enable it and restart this unit to begin watching)");
+        loop {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
     }
     let data_dir   = config.data_dir_path();
     let url        = probe_url(&config);

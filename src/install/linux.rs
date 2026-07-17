@@ -9,7 +9,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::install::unit::{render, UnitInputs};
+use crate::install::unit::{render, ServiceKind, UnitInputs};
 
 // `$XDG_CONFIG_HOME/systemd/user/mira.service`, falling back to
 // `~/.config/systemd/user/mira.service` per XDG.
@@ -27,6 +27,24 @@ pub fn unit_path() -> PathBuf {
 pub fn system_unit_path() -> PathBuf {
     PathBuf::from("/etc/systemd/system/mira.service")
 }
+
+// The Guardian liveness sentinel's user unit —
+// `$XDG_CONFIG_HOME/systemd/user/mira-guardian-watch.service`. A SEPARATE unit
+// from `mira.service` on purpose: it must outlive a server crash.
+pub fn guardian_unit_path() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .expect("HOME must be set");
+    base.join("systemd/user/mira-guardian-watch.service")
+}
+
+// System-scope Guardian sentinel unit (`mira guardian-install --system`).
+pub fn guardian_system_unit_path() -> PathBuf {
+    PathBuf::from("/etc/systemd/system/mira-guardian-watch.service")
+}
+
+const GUARDIAN_UNIT: &str = "mira-guardian-watch.service";
 
 // True when `systemctl --user` operations will actually succeed in this
 // environment. Probes the user manager with a side-effect-free query
@@ -73,6 +91,7 @@ fn install_user(inputs: &InstallInputs) -> Result<(), Box<dyn Error>> {
         std::fs::create_dir_all(parent)?;
     }
     let body = render(&UnitInputs {
+        service:     ServiceKind::Server,
         mira_bin:    &inputs.mira_bin,
         config_path: &inputs.config_path,
         working_dir: &inputs.working_dir,
@@ -131,6 +150,7 @@ fn install_system(inputs: &InstallInputs) -> Result<(), Box<dyn Error>> {
         std::fs::create_dir_all(parent)?;
     }
     let body = render(&UnitInputs {
+        service:     ServiceKind::Server,
         mira_bin:    &inputs.mira_bin,
         config_path: &inputs.config_path,
         working_dir: &inputs.working_dir,
@@ -179,6 +199,99 @@ fn install_system(inputs: &InstallInputs) -> Result<(), Box<dyn Error>> {
             Err(e)
         }
     }
+}
+
+/// Install + enable the Guardian liveness sentinel as its own supervised unit
+/// (`mira-guardian-watch.service`) — separate from `mira.service` so it keeps
+/// watching when the server crashes. Mirrors [`install`] (user vs system by
+/// `inputs.system`), reusing the same render/write/activate machinery. The unit
+/// runs `mira guardian-watch`, which self-gates on `guardian.process.enabled`
+/// (it idles quietly when disabled, so an installed-but-disabled sentinel does
+/// NOT restart-loop).
+pub fn install_guardian(inputs: &InstallInputs) -> Result<(), Box<dyn Error>> {
+    let system_user = if inputs.system {
+        let euid = unsafe { libc::geteuid() };
+        if euid != 0 {
+            return Err(
+                "`mira guardian-install --system` writes to /etc/systemd/system and runs \
+                 system-bus systemctl. Re-run with sudo.".into()
+            );
+        }
+        ensure_system_user(SYSTEM_USER)?;
+        Some(SYSTEM_USER)
+    } else {
+        None
+    };
+
+    let unit = if inputs.system { guardian_system_unit_path() } else { guardian_unit_path() };
+    if let Some(parent) = unit.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = render(&UnitInputs {
+        service:     ServiceKind::GuardianWatch,
+        mira_bin:    &inputs.mira_bin,
+        config_path: &inputs.config_path,
+        working_dir: &inputs.working_dir,
+        data_dir:    &inputs.data_dir,
+        web_dir:     None, // sentinel serves no web bundle
+        system_user,
+    });
+    write_atomic(&unit, &body)?;
+    println!("✓ wrote {}", unit.display());
+
+    let scope: &[&str] = if inputs.system { &[] } else { &["--user"] };
+    // Same delete-on-failure cleanup as the server install: never leave a
+    // half-installed unit behind.
+    let activate = || -> Result<(), Box<dyn Error>> {
+        let mut reload = scope.to_vec(); reload.push("daemon-reload");
+        run_systemctl(&reload)?;
+        if inputs.enable_now {
+            let mut en = scope.to_vec(); en.extend_from_slice(&["enable", "--now", GUARDIAN_UNIT]);
+            run_systemctl(&en)?;
+            println!("✓ enabled + started {GUARDIAN_UNIT}");
+        } else {
+            println!("(skipped enable --now per --no-enable)");
+        }
+        Ok(())
+    };
+    match activate() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&unit);
+            eprintln!("(cleaned up partial install: removed {})", unit.display());
+            Err(e)
+        }
+    }
+}
+
+/// Remove the Guardian sentinel unit (system-scope first, then user-scope).
+/// Best-effort disable; used both by `mira guardian-uninstall` and folded into
+/// `mira uninstall` so it doesn't orphan a unit.
+pub fn uninstall_guardian() -> Result<(), Box<dyn Error>> {
+    let sys = guardian_system_unit_path();
+    if sys.exists() {
+        let euid = unsafe { libc::geteuid() };
+        if euid != 0 {
+            return Err(format!(
+                "System-scope Guardian unit found at {} — re-run with sudo.", sys.display()
+            ).into());
+        }
+        let _ = run_systemctl(&["disable", "--now", GUARDIAN_UNIT]);
+        std::fs::remove_file(&sys)?;
+        println!("✓ removed {}", sys.display());
+        let _ = run_systemctl(&["daemon-reload"]);
+        return Ok(());
+    }
+    let unit = guardian_unit_path();
+    if !unit.exists() {
+        println!("Guardian sentinel unit not found at {} — nothing to do.", unit.display());
+        return Ok(());
+    }
+    let _ = run_systemctl(&["--user", "disable", "--now", GUARDIAN_UNIT]);
+    std::fs::remove_file(&unit)?;
+    println!("✓ removed {}", unit.display());
+    let _ = run_systemctl(&["--user", "daemon-reload"]);
+    Ok(())
 }
 
 fn ensure_system_user(name: &str) -> Result<(), Box<dyn Error>> {

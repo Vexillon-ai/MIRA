@@ -389,6 +389,27 @@ pub enum Command {
     // (off by default). Use the global `--data-dir` to point at MIRA's data dir.
     // See design-docs/guardian-separate-process.md.
     GuardianWatch,
+    // Install the Guardian liveness sentinel as its own supervised unit
+    // (`mira-guardian-watch.service`), separate from the main MIRA service so it
+    // outlives a server crash. Run this after enabling `guardian.process.enabled`
+    // in Settings → Guardian. Linux/systemd today; macOS/Windows land in a
+    // follow-up (a documented manual unit meanwhile).
+    GuardianInstall {
+        // Config file the sentinel should load. Defaults to the standard path.
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
+        // Working directory for the sentinel service. Defaults to `$HOME`.
+        #[arg(long, value_name = "PATH")]
+        working_dir: Option<std::path::PathBuf>,
+        // Write the unit but don't `enable --now`.
+        #[arg(long)]
+        no_enable: bool,
+        // Install system-scope (requires sudo), mirroring `mira install --system`.
+        #[arg(long)]
+        system: bool,
+    },
+    // Remove the Guardian liveness sentinel's supervised unit.
+    GuardianUninstall,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1002,6 +1023,38 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
             "uninstall failed".into()
         });
     }
+    // Guardian sentinel unit install/uninstall — like install/uninstall, these
+    // manage a supervised unit and must work before config load.
+    if let Some(Command::GuardianInstall { config, working_dir, no_enable, system }) = args.command.as_ref() {
+        let default_wd = || if *system {
+            std::path::PathBuf::from("/var/lib/mira")
+        } else {
+            default_home_dir()
+        };
+        let default_cfg = || if *system {
+            std::path::PathBuf::from("/etc/mira/mira_config.json")
+        } else {
+            mira::config::default_config_path()
+        };
+        let opts = mira::install::InstallOptions {
+            config_path: config.clone().unwrap_or_else(default_cfg),
+            working_dir: working_dir.clone().unwrap_or_else(default_wd),
+            web_dir:     None,
+            no_enable:   *no_enable,
+            force:       false,
+            system:      *system,
+        };
+        return mira::install::run_guardian_install(opts).map_err(|e| -> Box<dyn Error> {
+            eprintln!("mira guardian-install: {e}");
+            "guardian-install failed".into()
+        });
+    }
+    if matches!(args.command, Some(Command::GuardianUninstall)) {
+        return mira::install::run_guardian_uninstall().map_err(|e| -> Box<dyn Error> {
+            eprintln!("mira guardian-uninstall: {e}");
+            "guardian-uninstall failed".into()
+        });
+    }
 
     // Service-control subcommands also bypass config load — they shell out
     // to systemctl and never touch MIRA's runtime state.
@@ -1170,7 +1223,9 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
             | Command::HelperInstall { .. }
             | Command::WslHostAliasInstall { .. }
             | Command::HelperNetallow { .. }
-            | Command::HelperNetteardown { .. } => unreachable!(),
+            | Command::HelperNetteardown { .. }
+            | Command::GuardianInstall { .. }
+            | Command::GuardianUninstall => unreachable!(),
         };
     }
 

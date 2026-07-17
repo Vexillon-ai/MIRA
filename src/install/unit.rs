@@ -7,7 +7,41 @@
 
 use std::path::Path;
 
+/// Which MIRA process a unit supervises. The main server and the out-of-process
+/// Guardian liveness sentinel are separate, independently-supervised units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceKind {
+    /// The main MIRA server (`mira --server …`).
+    Server,
+    /// The Guardian liveness sentinel (`mira … guardian-watch`). Deliberately a
+    /// SEPARATE unit — not bound to the server's, so it outlives a server crash.
+    GuardianWatch,
+}
+
+impl ServiceKind {
+    fn description(self) -> &'static str {
+        match self {
+            ServiceKind::Server        => "MIRA — Multi-tasking Intelligent Responsive Assistant",
+            ServiceKind::GuardianWatch => "MIRA-Guardian liveness sentinel (watches that MIRA is alive)",
+        }
+    }
+    /// The ExecStart line for this service. The server takes `--server` as a
+    /// top-level flag; the sentinel is a subcommand, so `--config`/`--data-dir`
+    /// (top-level flags) come BEFORE the `guardian-watch` word.
+    fn exec_start(self, bin: &Path, cfg: &Path, data: &Path) -> String {
+        let (bin, cfg, data) = (bin.display(), cfg.display(), data.display());
+        match self {
+            ServiceKind::Server =>
+                format!("{bin} --server --config {cfg} --data-dir {data}"),
+            ServiceKind::GuardianWatch =>
+                format!("{bin} --config {cfg} --data-dir {data} guardian-watch"),
+        }
+    }
+}
+
 pub struct UnitInputs<'a> {
+    /// Which process this unit supervises (server vs guardian sentinel).
+    pub service:     ServiceKind,
     pub mira_bin:    &'a Path,
     pub config_path: &'a Path,
     pub working_dir: &'a Path,
@@ -31,9 +65,13 @@ pub struct UnitInputs<'a> {
 // unexpected crashes; `StartLimit*` prevents a config error from looping
 // forever.
 pub fn render(inputs: &UnitInputs<'_>) -> String {
-    let env_line = inputs.web_dir
-        .map(|p| format!("Environment=\"MIRA_WEB_DIR={}\"\n", p.display()))
-        .unwrap_or_default();
+    // The web bundle env only applies to the server; the sentinel serves nothing.
+    let env_line = match inputs.service {
+        ServiceKind::Server => inputs.web_dir
+            .map(|p| format!("Environment=\"MIRA_WEB_DIR={}\"\n", p.display()))
+            .unwrap_or_default(),
+        ServiceKind::GuardianWatch => String::new(),
+    };
     // Include $HOME/.local/bin and $HOME/bin in PATH so subprocess adapters
     // (`claude`, `opencode`, `hermes`, etc.) installed for the user are
     // discoverable. systemd user services don't inherit shell PATH; without
@@ -74,7 +112,7 @@ pub fn render(inputs: &UnitInputs<'_>) -> String {
 
     format!(
 "[Unit]
-Description=MIRA — Multi-tasking Intelligent Responsive Assistant
+Description={description}
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=60
@@ -85,7 +123,7 @@ Type=simple
 {user_lines}\
 {env_line}\
 {path_line}\
-ExecStart={bin} --server --config {cfg} --data-dir {data}
+ExecStart={exec_start}
 WorkingDirectory={dir}
 Restart=always
 RestartSec=2s
@@ -98,9 +136,8 @@ StandardError=journal
 [Install]
 WantedBy={wanted_by}
 ",
-        bin = inputs.mira_bin.display(),
-        cfg = inputs.config_path.display(),
-        data = inputs.data_dir.display(),
+        description = inputs.service.description(),
+        exec_start  = inputs.service.exec_start(inputs.mira_bin, inputs.config_path, inputs.data_dir),
         dir = inputs.working_dir.display(),
     )
 }
@@ -113,6 +150,7 @@ mod tests {
     #[test]
     fn renders_required_sections_and_paths() {
         let out = render(&UnitInputs {
+            service:     ServiceKind::Server,
             mira_bin:    &PathBuf::from("/home/user/bin/mira"),
             config_path: &PathBuf::from("/home/user/.mira/config/mira_config.json"),
             working_dir: &PathBuf::from("/home/user"),
@@ -135,6 +173,7 @@ mod tests {
     fn start_limits_are_in_unit_section() {
         // StartLimit* moved from [Service] to [Unit] in systemd 230 (2016).
         let out = render(&UnitInputs {
+            service:     ServiceKind::Server,
             mira_bin:    &PathBuf::from("/x"),
             config_path: &PathBuf::from("/y"),
             working_dir: &PathBuf::from("/z"),
@@ -151,6 +190,7 @@ mod tests {
     #[test]
     fn system_scope_adds_user_group_and_hardening() {
         let out = render(&UnitInputs {
+            service:     ServiceKind::Server,
             mira_bin:    &PathBuf::from("/usr/local/bin/mira"),
             config_path: &PathBuf::from("/etc/mira/mira_config.json"),
             working_dir: &PathBuf::from("/var/lib/mira"),
@@ -169,6 +209,7 @@ mod tests {
     #[test]
     fn user_scope_omits_hardening_and_user_lines() {
         let out = render(&UnitInputs {
+            service:     ServiceKind::Server,
             mira_bin:    &PathBuf::from("/x"),
             config_path: &PathBuf::from("/y"),
             working_dir: &PathBuf::from("/z"),
@@ -182,8 +223,31 @@ mod tests {
     }
 
     #[test]
+    fn guardian_variant_renders_subcommand_exec_and_no_web_env() {
+        let out = render(&UnitInputs {
+            service:     ServiceKind::GuardianWatch,
+            mira_bin:    &PathBuf::from("/home/user/bin/mira"),
+            config_path: &PathBuf::from("/home/user/.mira/config/mira_config.json"),
+            working_dir: &PathBuf::from("/home/user"),
+            data_dir:    &PathBuf::from("/home/user/.mira/data"),
+            // Even if a web_dir is passed, the sentinel unit must not carry it.
+            web_dir:     Some(&PathBuf::from("/home/user/MIRA/web/dist")),
+            system_user: None,
+        });
+        // Top-level flags come BEFORE the `guardian-watch` subcommand word.
+        assert!(out.contains(
+            "ExecStart=/home/user/bin/mira --config /home/user/.mira/config/mira_config.json \
+             --data-dir /home/user/.mira/data guardian-watch"));
+        assert!(out.contains("Description=MIRA-Guardian liveness sentinel"));
+        assert!(!out.contains("--server"), "sentinel must not launch the server");
+        assert!(!out.contains("MIRA_WEB_DIR"), "sentinel serves no web bundle");
+        assert!(out.contains("Restart=always"));
+    }
+
+    #[test]
     fn web_dir_emits_environment_line_inside_service() {
         let out = render(&UnitInputs {
+            service:     ServiceKind::Server,
             mira_bin:    &PathBuf::from("/x"),
             config_path: &PathBuf::from("/y"),
             working_dir: &PathBuf::from("/z"),
