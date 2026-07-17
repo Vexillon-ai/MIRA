@@ -945,7 +945,17 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
 
     #[cfg(target_os = "windows")]
     {
-        if mira::install::windows::try_run_as_service().is_ok() {
+        // Route an SCM start to the right service entry. Our two services share
+        // one binary; the sentinel service's ImagePath carries `guardian-watch`,
+        // so its presence in the launch args tells us to attach as the sentinel
+        // rather than the server.
+        let is_guardian = std::env::args().any(|a| a == "guardian-watch");
+        let dispatched = if is_guardian {
+            mira::install::windows::try_run_as_guardian_service().is_ok()
+        } else {
+            mira::install::windows::try_run_as_service().is_ok()
+        };
+        if dispatched {
             return Ok(());
         }
         // Err — console launch. The error is the standard SCM

@@ -19,22 +19,64 @@ pub enum ServiceKind {
 }
 
 impl ServiceKind {
-    fn description(self) -> &'static str {
+    /// Human-readable description (systemd `Description`, SCM description).
+    pub fn description(self) -> &'static str {
         match self {
             ServiceKind::Server        => "MIRA — Multi-tasking Intelligent Responsive Assistant",
             ServiceKind::GuardianWatch => "MIRA-Guardian liveness sentinel (watches that MIRA is alive)",
         }
     }
-    /// The ExecStart line for this service. The server takes `--server` as a
-    /// top-level flag; the sentinel is a subcommand, so `--config`/`--data-dir`
-    /// (top-level flags) come BEFORE the `guardian-watch` word.
-    fn exec_start(self, bin: &Path, cfg: &Path, data: &Path) -> String {
-        let (bin, cfg, data) = (bin.display(), cfg.display(), data.display());
+
+    /// The full launch argv `[bin, ...mode args...]` for this service. The
+    /// server takes `--server` as a top-level flag; the sentinel is a subcommand,
+    /// so `--config`/`--data-dir` (top-level flags) come BEFORE `guardian-watch`.
+    /// Shared by systemd (joined into ExecStart), launchd (ProgramArguments), and
+    /// Windows SCM (ImagePath launch_arguments = argv without the bin).
+    pub fn argv(self, bin: &Path, cfg: &Path, data: &Path) -> Vec<String> {
+        let (bin, cfg, data) =
+            (bin.display().to_string(), cfg.display().to_string(), data.display().to_string());
         match self {
-            ServiceKind::Server =>
-                format!("{bin} --server --config {cfg} --data-dir {data}"),
-            ServiceKind::GuardianWatch =>
-                format!("{bin} --config {cfg} --data-dir {data} guardian-watch"),
+            ServiceKind::Server => vec![
+                bin, "--server".into(), "--config".into(), cfg, "--data-dir".into(), data,
+            ],
+            ServiceKind::GuardianWatch => vec![
+                bin, "--config".into(), cfg, "--data-dir".into(), data, "guardian-watch".into(),
+            ],
+        }
+    }
+
+    /// The systemd `ExecStart` line — the argv, space-joined.
+    fn exec_start(self, bin: &Path, cfg: &Path, data: &Path) -> String {
+        self.argv(bin, cfg, data).join(" ")
+    }
+
+    /// launchd `Label` (also the plist basename + `launchctl` target).
+    pub fn launchd_label(self) -> &'static str {
+        match self {
+            ServiceKind::Server        => "com.mira",
+            ServiceKind::GuardianWatch => "com.mira.guardian-watch",
+        }
+    }
+
+    /// Basename for per-service log files (launchd stdout/err, unit naming).
+    pub fn log_basename(self) -> &'static str {
+        match self {
+            ServiceKind::Server        => "mira",
+            ServiceKind::GuardianWatch => "mira-guardian-watch",
+        }
+    }
+
+    /// Windows SCM service name + display name.
+    pub fn scm_name(self) -> &'static str {
+        match self {
+            ServiceKind::Server        => "mira",
+            ServiceKind::GuardianWatch => "mira-guardian-watch",
+        }
+    }
+    pub fn scm_display(self) -> &'static str {
+        match self {
+            ServiceKind::Server        => "MIRA — Multi-tasking Intelligent Responsive Assistant",
+            ServiceKind::GuardianWatch => "MIRA-Guardian liveness sentinel",
         }
     }
 }

@@ -13,6 +13,8 @@ use std::path::Path;
 pub const LAUNCHD_LABEL: &str = "com.mira";
 
 pub struct PlistInputs<'a> {
+    /// Which process this agent supervises (server vs guardian sentinel).
+    pub service:     crate::install::unit::ServiceKind,
     pub mira_bin:    &'a Path,
     pub config_path: &'a Path,
     pub working_dir: &'a Path,
@@ -41,7 +43,9 @@ pub fn render(inputs: &PlistInputs<'_>) -> String {
     // to set (rather than emitting an empty <dict/>, which launchd accepts
     // but is ugly).
     let mut entries = Vec::<(String, String)>::new();
-    if let Some(p) = inputs.web_dir {
+    // Only the server serves the React bundle; the guardian sentinel exposes
+    // no HTTP surface, so `MIRA_WEB_DIR` is meaningless (and misleading) there.
+    if let (Some(p), crate::install::unit::ServiceKind::Server) = (inputs.web_dir, inputs.service) {
         entries.push(("MIRA_WEB_DIR".to_string(), p.display().to_string()));
     }
     for (k, v) in inputs.extra_env {
@@ -62,6 +66,14 @@ pub fn render(inputs: &PlistInputs<'_>) -> String {
         s
     };
 
+    // ProgramArguments from the shared per-service argv (server: `--server …`;
+    // guardian: `--config … --data-dir … guardian-watch`).
+    let prog_args: String = inputs.service
+        .argv(inputs.mira_bin, inputs.config_path, inputs.data_dir)
+        .iter()
+        .map(|a| format!("        <string>{}</string>\n", xml_escape(a)))
+        .collect();
+
     format!(
 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
@@ -71,12 +83,7 @@ pub fn render(inputs: &PlistInputs<'_>) -> String {
     <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{bin}</string>
-        <string>--server</string>
-        <string>--config</string>
-        <string>{cfg}</string>
-        <string>--data-dir</string>
-        <string>{data}</string>
+{prog_args}\
     </array>
     <key>WorkingDirectory</key>
     <string>{dir}</string>
@@ -85,17 +92,15 @@ pub fn render(inputs: &PlistInputs<'_>) -> String {
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>{logs}/mira.out.log</string>
+    <string>{logs}/{base}.out.log</string>
     <key>StandardErrorPath</key>
-    <string>{logs}/mira.err.log</string>
+    <string>{logs}/{base}.err.log</string>
 {env}\
 </dict>
 </plist>
 ",
-        label = LAUNCHD_LABEL,
-        bin   = xml_escape(&inputs.mira_bin.display().to_string()),
-        cfg   = xml_escape(&inputs.config_path.display().to_string()),
-        data  = xml_escape(&inputs.data_dir.display().to_string()),
+        label = inputs.service.launchd_label(),
+        base  = inputs.service.log_basename(),
         dir   = xml_escape(&inputs.working_dir.display().to_string()),
         logs  = xml_escape(&inputs.log_dir.display().to_string()),
         env   = env_block,
@@ -125,8 +130,35 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn guardian_variant_renders_subcommand_label_and_logs() {
+        let out = render(&PlistInputs {
+            service:     crate::install::unit::ServiceKind::GuardianWatch,
+            mira_bin:    &PathBuf::from("/Users/me/.cargo/bin/mira"),
+            config_path: &PathBuf::from("/Users/me/.mira/config/mira_config.json"),
+            working_dir: &PathBuf::from("/Users/me"),
+            data_dir:    &PathBuf::from("/Users/me/.mira/data"),
+            web_dir:     Some(&PathBuf::from("/Users/me/MIRA/web/dist")),
+            log_dir:     &PathBuf::from("/Users/me/Library/Logs/mira"),
+            extra_env:   &[],
+        });
+        // Own launchd label + sentinel log basename.
+        assert!(out.contains("<string>com.mira.guardian-watch</string>"));
+        assert!(out.contains("mira-guardian-watch.out.log"));
+        assert!(out.contains("mira-guardian-watch.err.log"));
+        // Subcommand argv order: top-level flags BEFORE `guardian-watch`, no `--server`.
+        let cfg_at = out.find("<string>--config</string>").unwrap();
+        // Match the argv entry specifically, not the `com.mira.guardian-watch` Label.
+        let sub_at = out.find("<string>guardian-watch</string>").unwrap();
+        assert!(cfg_at < sub_at, "flags must precede the subcommand");
+        assert!(!out.contains("<string>--server</string>"));
+        // Sentinel serves no web bundle even if a web_dir is passed.
+        assert!(!out.contains("MIRA_WEB_DIR"));
+    }
+
+    #[test]
     fn renders_required_keys_and_paths() {
         let out = render(&PlistInputs {
+            service:     crate::install::unit::ServiceKind::Server,
             mira_bin:    &PathBuf::from("/Users/me/.cargo/bin/mira"),
             config_path: &PathBuf::from("/Users/me/.mira/config/mira_config.json"),
             working_dir: &PathBuf::from("/Users/me"),
@@ -154,6 +186,7 @@ mod tests {
     #[test]
     fn web_dir_emits_environment_variables_dict() {
         let out = render(&PlistInputs {
+            service:     crate::install::unit::ServiceKind::Server,
             mira_bin:    &PathBuf::from("/x"),
             config_path: &PathBuf::from("/y"),
             working_dir: &PathBuf::from("/z"),
@@ -170,6 +203,7 @@ mod tests {
     #[test]
     fn extra_env_entries_appear_in_environment_dict() {
         let out = render(&PlistInputs {
+            service:     crate::install::unit::ServiceKind::Server,
             mira_bin:    &PathBuf::from("/x"),
             config_path: &PathBuf::from("/y"),
             working_dir: &PathBuf::from("/z"),
@@ -187,6 +221,7 @@ mod tests {
     fn xml_metacharacters_are_escaped() {
         // Pretend a user has an absurd home directory; the plist must still parse.
         let out = render(&PlistInputs {
+            service:     crate::install::unit::ServiceKind::Server,
             mira_bin:    &PathBuf::from("/Users/a&b/<bin>/mira"),
             config_path: &PathBuf::from("/y"),
             working_dir: &PathBuf::from("/z"),

@@ -47,6 +47,15 @@ const DISPLAY_NAME: &str = "MIRA — Multi-tasking Intelligent Responsive Assist
 const DESCRIPTION: &str =
     "MIRA agent server. Manages chat, channels, automations, and the web UI.";
 
+// The out-of-process Guardian sentinel's SCM service — a SEPARATE service from
+// `mira`, deliberately not dependent on it, so it keeps watching when the main
+// service crashes. Started with the `guardian-watch` subcommand in its ImagePath,
+// which is how the binary routes an SCM start to the sentinel entry.
+pub const GUARDIAN_SERVICE_NAME: &str = "mira-guardian-watch";
+const GUARDIAN_DISPLAY_NAME: &str = "MIRA-Guardian liveness sentinel";
+const GUARDIAN_DESCRIPTION: &str =
+    "Out-of-process MIRA-Guardian watchdog: watches that MIRA is alive and raises a direct alarm if not.";
+
 // On Windows there's no on-disk "unit file" — the service registration
 // lives in the registry under SCM. Return a virtual identifier so other
 // code's "is installed?" check still has something to call.
@@ -173,6 +182,94 @@ pub fn install(inputs: &InstallInputs) -> Result<(), Box<dyn Error>> {
     } else {
         println!("(skipped start per --no-enable; use `mira start` to launch)");
     }
+    Ok(())
+}
+
+/// Register + start the Guardian sentinel as its OWN SCM service
+/// (`mira-guardian-watch`), separate from `mira` so it outlives a crash. Its
+/// ImagePath carries the `guardian-watch` subcommand (top-level flags first),
+/// which the binary detects on an SCM start to route to the sentinel entry
+/// ([`try_run_as_guardian_service`]).
+pub fn install_guardian(inputs: &InstallInputs) -> Result<(), Box<dyn Error>> {
+    let manager = open_manager(ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)
+        .map_err(elevation_hint("guardian-install"))?;
+
+    // Top-level flags BEFORE the `guardian-watch` subcommand word.
+    let mut launch_args: Vec<OsString> = Vec::new();
+    launch_args.push(OsString::from("--config"));
+    launch_args.push(inputs.config_path.clone().into_os_string());
+    launch_args.push(OsString::from("--data-dir"));
+    launch_args.push(inputs.data_dir.clone().into_os_string());
+    launch_args.push(OsString::from("guardian-watch"));
+
+    let service_info = ServiceInfo {
+        name:             OsString::from(GUARDIAN_SERVICE_NAME),
+        display_name:     OsString::from(GUARDIAN_DISPLAY_NAME),
+        service_type:     ServiceType::OWN_PROCESS,
+        start_type:       ServiceStartType::AutoStart,
+        error_control:    ServiceErrorControl::Normal,
+        executable_path:  inputs.mira_bin.clone(),
+        launch_arguments: launch_args,
+        dependencies:     vec![], // intentionally NOT dependent on `mira`
+        account_name:     None,   // LocalSystem
+        account_password: None,
+    };
+
+    if let Ok(existing) = manager.open_service(GUARDIAN_SERVICE_NAME, ServiceAccess::DELETE) {
+        eprintln!("(removing stale guardian service registration before re-install)");
+        let _ = existing.delete();
+    }
+    let service = manager
+        .create_service(&service_info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)
+        .map_err(elevation_hint("guardian-install"))?;
+    service.set_description(GUARDIAN_DESCRIPTION).map_err(box_err)?;
+    println!("✓ registered Windows service '{GUARDIAN_SERVICE_NAME}'");
+
+    // Crash safety net (Restart=always parity). Unlike the server we do NOT
+    // enable recovery-on-non-crash — the sentinel has no deliberate-restart path,
+    // so a clean exit 0 (operator Stop) must stay stopped; only an actual crash
+    // (non-zero unexpected exit) trips a restart.
+    let failure_actions = ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(120)),
+        reboot_msg:   None,
+        command:      None,
+        actions:      Some(vec![
+            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(2) },
+            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(5) },
+            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(10) },
+        ]),
+    };
+    if let Err(e) = service.update_failure_actions(failure_actions) {
+        eprintln!("(warning: couldn't set SCM restart/recovery actions for the sentinel: {e})");
+    }
+
+    if inputs.enable_now {
+        service.start::<&str>(&[]).map_err(box_err)?;
+        println!("✓ sentinel service started");
+    } else {
+        println!("(skipped start per --no-enable)");
+    }
+    Ok(())
+}
+
+/// Stop + delete the Guardian sentinel SCM service.
+pub fn uninstall_guardian() -> Result<(), Box<dyn Error>> {
+    let manager = open_manager(ServiceManagerAccess::CONNECT)
+        .map_err(elevation_hint("guardian-uninstall"))?;
+    let service = match manager.open_service(
+        GUARDIAN_SERVICE_NAME,
+        ServiceAccess::STOP | ServiceAccess::DELETE | ServiceAccess::QUERY_STATUS,
+    ) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("Guardian sentinel service '{GUARDIAN_SERVICE_NAME}' not found — nothing to do.");
+            return Ok(());
+        }
+    };
+    // Best-effort stop before delete.
+    let _ = service.stop();
+    service.delete().map_err(box_err)?;
+    println!("✓ deleted Windows service '{GUARDIAN_SERVICE_NAME}'");
     Ok(())
 }
 
@@ -527,6 +624,98 @@ fn service_main(_args: Vec<OsString>) {
         1
     };
 
+    let _ = status_handle.set_service_status(ServiceStatus {
+        service_type:      ServiceType::OWN_PROCESS,
+        current_state:     ServiceState::Stopped,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code:         ServiceExitCode::Win32(exit_code),
+        checkpoint:        0,
+        wait_hint:         Duration::default(),
+        process_id:        None,
+    });
+}
+
+// ── Guardian sentinel SCM service entry ──────────────────────────────────────
+
+define_windows_service!(ffi_guardian_service_main, guardian_service_main);
+
+/// Attach to SCM as the GUARDIAN sentinel service. `main` calls this (instead of
+/// [`try_run_as_service`]) when our launch args carry `guardian-watch`, so the
+/// SAME binary routes an SCM start to the sentinel entry rather than the server.
+/// Returns `Ok` only when actually running under SCM; on a console launch it
+/// errors and the caller falls through to the normal CLI (`mira guardian-watch`
+/// in the foreground).
+pub fn try_run_as_guardian_service() -> windows_service::Result<()> {
+    service_dispatcher::start(GUARDIAN_SERVICE_NAME, ffi_guardian_service_main)
+}
+
+fn guardian_service_main(_args: Vec<OsString>) {
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+
+    let status_handle = match service_control_handler::register(GUARDIAN_SERVICE_NAME, {
+        let n = Arc::clone(&shutdown);
+        move |control| -> ServiceControlHandlerResult {
+            match control {
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                ServiceControl::Stop | ServiceControl::Shutdown => {
+                    STOP_REQUESTED.store(true, Ordering::SeqCst);
+                    n.notify_one();
+                    ServiceControlHandlerResult::NoError
+                }
+                _ => ServiceControlHandlerResult::NotImplemented,
+            }
+        }
+    }) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let _ = status_handle.set_service_status(ServiceStatus {
+        service_type:      ServiceType::OWN_PROCESS,
+        current_state:     ServiceState::Running,
+        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        exit_code:         ServiceExitCode::Win32(0),
+        checkpoint:        0,
+        wait_hint:         Duration::default(),
+        process_id:        None,
+    });
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let cfg_override = std::env::var_os("MIRA_CONFIG").map(PathBuf::from);
+            let mut config = crate::config::MiraConfig::load(cfg_override)
+                .map_err(|e| -> Box<dyn Error + Send + Sync> { format!("config load: {e}").into() })?;
+            // Sentinel log next to the data dir (LocalSystem's `~` is hidden).
+            if config.logging.file == crate::config::default_log_file() {
+                config.logging.file = config.data_dir_path()
+                    .join("logs").join("mira-guardian-watch.log")
+                    .to_string_lossy().into_owned();
+            }
+            crate::log_filter::init_to_file(&config.logging.level, &config.log_file_path());
+            let config = Arc::new(config);
+            // The sentinel loops until stopped; race it against the SCM Stop notify.
+            tokio::select! {
+                r = crate::guardian_sentinel::run(Arc::clone(&config)) =>
+                    r.map_err(|e| -> Box<dyn Error + Send + Sync> { format!("sentinel: {e}").into() }),
+                _ = shutdown.notified() => Ok(()),
+            }
+        })
+    }));
+
+    if let Err(panic) = &result {
+        let _ = std::fs::write(
+            std::env::temp_dir().join("mira-guardian-panic.log"),
+            format!("MIRA-Guardian sentinel panicked: {panic:?}\n"),
+        );
+    }
+    // Operator Stop → exit 0 (stay stopped). Any other exit (sentinel error or
+    // panic) → exit 1, so SCM's recovery action relaunches the watch. The
+    // sentinel has no deliberate self-restart path, so there's no relauncher.
+    let exit_code: u32 = if STOP_REQUESTED.load(Ordering::SeqCst) { 0 } else { 1 };
     let _ = status_handle.set_service_status(ServiceStatus {
         service_type:      ServiceType::OWN_PROCESS,
         current_state:     ServiceState::Stopped,

@@ -3,9 +3,10 @@
 //! `mira install` / `uninstall` — make the OS supervise MIRA so the web
 //! UI's Restart button actually restarts.
 //!
-//! Slices 2/6 of design-docs/install-and-supervisor.md ship the Linux/systemd-user
-//! and macOS/launchd backends. Docker users are pointed at `docker compose`
-//! (slice 5); native Windows is still deferred.
+//! Slices 2/6 of design-docs/install-and-supervisor.md ship the Linux/systemd-user,
+//! macOS/launchd, and Windows/SCM backends. Each also installs the out-of-process
+//! Guardian sentinel as its own supervised unit (`mira guardian-install`). Docker
+//! users are pointed at `docker compose` (slice 5).
 
 pub mod binary_upgrade;
 pub mod chatterbox;
@@ -360,9 +361,19 @@ pub fn run_uninstall() -> Result<(), Box<dyn Error>> {
         return linux::uninstall();
     }
     #[cfg(target_os = "macos")]
-    return macos::uninstall();
+    {
+        if let Err(e) = macos::uninstall_guardian() {
+            eprintln!("(note: could not remove the Guardian sentinel agent: {e})");
+        }
+        return macos::uninstall();
+    }
     #[cfg(target_os = "windows")]
-    return windows::uninstall();
+    {
+        if let Err(e) = windows::uninstall_guardian() {
+            eprintln!("(note: could not remove the Guardian sentinel service: {e})");
+        }
+        return windows::uninstall();
+    }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     Err("Uninstall is only supported on Linux/systemd, macOS/launchd, or Windows/SCM.".into())
 }
@@ -381,20 +392,16 @@ fn guardian_process_enabled(config_path: &Path) -> bool {
 
 /// Install + enable the Guardian liveness sentinel as its own supervised unit
 /// (`mira guardian-install`). Separate from the main service so it outlives a
-/// server crash. Linux/systemd today; macOS/Windows return a clear "not yet"
-/// pointing at the documented manual unit.
-#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+/// server crash. Supervised on all three desktop backends: Linux/systemd-user,
+/// macOS/launchd, and Windows/SCM — each as a service distinct from the main
+/// MIRA unit so a MIRA crash never takes the watchdog down with it.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos", target_os = "windows")), allow(unused_variables))]
 pub fn run_guardian_install(opts: InstallOptions) -> Result<(), Box<dyn Error>> {
     match detect_host() {
-        HostKind::LinuxSystemdUser => {}
+        HostKind::LinuxSystemdUser | HostKind::Macos | HostKind::Windows => {}
         HostKind::Docker => return Err(
             "Inside a container — run the sentinel as a compose sidecar service \
              (`command: mira guardian-watch`), not via this installer.".into()
-        ),
-        HostKind::Macos | HostKind::Windows => return Err(
-            "Guardian sentinel auto-install isn't supported on this platform yet \
-             (Linux/systemd is). Run it under launchd/SCM using the manual unit in \
-             design-docs/guardian-separate-process.md; native support lands in a follow-up.".into()
         ),
         HostKind::LinuxNoSystemdUser if is_wsl() => return Err(
             "WSL systemd is not enabled. Add to /etc/wsl.conf then `wsl --shutdown`:\n\n\
@@ -404,15 +411,16 @@ pub fn run_guardian_install(opts: InstallOptions) -> Result<(), Box<dyn Error>> 
         HostKind::Other => return Err("Unsupported platform.".into()),
     }
 
+    // Platform-agnostic prep.
+    let mira_bin = std::env::current_exe()
+        .map_err(|e| -> Box<dyn Error> { format!("could not resolve current binary path: {e}").into() })?;
+    if let Some(p) = opts.config_path.parent() { std::fs::create_dir_all(p)?; }
+    std::fs::create_dir_all(&opts.working_dir)?;
+    let data_dir = resolve_install_data_dir(&opts.config_path);
+    let enabled  = guardian_process_enabled(&opts.config_path);
+
     #[cfg(target_os = "linux")]
     {
-        let mira_bin = std::env::current_exe()
-            .map_err(|e| -> Box<dyn Error> { format!("could not resolve current binary path: {e}").into() })?;
-        if let Some(p) = opts.config_path.parent() { std::fs::create_dir_all(p)?; }
-        std::fs::create_dir_all(&opts.working_dir)?;
-        let data_dir = resolve_install_data_dir(&opts.config_path);
-        let enabled  = guardian_process_enabled(&opts.config_path);
-
         linux::install_guardian(&linux::InstallInputs {
             mira_bin,
             config_path: opts.config_path.clone(),
@@ -422,7 +430,6 @@ pub fn run_guardian_install(opts: InstallOptions) -> Result<(), Box<dyn Error>> 
             enable_now:  !opts.no_enable,
             system:      opts.system,
         })?;
-
         println!();
         println!("✓ MIRA-Guardian liveness sentinel installed as a separate unit.");
         if opts.system {
@@ -432,23 +439,58 @@ pub fn run_guardian_install(opts: InstallOptions) -> Result<(), Box<dyn Error>> 
             println!("  status: systemctl --user status mira-guardian-watch");
             println!("  logs:   journalctl --user -u mira-guardian-watch -f");
         }
-        if !enabled {
-            println!("  note:   guardian.process.enabled is false — the sentinel is installed but idles.");
-            println!("          Enable it (Settings → Guardian → Liveness sentinel), then restart it:");
-            println!("          systemctl --user restart mira-guardian-watch");
-        }
-        return Ok(());
     }
-    #[cfg(not(target_os = "linux"))]
-    Err("unreachable: non-Linux guardian install handled above".into())
+    #[cfg(target_os = "macos")]
+    {
+        macos::install_guardian(&macos::InstallInputs {
+            mira_bin,
+            config_path: opts.config_path.clone(),
+            working_dir: opts.working_dir.clone(),
+            data_dir,
+            web_dir:     None,
+            enable_now:  !opts.no_enable,
+        })?;
+        println!();
+        println!("✓ MIRA-Guardian liveness sentinel installed as a launchd agent.");
+        println!("  status: launchctl print gui/$UID/com.mira.guardian-watch");
+        println!("  logs:   ~/Library/Logs/mira/mira-guardian-watch.{{out,err}}.log");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::install_guardian(&windows::InstallInputs {
+            mira_bin,
+            config_path: opts.config_path.clone(),
+            working_dir: opts.working_dir.clone(),
+            data_dir,
+            web_dir:     None,
+            enable_now:  !opts.no_enable,
+        })?;
+        println!();
+        println!("✓ MIRA-Guardian liveness sentinel installed as a Windows service ('{}').",
+                 windows::GUARDIAN_SERVICE_NAME);
+        println!("  status: sc query {}", windows::GUARDIAN_SERVICE_NAME);
+    }
+
+    if !enabled {
+        println!("  note:   guardian.process.enabled is false — the sentinel is installed but idles.");
+        println!("          Enable it (Settings → Guardian → Liveness sentinel), then restart the unit.");
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    return Err("Guardian sentinel install is only supported on Linux/systemd, macOS/launchd, or Windows/SCM.".into());
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    Ok(())
 }
 
 /// Remove the Guardian sentinel unit (`mira guardian-uninstall`).
 pub fn run_guardian_uninstall() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "linux")]
     return linux::uninstall_guardian();
-    #[cfg(not(target_os = "linux"))]
-    Err("Guardian sentinel auto-uninstall is Linux/systemd only today.".into())
+    #[cfg(target_os = "macos")]
+    return macos::uninstall_guardian();
+    #[cfg(target_os = "windows")]
+    return windows::uninstall_guardian();
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    Err("Guardian sentinel uninstall is only supported on Linux/systemd, macOS/launchd, or Windows/SCM.".into())
 }
 
 // Common pre-flight for service-control subcommands. Refuses with a

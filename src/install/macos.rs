@@ -10,12 +10,21 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::install::plist::{render, PlistInputs, LAUNCHD_LABEL};
+use crate::install::unit::ServiceKind;
+
+/// `~/Library/LaunchAgents/<label>.plist`.
+fn plist_path_for(label: &str) -> PathBuf {
+    home_dir().join("Library/LaunchAgents").join(format!("{label}.plist"))
+}
 
 /// `~/Library/LaunchAgents/com.mira.plist`.
 pub fn plist_path() -> PathBuf {
-    home_dir()
-        .join("Library/LaunchAgents")
-        .join(format!("{LAUNCHD_LABEL}.plist"))
+    plist_path_for(LAUNCHD_LABEL)
+}
+
+/// `~/Library/LaunchAgents/com.mira.guardian-watch.plist` — the sentinel agent.
+pub fn guardian_plist_path() -> PathBuf {
+    plist_path_for(ServiceKind::GuardianWatch.launchd_label())
 }
 
 /// Default log directory (`~/Library/Logs/mira/`). macOS doesn't expose a
@@ -34,7 +43,11 @@ fn home_dir() -> PathBuf {
 /// commands to the current user's GUI session, which is what hosts user
 /// LaunchAgents.
 fn service_target() -> String {
-    format!("gui/{}/{LAUNCHD_LABEL}", current_uid())
+    service_target_for(LAUNCHD_LABEL)
+}
+
+fn service_target_for(label: &str) -> String {
+    format!("gui/{}/{label}", current_uid())
 }
 
 fn domain_target() -> String {
@@ -82,6 +95,7 @@ pub fn install(inputs: &InstallInputs) -> Result<(), Box<dyn Error>> {
     }
 
     let body = render(&PlistInputs {
+        service:     ServiceKind::Server,
         mira_bin:    &inputs.mira_bin,
         config_path: &inputs.config_path,
         working_dir: &inputs.working_dir,
@@ -144,6 +158,73 @@ fn ensure_plist_installed() -> Result<(), Box<dyn Error>> {
             plist.display()
         ).into());
     }
+    Ok(())
+}
+
+/// Install + load the Guardian sentinel as its OWN LaunchAgent
+/// (`com.mira.guardian-watch`), separate from the main agent so it outlives a
+/// MIRA crash. Mirrors [`install`].
+pub fn install_guardian(inputs: &InstallInputs) -> Result<(), Box<dyn Error>> {
+    let plist = guardian_plist_path();
+    if let Some(parent) = plist.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let logs = log_dir();
+    std::fs::create_dir_all(&logs)?;
+    // The sentinel's recall_history embeds via onnxruntime when reachable; point
+    // at a Homebrew ORT if present so recall works (best-effort — recall degrades
+    // gracefully without it, and the sentinel serves no web bundle).
+    let ort = detect_onnxruntime();
+    let mut extra_env: Vec<(&str, &str)> = Vec::new();
+    if let Some(p) = ort.as_deref() {
+        extra_env.push(("ORT_DYLIB_PATH", p));
+    }
+
+    let body = render(&PlistInputs {
+        service:     ServiceKind::GuardianWatch,
+        mira_bin:    &inputs.mira_bin,
+        config_path: &inputs.config_path,
+        working_dir: &inputs.working_dir,
+        data_dir:    &inputs.data_dir,
+        web_dir:     None,
+        log_dir:     &logs,
+        extra_env:   &extra_env,
+    });
+    write_atomic(&plist, &body)?;
+    println!("✓ wrote {}", plist.display());
+
+    let target = service_target_for(ServiceKind::GuardianWatch.launchd_label());
+    let activate = || -> Result<(), Box<dyn Error>> {
+        let _ = run_launchctl(&["bootout", &target]);
+        if inputs.enable_now {
+            run_launchctl(&["bootstrap", &domain_target(), &plist.display().to_string()])?;
+            println!("✓ launchctl bootstrap {target}");
+        } else {
+            println!("(skipped bootstrap per --no-enable; load with: launchctl bootstrap {} {})",
+                domain_target(), plist.display());
+        }
+        Ok(())
+    };
+    match activate() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&plist);
+            eprintln!("(cleaned up partial install: removed {})", plist.display());
+            Err(e)
+        }
+    }
+}
+
+/// Boot out + remove the Guardian sentinel LaunchAgent.
+pub fn uninstall_guardian() -> Result<(), Box<dyn Error>> {
+    let plist = guardian_plist_path();
+    if !plist.exists() {
+        println!("Guardian LaunchAgent not found at {} — nothing to do.", plist.display());
+        return Ok(());
+    }
+    let _ = run_launchctl(&["bootout", &service_target_for(ServiceKind::GuardianWatch.launchd_label())]);
+    std::fs::remove_file(&plist)?;
+    println!("✓ removed {}", plist.display());
     Ok(())
 }
 
