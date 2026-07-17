@@ -276,7 +276,9 @@ fn spawn_analysis_task(
         }
         let _ = history.touch_conversation(&conversation_id);
 
-        let ctx = TurnContext::default();
+        // Internal incident-analysis turn (a fixed diagnostic prompt, not a
+        // user wellbeing conversation) — opt out of the universal safety floor.
+        let ctx = TurnContext { suppress_safety_floor: true, ..TurnContext::default() };
         let mut rx = match agent.process_with_context(
             &conversation_id, &user_id, "web", &prompt, None, ctx,
         ).await {

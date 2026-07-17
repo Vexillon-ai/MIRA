@@ -95,6 +95,13 @@ pub struct TurnContext {
     // must NOT touch. False (default) means any `allowed_tool_names` is a
     // security/visibility allow-list that adaptive may narrow *within*.
     pub tools_flow_restricted:  bool,
+    // Suppress the universal duty-of-care safety floor for this turn. Default
+    // false → the floor is ON for every turn (guardian-scope.md §4.5: serious
+    // risk of harm is always conveyable; no user/config setting can silence it).
+    // Set true ONLY for internal, non-user-facing persona turns that carry their
+    // own charter — the Guardian, watchdog incident analysis, the benchmark
+    // harness — where a crisis-response floor would be off-key.
+    pub suppress_safety_floor:  bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -382,6 +389,9 @@ impl AgentCore {
             skip_wiki_hooks:        true,
             // Guardian pins its exact Ring-0/Ring-1 toolset — never adapt it.
             tools_flow_restricted:  true,
+            // The Guardian has its own charter; the MIRA-persona crisis-response
+            // safety floor would be off-key on an operator-alert composer.
+            suppress_safety_floor:  true,
             ..TurnContext::default()
         };
         let mut rx = self
@@ -833,18 +843,24 @@ impl AgentCore {
             Some(s) => s,
             None    => { owned_prompt = self.system_prompt(); &owned_prompt }
         };
-        // Companion-mode addenda (Slices 3 + 4):
-        // - `companion_addendum` is the casual-conversation nudge that
-        // fires when the user's message looks like chit-chat
-        //.
-        // - `safety_addendum` is the non-overridable safety floor.
-        // It always appends when companion is active so the model
-        // gets the rules on every turn. Goes LAST so it has final
-        // say in the system prompt.
-        let companion_active = self.companion.get()
-            .filter(|_| context.system_prompt_override.is_none())
+        // Companion-mode addenda (Slices 3 + 4) + the universal safety floor:
+        // - `companion_safety_active` — the user has a companion safety context
+        //   (a configured contact). Decoupled from the persona-override
+        //   condition, so a normal chat that carries a profile-preamble override
+        //   still gets the fuller contact-aware floor.
+        // - `companion_active` — the casual-mode nudge + tone dials additionally
+        //   require *no* persona override (they're pure-companion-chat features).
+        // - `safety_addendum` — the non-overridable duty-of-care floor. It is
+        //   UNIVERSAL: on for every user-facing turn regardless of companion
+        //   mode (guardian-scope.md §4.5). Companion users with a contact get the
+        //   fuller version; everyone else gets the base floor; only internal
+        //   persona turns (`suppress_safety_floor`) opt out. Goes LAST so it has
+        //   the final say in the system prompt.
+        let companion_safety_active = self.companion.get()
             .map(|sys| sys.is_active(user_id))
             .unwrap_or(false);
+        let companion_active = companion_safety_active
+            && context.system_prompt_override.is_none();
 
         let companion_addendum: String = if companion_active
             && crate::companion::chitchat::classify(input)
@@ -854,11 +870,9 @@ impl AgentCore {
         } else {
             String::new()
         };
-        let safety_addendum: &'static str = if companion_active {
-            crate::companion::safety::SAFETY_ADDENDUM
-        } else {
-            ""
-        };
+        let safety_addendum: &'static str = crate::companion::safety::safety_addendum_for(
+            context.suppress_safety_floor, companion_safety_active,
+        );
 
         // Per-user tone dials (warmth/playfulness/verbosity), fetched once for
         // both the always-on voice steer and the easter-egg layer. Skipped for

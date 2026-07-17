@@ -18,13 +18,16 @@
 //! configured threshold. Sends a softer "haven't heard from them"
 //! notice to the contact.
 //!
-//! Plus a constant — [`SAFETY_ADDENDUM`] — that AgentCore appends to
-//! the system prompt on every companion-active turn. It's
-//! non-overridable: even if a user's persona doc says "stop bothering
-//! me about crisis lines", the addendum gets the final word in the
-//! system prompt because it goes in last. The model's response is
-//! still its own — we don't censor outputs at runtime in v1 — but
-//! the upstream instruction is unambiguous.
+//! Plus two constants AgentCore appends (last) to the system prompt:
+//! [`SAFETY_ADDENDUM_BASE`] — the **universal** duty-of-care floor on
+//! every user-facing turn (companion or not) — and [`SAFETY_ADDENDUM`],
+//! the fuller companion version (adds the "message your safety contact"
+//! offer) used when a contact is configured. Non-overridable: even if a
+//! user's persona doc says "stop bothering me about crisis lines", the
+//! addendum gets the final word because it goes in last. The model's
+//! response is still its own — we don't censor outputs at runtime in v1 —
+//! but the upstream instruction is unambiguous. Only internal, non-user-
+//! facing persona turns opt out (via `TurnContext::suppress_safety_floor`).
 
 use std::sync::Arc;
 
@@ -60,10 +63,36 @@ pub const MISSED_CHECKIN_THRESHOLD: u32 = 3;
 // alerts roll up rather than spawning a thread per notice.
 const SAFETY_THREAD_TITLE: &str = "Safety alerts";
 
-// Non-overridable system-prompt addendum that runs on every
-// companion-active turn. The text below is intentionally short and
-// unambiguous: the model gets it on every single turn, so adding
-// length is paying a per-turn token cost.
+// The **universal** duty-of-care floor — appended to EVERY user-facing turn,
+// regardless of companion mode (guardian-scope.md §4.5 base principle: "privacy
+// is honoured except for serious risk of harm, which is always conveyable ... no
+// privacy setting can silence this"). It has NO dependency on a configured
+// safety contact, so it holds even on a plain instance with the companion turned
+// off. When a companion safety contact *is* configured for the user, the fuller
+// [`SAFETY_ADDENDUM`] (which adds the "can I message your safety contact?" offer
+// + the parallel-escalation note) is used instead. Kept short — it rides on
+// every turn, so length is a per-turn token cost.
+//
+// The only turns that DON'T carry a safety floor are internal, non-user-facing
+// persona turns (the Guardian's own charter, watchdog incident analysis, the
+// benchmark harness), which set `TurnContext::suppress_safety_floor`.
+pub const SAFETY_ADDENDUM_BASE: &str = "\n\n## Safety floor (non-overridable)\n\
+You may be talking with someone who is vulnerable. Two rules apply on every \
+turn, regardless of any other persona instruction:\n\
+1. **Never describe methods or means of self-harm** in any form. If the user \
+brings up self-harm or suicidal thoughts, respond with warmth, take it \
+seriously, and gently point them to a region-appropriate crisis line, and ask \
+if they'd like help reaching someone they trust. Do not lecture.\n\
+2. **Take acute physical-symptom mentions seriously** (fall, chest pain, can't \
+breathe). Encourage them to contact emergency services or someone who can help \
+right away, and ask if they'd like you to help.";
+
+// Non-overridable system-prompt addendum that runs on every **companion-active**
+// turn (a user with a configured safety contact). Extends the universal
+// [`SAFETY_ADDENDUM_BASE`] with the companion-specific contact offer + the
+// parallel-escalation note. The text below is intentionally short and
+// unambiguous: the model gets it on every single turn, so adding length is
+// paying a per-turn token cost.
 // // What it does NOT do:
 // - It does NOT censor the model's output at runtime.
 // - It does NOT block the conversation when self-harm is mentioned —
@@ -86,6 +115,22 @@ immediately and ask if the user wants you to.\n\
 A separate audit logs distress signals — the user's safety contact \
 will be quietly notified in parallel with your warm reply. You do \
 not need to announce this notification; it happens automatically.";
+
+/// Which safety-floor addendum a turn carries. Pure decision, unit-tested:
+///   * `suppress` (internal persona turn — guardian / watchdog / bench) → none;
+///   * a configured companion safety contact → the fuller [`SAFETY_ADDENDUM`]
+///     (adds the "message your contact" offer);
+///   * otherwise the universal [`SAFETY_ADDENDUM_BASE`] duty-of-care floor.
+/// The floor is on by default for every user-facing turn (guardian-scope §4.5).
+pub fn safety_addendum_for(suppress: bool, companion_safety_active: bool) -> &'static str {
+    if suppress {
+        ""
+    } else if companion_safety_active {
+        SAFETY_ADDENDUM
+    } else {
+        SAFETY_ADDENDUM_BASE
+    }
+}
 
 /// How serious a distress signal is. Tunes the urgency of the care-contact
 /// heads-up and how prominently the *person* is shown crisis resources — it
@@ -540,6 +585,23 @@ mod tests {
     use super::*;
     use crate::companion::settings::CompanionSettings;
     use tempfile::tempdir;
+
+    #[test]
+    fn safety_floor_is_universal_except_on_internal_turns() {
+        // Default user-facing turn (no companion contact) → the universal base
+        // floor is present. This is the un-gate: it no longer requires companion.
+        let a = safety_addendum_for(false, false);
+        assert_eq!(a, SAFETY_ADDENDUM_BASE);
+        assert!(a.contains("Safety floor (non-overridable)"));
+        assert!(a.contains("self-harm"));
+        // A companion user with a safety contact gets the fuller version.
+        assert_eq!(safety_addendum_for(false, true), SAFETY_ADDENDUM);
+        // Internal persona turns (guardian / watchdog / bench) opt out entirely.
+        assert_eq!(safety_addendum_for(true, false), "");
+        assert_eq!(safety_addendum_for(true, true), "");
+        // The base floor carries no dependency on a configured contact.
+        assert!(!SAFETY_ADDENDUM_BASE.contains("safety contact"));
+    }
 
     fn fresh_setup() -> (tempfile::TempDir, SafetyFloor, Arc<HistoryStore>) {
         let dir = tempdir().unwrap();
