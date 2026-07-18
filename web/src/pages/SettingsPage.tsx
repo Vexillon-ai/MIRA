@@ -2059,9 +2059,11 @@ function GuardianTab({
           (<code>mira guardian-watch</code>) that probes MIRA's <code>/health</code>
           and, if MIRA is unreachable for a sustained window, sends a
           <strong> direct web-push alarm</strong> to your device — no dependency on
-          the down MIRA. Observe-and-alarm only. After enabling it here, install
-          it as its own supervised service by running <code>mira guardian-install</code>
-          on the host (Linux/systemd today), then restart it. These settings drive it.
+          the down MIRA. Observe-and-alarm only. <strong>Enabling it here
+          automatically registers + starts</strong> it as its own supervised service
+          (Linux/systemd, macOS/launchd, or Windows/SCM); disabling stops +
+          unregisters it. For the alarm to reach you when MIRA is down, register a
+          push device (allow notifications in your browser). These settings drive it.
         </p>
         <Field label="Enable sentinel" desc="Master switch. The sentinel is a separate service you supervise; this only tells it (and the UI) it's meant to run.">
           <Toggle value={bool('guardian.process.enabled', false)} onChange={(v) => set('guardian.process.enabled', v)} />
@@ -2080,6 +2082,9 @@ function GuardianTab({
         </Field>
         <Field label="Probe URL (optional)" desc="Override the liveness URL. Empty = http://127.0.0.1:<server port>/health. Set for a non-default bind or reverse proxy.">
           <TextInput value={str('guardian.process.probe_url', '')} onChange={(v) => set('guardian.process.probe_url', v)} placeholder="http://127.0.0.1:8087/health" mono />
+        </Field>
+        <Field label="Sentinel log file (optional)" desc="Where the sentinel writes its logs. Empty = share MIRA's main log file (Advanced → Logging → File) so both processes' lines land together. Set a path to give the sentinel its own file (easier to read, especially while MIRA is down). Restart the sentinel after changing.">
+          <TextInput value={str('guardian.process.log_file', '')} onChange={(v) => set('guardian.process.log_file', v)} placeholder="(share MIRA's log file)" mono />
         </Field>
       </Section>
 

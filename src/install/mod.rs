@@ -475,6 +475,11 @@ pub fn run_guardian_install(opts: InstallOptions) -> Result<(), Box<dyn Error>> 
         println!("  note:   guardian.process.enabled is false — the sentinel is installed but idles.");
         println!("          Enable it (Settings → Guardian → Liveness sentinel), then restart the unit.");
     }
+    // The MIRA-down alarm can only reach you via a channel that doesn't need MIRA
+    // — direct web-push. Remind the operator to register a device, or the alarm
+    // reaches no one.
+    println!("  reach:  the down-alarm uses direct web-push when MIRA is down — register at least one");
+    println!("          device (open MIRA in a browser and allow notifications), or it can't reach you.");
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     return Err("Guardian sentinel install is only supported on Linux/systemd, macOS/launchd, or Windows/SCM.".into());
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -491,6 +496,54 @@ pub fn run_guardian_uninstall() -> Result<(), Box<dyn Error>> {
     return windows::uninstall_guardian();
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     Err("Guardian sentinel uninstall is only supported on Linux/systemd, macOS/launchd, or Windows/SCM.".into())
+}
+
+/// Build guardian-sentinel `InstallOptions` from a running server's config path,
+/// mirroring the CLI defaults in `main.rs`. `system` is inferred from an
+/// `/etc/mira` config (the `--system` convention), so a system-scoped MIRA
+/// installs a system-scoped sentinel and a user-scoped one stays user-scoped.
+pub fn guardian_install_opts_for(config_path: PathBuf) -> InstallOptions {
+    let system = config_path.starts_with("/etc/mira");
+    let working_dir = if system {
+        PathBuf::from("/var/lib/mira")
+    } else {
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+    };
+    InstallOptions { config_path, working_dir, web_dir: None, no_enable: false, force: false, system }
+}
+
+/// React to a **live** change of `guardian.process.enabled` from the WebUI: when
+/// it flips on, register + start the sentinel as its own supervised service; when
+/// it flips off, stop + unregister it. Runs on a blocking thread and is
+/// fire-and-forget so a slow service op never blocks the settings save — the
+/// outcome is logged, and the Guardian panel reflects the resulting state.
+///
+/// This needs the running server to have the privilege to manage its sibling
+/// service (LocalSystem on a Windows SCM install; the user's own systemd/launchd
+/// scope on Linux/macOS). When it doesn't (e.g. a bare console dev run), the op
+/// fails and we log a clear "run `mira guardian-install` yourself" fallback rather
+/// than silently elevating — matching the least-privilege / degrade-and-notify
+/// posture of the privileged-helper design.
+pub fn apply_guardian_enable_change(enabled: bool, config_path: PathBuf) {
+    tokio::task::spawn_blocking(move || {
+        if enabled {
+            match run_guardian_install(guardian_install_opts_for(config_path)) {
+                Ok(())  => tracing::info!("guardian: auto-registered + started the sentinel service (enabled via WebUI)"),
+                Err(e)  => tracing::error!(
+                    "guardian: could not auto-register the sentinel service ({e}). \
+                     Run `mira guardian-install` from a privileged shell to finish enabling it."
+                ),
+            }
+        } else {
+            match run_guardian_uninstall() {
+                Ok(())  => tracing::info!("guardian: auto-unregistered + stopped the sentinel service (disabled via WebUI)"),
+                Err(e)  => tracing::error!(
+                    "guardian: could not auto-unregister the sentinel service ({e}). \
+                     Run `mira guardian-uninstall` from a privileged shell to remove it."
+                ),
+            }
+        }
+    });
 }
 
 // Common pre-flight for service-control subcommands. Refuses with a

@@ -141,25 +141,74 @@ pub fn read_relay_token(data_dir: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// The outcome of a single [`deliver`] — did the message actually reach anyone?
+/// A down-alarm that reaches nobody is a **failed** alarm (the sentinel's whole
+/// reason to exist is to reach the household when MIRA can't), so the caller must
+/// be able to tell "delivered" from "delivered to 0 devices".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Handed to MIRA over the loopback relay — MIRA will fan it out to its own
+    /// channels (full reach). Used while MIRA is up (recovery / while-up triage).
+    Relayed,
+    /// Direct web-push reached this many devices. `Pushed(0)` never happens —
+    /// zero devices is [`Delivery::Unreachable`], not a "success".
+    Pushed(usize),
+    /// Reached **no one**: no notify user, no web-push service, zero registered
+    /// devices, or every send errored. A down-alarm here must be surfaced loudly.
+    Unreachable,
+}
+
+impl Delivery {
+    /// Did the message reach at least one destination?
+    pub fn reached_anyone(self) -> bool {
+        match self {
+            Delivery::Relayed   => true,
+            Delivery::Pushed(n) => n > 0,
+            Delivery::Unreachable => false,
+        }
+    }
+}
+
 /// Deliver a Guardian message: **prefer routing THROUGH MIRA** (its own voice +
 /// full channel reach — Signal/Telegram/email/web/push) when MIRA is reachable;
 /// **fall back to a direct web-push** when it isn't (the MIRA-down safety net).
 /// Best-effort throughout; a down-alarm naturally takes the push path since MIRA
 /// is unreachable, while a recovery notice / future while-up triage goes through
-/// MIRA.
+/// MIRA. Returns a [`Delivery`] so a down-alarm can tell whether it reached
+/// anyone (0 devices is a failure, not a success).
 async fn deliver(
     config:  &MiraConfig,
     client:  &reqwest::Client,
     webpush: Option<&crate::notifications::web_push::WebPushService>,
     user_id: Option<&str>,
     message: &str,
-) {
+) -> Delivery {
     let uid = user_id.map(str::trim).filter(|s| !s.is_empty());
     if relay_through_mira(config, client, uid, message).await {
         info!("guardian-watch: delivered through MIRA (full channel reach)");
-        return;
+        return Delivery::Relayed;
     }
-    push_notice(webpush, uid, message).await;
+    push_notice(webpush, uid, message).await
+}
+
+/// Send the deterministic alarm **immediately**, then run the slow/fallible
+/// enrichment (LLM triage) as a **spawned follow-up** so it can never delay the
+/// alarm or stall the probe loop. Returns the immediate delivery outcome. The
+/// enrichment is skipped when the base alarm already reached no one (it would
+/// reach no one either, and burning the model is pointless). Split out so the
+/// "notify-first, triage-second" ordering is unit-testable without a live model.
+async fn notify_then_enrich<D, DF, E, EF>(base_deliver: D, enrich: E) -> Delivery
+where
+    D:  FnOnce() -> DF,
+    DF: std::future::Future<Output = Delivery>,
+    E:  FnOnce() -> EF + Send + 'static,
+    EF: std::future::Future<Output = ()> + Send + 'static,
+{
+    let outcome = base_deliver().await; // IMMEDIATE — the human is told now.
+    if outcome.reached_anyone() {
+        tokio::spawn(async move { enrich().await; }); // follow-up — never awaited here.
+    }
+    outcome
 }
 
 /// POST the message to MIRA's loopback relay endpoint with the shared-secret
@@ -185,14 +234,14 @@ async fn push_notice(
     webpush:  Option<&crate::notifications::web_push::WebPushService>,
     user_id:  Option<&str>,
     message:  &str,
-) {
+) -> Delivery {
     let Some(uid) = user_id.map(str::trim).filter(|s| !s.is_empty()) else {
         warn!("guardian-watch: no guardian.process.notify_user_id set — logged only, no push sent");
-        return;
+        return Delivery::Unreachable;
     };
     let Some(wp) = webpush else {
         warn!("guardian-watch: web-push unavailable (no keys/subscriptions in data dir) — logged only");
-        return;
+        return Delivery::Unreachable;
     };
     let notif = crate::notifications::Notification {
         kind:            crate::notifications::NotificationKind::GuardianAlert,
@@ -203,8 +252,15 @@ async fn push_notice(
         category:        None,
     };
     match wp.send_to_user(uid, &notif.to_envelope()).await {
-        Ok(n)  => info!("guardian-watch: alarm delivered to {n} device(s) for '{uid}'"),
-        Err(e) => error!("guardian-watch: web-push delivery failed for '{uid}': {e}"),
+        // Zero devices is NOT a success — the alarm reached no one. A watchdog
+        // that silently notifies nobody looks healthy while being deaf.
+        Ok(0)  => {
+            warn!("guardian-watch: web-push reached 0 devices for '{uid}' — no subscriptions \
+                   registered; the alarm reached NO ONE");
+            Delivery::Unreachable
+        }
+        Ok(n)  => { info!("guardian-watch: alarm delivered to {n} device(s) for '{uid}'"); Delivery::Pushed(n as usize) }
+        Err(e) => { error!("guardian-watch: web-push delivery failed for '{uid}': {e}"); Delivery::Unreachable }
     }
 }
 
@@ -412,6 +468,19 @@ async fn llm_triage(
     out
 }
 
+/// Resolve the log file the sentinel should write to. **By default it shares
+/// MIRA's main log file** (`logging.file`) so both processes' lines land
+/// together; set `guardian.process.log_file` to give the sentinel its own file.
+/// Returns the raw (possibly `~`-prefixed) string form — downstream
+/// `log_file_path()` expansion handles `~`. Single source of truth used by every
+/// sentinel entry point (console/launchd via `main`, and the Windows SCM service).
+pub fn resolve_log_file(config: &MiraConfig) -> String {
+    match config.guardian.process.log_file.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(custom) => custom.to_string(),      // its own file
+        None         => config.logging.file.clone(), // shared with MIRA (default)
+    }
+}
+
 /// Run the sentinel loop. Blocks (a long-running process) until the task is
 /// cancelled / the process exits. A no-op (returns immediately) when
 /// `guardian.process.enabled` is false.
@@ -464,6 +533,30 @@ pub async fn run(config: Arc<MiraConfig>) -> Result<(), MiraError> {
         notify_uid.as_deref().filter(|s| !s.is_empty()).unwrap_or("(none — logs only)"),
     );
 
+    // B2 preflight — a sentinel that can reach NO ONE when MIRA goes down is worse
+    // than none: it looks healthy while being deaf. The MIRA-down path is direct
+    // web-push only (the relay needs a live MIRA), so check that the notify user
+    // actually has a registered push device and warn loudly at startup if not.
+    {
+        let target = notify_uid.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let push_devices = match (target, webpush.as_ref()) {
+            (Some(uid), Some(wp)) => wp.list_for_user(uid).map(|v| v.len()).unwrap_or(0),
+            _ => 0,
+        };
+        if push_devices == 0 {
+            warn!(
+                "guardian-watch: NO REACHABLE DELIVERY TARGET — a MIRA-down alarm would reach NO ONE \
+                 (0 registered push devices{}). Open MIRA in a browser and allow notifications (or set \
+                 guardian.process.notify_user_id to a user who has), so the sentinel can actually reach \
+                 you when MIRA is down. An emergency SMS/phone channel is the guaranteed out-of-band path \
+                 (Guardian Phase 3, not yet available).",
+                target.map(|u| format!(" for '{u}'")).unwrap_or_else(|| " and no notify_user_id set".into()),
+            );
+        } else {
+            info!("guardian-watch: delivery preflight OK — {push_devices} push device(s) registered for the alarm target");
+        }
+    }
+
     let mut state  = SentinelState::default();
     // Dedup for the while-up health watch (2d) — the triggered-detector
     // fingerprint of the last health state we triaged.
@@ -480,21 +573,45 @@ pub async fn run(config: Arc<MiraConfig>) -> Result<(), MiraError> {
                 let hsum = health.as_ref()
                     .and_then(|h| h.latest().ok().flatten())
                     .and_then(|snap| health_summary(Some(&snap), now));
-                // 2b(i): try a REAL standalone Guardian triage (own local model,
-                // out-of-process). Fall back to the deterministic alarm if no
-                // local model is configured/reachable — the alarm always fires.
-                let msg = match llm_triage(&config, health.as_ref(),
-                    &triage_prompt(hsum.as_deref().unwrap_or(""), state.misses(), &url)).await
-                {
-                    Some(t) => { info!("guardian-watch: delivering standalone-triaged alarm"); t }
-                    None    => down_message(hsum.as_deref()),
-                };
-                error!("guardian-watch: MIRA DOWN ({} failed probes of {url}) — {msg}", state.misses());
-                // Prefer through-MIRA; a truly-down MIRA fails the relay → direct push.
-                deliver(&config, &client, webpush.as_ref(), notify_uid.as_deref(), &msg).await;
-                // Audit the down-alarm. Safe to write the shared HMAC chain here:
-                // MIRA is confirmed down, so it isn't concurrently writing.
-                audit_down(&data_dir, &url, state.misses(), hsum.as_deref());
+                // NOTIFY-FIRST: build + deliver the deterministic alarm IMMEDIATELY.
+                // The sentinel's whole purpose is to tell the household *fast* that
+                // MIRA is down — so the alarm must NOT wait on the slow, failure-prone
+                // LLM triage (which could time out after ~45s). Triage runs second, as
+                // a spawned follow-up that enriches the alarm without gating it.
+                let base = down_message(hsum.as_deref());
+                error!("guardian-watch: MIRA DOWN ({} failed probes of {url}) — {base}", state.misses());
+                // Clones for the spawned triage-enrichment (own local model, out-of-
+                // process). If it produces a sharper diagnosis, it delivers a follow-up.
+                let (cfg2, health2, client2, webpush2, uid2) =
+                    (Arc::clone(&config), health.clone(), client.clone(), webpush.clone(), notify_uid.clone());
+                let prompt = triage_prompt(hsum.as_deref().unwrap_or(""), state.misses(), &url);
+                let outcome = notify_then_enrich(
+                    // Immediate: prefer through-MIRA; a truly-down MIRA fails the relay → direct push.
+                    || deliver(&config, &client, webpush.as_ref(), notify_uid.as_deref(), &base),
+                    // Follow-up: real standalone Guardian triage; deliver a "more detail"
+                    // message if it returns one. A slow/absent model changes nothing here.
+                    move || async move {
+                        if let Some(t) = llm_triage(&cfg2, health2.as_ref(), &prompt).await {
+                            info!("guardian-watch: delivering standalone-triaged detail follow-up");
+                            deliver(&cfg2, &client2, webpush2.as_ref(), uid2.as_deref(), &t).await;
+                        }
+                    },
+                ).await;
+                // A down-alarm that reached NO ONE is a failed alarm — say so loudly.
+                // This is also the escalation seam for the Guardian Phase-3 emergency
+                // channel (out-of-band SMS / phone call): when it exists, escalate here
+                // if push yielded 0/failed. That channel is a NEW capability MIRA lacks
+                // and is gated on an owner decision (local GSM gateway vs. cloud) — see
+                // design-docs/guardian-build-plan.md §4.6.
+                if !outcome.reached_anyone() {
+                    error!("guardian-watch: DOWN-ALARM REACHED NO ONE — MIRA is down and no delivery \
+                            target is registered (0 push devices / no reachable channel). Register a \
+                            device (open MIRA in a browser and allow notifications) so the sentinel can \
+                            reach you. See Settings → Guardian.");
+                }
+                // Audit the down-alarm + whether it was actually delivered. Safe to write
+                // the shared HMAC chain here: MIRA is confirmed down, not concurrently writing.
+                audit_down(&data_dir, &url, state.misses(), hsum.as_deref(), outcome);
             }
             SentinelAction::Recover => {
                 info!("guardian-watch: MIRA recovered — responding again at {url}");
@@ -537,7 +654,7 @@ pub async fn run(config: Arc<MiraConfig>) -> Result<(), MiraError> {
 /// Append a tamper-evident audit record for a down-alarm. Best-effort + isolated
 /// so an audit failure never stops the watch. Only called when MIRA is down
 /// (single-writer, so the HMAC chain stays ordered).
-fn audit_down(data_dir: &Path, url: &str, misses: u32, health: Option<&str>) {
+fn audit_down(data_dir: &Path, url: &str, misses: u32, health: Option<&str>, outcome: Delivery) {
     let Ok(store) = crate::agent::audit::AuditStore::open(&data_dir.join("agent_audit.db")) else {
         return;
     };
@@ -546,13 +663,23 @@ fn audit_down(data_dir: &Path, url: &str, misses: u32, health: Option<&str>) {
         detail.push_str(" — ");
         detail.push_str(h);
     }
+    // Record whether the alarm actually reached anyone, so an undelivered alarm
+    // is visible in the audit trail as a failure — not indistinguishable from a
+    // delivered one.
+    let delivered = outcome.reached_anyone();
+    detail.push_str(match outcome {
+        Delivery::Relayed     => " — alarm relayed through MIRA",
+        Delivery::Pushed(_)   => " — alarm delivered via web-push",
+        Delivery::Unreachable => " — ALARM UNDELIVERED (no reachable delivery target)",
+    });
     let _ = store.record(
         crate::agent::audit::guardian_agent_id(),
         None,
         crate::agent::audit::AuditEvent::GuardianAction {
             action_id:   format!("sentinel-down-{url}"),
             action_kind: "sentinel_liveness".to_string(),
-            decision:    "mira_down".to_string(),
+            // Distinguish an undelivered alarm in the queryable decision field.
+            decision:    if delivered { "mira_down" } else { "mira_down_undelivered" }.to_string(),
             detail:      Some(detail),
         },
     );
@@ -686,6 +813,57 @@ mod tests {
         assert!(p.contains("MIRA-Guardian") && p.contains("running") && p.contains("db.integrity"), "{p}");
         assert!(p.contains("guardian_inspect"));
         assert!(health_watch_prompt("  ").contains("details unavailable"));
+    }
+
+    #[test]
+    fn delivery_reached_anyone_semantics() {
+        assert!(Delivery::Relayed.reached_anyone());
+        assert!(Delivery::Pushed(1).reached_anyone());
+        assert!(Delivery::Pushed(3).reached_anyone());
+        // 0 devices / no target / all-failed = reached no one.
+        assert!(!Delivery::Pushed(0).reached_anyone());
+        assert!(!Delivery::Unreachable.reached_anyone());
+    }
+
+    #[tokio::test]
+    async fn notify_then_enrich_delivers_without_awaiting_triage() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        // The base (deterministic) alarm reaches devices; the enrichment (triage)
+        // is deliberately slow. `notify_then_enrich` must return the base outcome
+        // WITHOUT waiting for the slow enrichment to finish.
+        let enrich_done = Arc::new(AtomicBool::new(false));
+        let ed = enrich_done.clone();
+        let outcome = notify_then_enrich(
+            || async { Delivery::Pushed(2) },
+            move || async move {
+                // Stand in for a slow/stuck LLM triage (never actually awaited to
+                // completion by the caller). Not awaited by the test either, so the
+                // long sleep costs nothing — the task is dropped on runtime teardown.
+                tokio::time::sleep(Duration::from_secs(300)).await;
+                ed.store(true, Ordering::SeqCst);
+            },
+        ).await;
+        assert_eq!(outcome, Delivery::Pushed(2));
+        assert!(!enrich_done.load(Ordering::SeqCst), "alarm path must not await triage");
+    }
+
+    #[tokio::test]
+    async fn notify_then_enrich_skips_enrich_when_alarm_reached_no_one() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        // If the base alarm reached no one, the enrichment is pointless (it would
+        // reach no one either) and must not be spawned.
+        let enrich_started = Arc::new(AtomicBool::new(false));
+        let es = enrich_started.clone();
+        let outcome = notify_then_enrich(
+            || async { Delivery::Unreachable },
+            move || async move { es.store(true, Ordering::SeqCst); },
+        ).await;
+        assert_eq!(outcome, Delivery::Unreachable);
+        // Give any (erroneously) spawned task a chance to run before asserting.
+        tokio::task::yield_now().await;
+        assert!(!enrich_started.load(Ordering::SeqCst), "no enrichment when the alarm reached no one");
     }
 
     #[test]

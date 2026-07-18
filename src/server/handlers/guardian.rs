@@ -245,6 +245,7 @@ pub async fn status(
     caller: AuthUser,
     Extension(live_cfg): Extension<Arc<crate::web::LiveConfig>>,
     actions: Option<Extension<Arc<GuardianActionStore>>>,
+    webpush: Option<Extension<Option<Arc<crate::notifications::web_push::WebPushService>>>>,
 ) -> Response {
     if let Some(r) = admin_only(&caller) { return r; }
     let cfg = live_cfg.get().await;
@@ -256,6 +257,24 @@ pub async fn status(
     };
     let watch = crate::agent::guardian::watch_status().read().await.clone();
 
+    // Out-of-process liveness sentinel: reachability of a MIRA-down alarm. When
+    // MIRA is down the only path is direct web-push, so count the notify user's
+    // registered push devices; if there are none the operator is "watching but
+    // can't reach anyone" — a silent-failure trap we surface prominently.
+    let pc = &cfg.guardian.process;
+    let notify = pc.notify_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let wp = webpush.as_ref().and_then(|e| e.0.as_ref());
+    let push_devices = match (notify, wp) {
+        (Some(uid), Some(svc)) => svc.list_for_user(uid).map(|v| v.len()).unwrap_or(0),
+        _ => 0,
+    };
+    let can_reach = push_devices > 0;
+    let delivery_warning = if pc.enabled && !can_reach {
+        Some("The liveness sentinel is enabled but has no way to reach anyone when MIRA is down: \
+              no registered push devices for the notify user. Open MIRA in a browser and allow \
+              notifications (or set a notify user who has), or the down-alarm will reach no one.")
+    } else { None };
+
     (StatusCode::OK, Json(serde_json::json!({
         "mode":                format!("{:?}", crate::agent::guardian::mode(&cfg)),
         "local_model_ok":      check.allowed,
@@ -265,6 +284,15 @@ pub async fn status(
         "isolation_dry_run":   cfg.guardian.isolation_dry_run,
         "watch":               watch,
         "recent_actions":      recent,
+        "sentinel": {
+            "enabled":             pc.enabled,
+            "owns_watch":          pc.owns_watch,
+            "probe_interval_secs": pc.probe_interval_secs,
+            "notify_user_id":      notify,
+            "push_devices":        push_devices,
+            "can_reach_anyone":    can_reach,
+            "delivery_warning":    delivery_warning,
+        },
     }))).into_response()
 }
 

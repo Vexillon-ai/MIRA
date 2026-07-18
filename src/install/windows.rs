@@ -689,10 +689,14 @@ fn guardian_service_main(_args: Vec<OsString>) {
             let cfg_override = std::env::var_os("MIRA_CONFIG").map(PathBuf::from);
             let mut config = crate::config::MiraConfig::load(cfg_override)
                 .map_err(|e| -> Box<dyn Error + Send + Sync> { format!("config load: {e}").into() })?;
-            // Sentinel log next to the data dir (LocalSystem's `~` is hidden).
+            // Sentinel log: shares MIRA's log file by default; honours its own
+            // `guardian.process.log_file` when set. Then apply the SAME default-
+            // relocation the server uses (LocalSystem's `~` is hidden) so the
+            // shared default lands in the exact same data-dir file the server writes.
+            config.logging.file = crate::guardian_sentinel::resolve_log_file(&config);
             if config.logging.file == crate::config::default_log_file() {
                 config.logging.file = config.data_dir_path()
-                    .join("logs").join("mira-guardian-watch.log")
+                    .join("logs").join("mira.log")
                     .to_string_lossy().into_owned();
             }
             crate::log_filter::init_to_file(&config.logging.level, &config.log_file_path());

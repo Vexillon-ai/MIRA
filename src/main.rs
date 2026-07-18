@@ -1195,13 +1195,21 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
     dotenvy::dotenv().ok();
 
     // Load config up-front so logging can be initialised before Gateway build.
-    let config = Arc::new(MiraConfig::load(args.config.clone()).unwrap_or_else(|e| {
+    let mut config = MiraConfig::load(args.config.clone()).unwrap_or_else(|e| {
         eprintln!("ERROR: {}", e);
         eprintln!();
         eprintln!("Fix the issue above and restart MIRA.");
         eprintln!("Run `mira --print-config-template` to see an annotated example config.");
         std::process::exit(1);
-    }));
+    });
+
+    // The out-of-process sentinel shares MIRA's log file by default, but honours
+    // its own `guardian.process.log_file` when set — resolve it before logging is
+    // initialized so the whole run writes to the right file.
+    if matches!(args.command, Some(Command::GuardianWatch)) {
+        config.logging.file = mira::guardian_sentinel::resolve_log_file(&config);
+    }
+    let config = Arc::new(config);
 
     init_logging(&config);
     info!("Starting MIRA v{}", env!("CARGO_PKG_VERSION"));

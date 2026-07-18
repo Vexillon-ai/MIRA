@@ -210,6 +210,7 @@ _MIRA-Guardian — the built-in, code-defined system watchdog agent. Identity (p
 - **`guardian.process.probe_url`** (string or null) — Explicit liveness URL. Empty/absent = derive `http://127.0.0.1:<server.port>/health`. Override for a non-default bind / reverse-proxy.
 - **`guardian.process.notify_user_id`** (string or null) — User id whose registered push devices receive the "MIRA is down" alarm. Empty/absent = no push target (sentinel still logs). Set to the household admin so the phone buzzes.
 - **`guardian.process.owns_watch`** (boolean) — When true, the out-of-process sentinel owns health watch + triage: it also triages non-green health while MIRA is up (surfacing through MIRA), and MIRA's co-resident watch loop stands down so the two don't double-alert. Default false (co-resident loop owns health triage; sentinel watches liveness only). Requires `enabled = true`.
+- **`guardian.process.log_file`** (string or null) — Separate log file for the sentinel. Empty/absent = share MIRA's main log file (`logging.file`) so both processes' lines land together (the default). Set an explicit path to keep the sentinel's logs in their own file. `~` is expanded.
 
 ## logging
 

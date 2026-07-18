@@ -1550,6 +1550,14 @@ pub struct GuardianProcessConfig {
     // liveness. Requires `enabled = true`.
     #[serde(default)]
     pub owns_watch: bool,
+
+    // Separate log file for the out-of-process sentinel. Empty/absent = the
+    // sentinel shares MIRA's main log file (`logging.file`) — the default, so
+    // both processes' lines land together. Set an explicit path to keep the
+    // sentinel's logs in their own file (easier to read, especially when MIRA
+    // is down). `~` is expanded.
+    #[serde(default)]
+    pub log_file: Option<String>,
 }
 
 impl Default for GuardianProcessConfig {
@@ -1561,6 +1569,7 @@ impl Default for GuardianProcessConfig {
             probe_url: None,
             notify_user_id: None,
             owns_watch: false,
+            log_file: None,
         }
     }
 }

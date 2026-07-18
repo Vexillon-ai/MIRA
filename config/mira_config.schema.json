@@ -1696,6 +1696,10 @@
             "owns_watch": {
               "description": "When true, the out-of-process sentinel owns health watch + triage: it also triages non-green health while MIRA is up (surfacing through MIRA), and MIRA's co-resident watch loop stands down so the two don't double-alert. Default false (co-resident loop still owns health triage; sentinel watches liveness only). Requires enabled=true.",
               "type": "boolean"
+            },
+            "log_file": {
+              "description": "Separate log file for the out-of-process sentinel. Empty/absent = share MIRA's main log file (logging.file) so both processes' lines land together (the default). Set an explicit path to keep the sentinel's logs in their own file. '~' is expanded.",
+              "type": ["string", "null"]
             }
           }
         }

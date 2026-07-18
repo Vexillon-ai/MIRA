@@ -103,8 +103,23 @@ pub async fn put_config(
     // config_path is #[serde(skip)] — restore from live config.
     new_cfg.config_path = live.config_path.clone();
 
+    // Detect a live flip of the out-of-process sentinel toggle so we can
+    // auto-register/start (or unregister/stop) its supervised service to match —
+    // the operator shouldn't have to run `mira guardian-install` by hand after
+    // ticking the box. Captured before `new_cfg` is moved into `update`.
+    let was_sentinel_enabled = live.guardian.process.enabled;
+    let now_sentinel_enabled = new_cfg.guardian.process.enabled;
+    let cfg_path = live.config_path.clone();
+
     match live_cfg.update(new_cfg).await {
-        Ok(())  => StatusCode::NO_CONTENT.into_response(),
+        Ok(())  => {
+            if now_sentinel_enabled != was_sentinel_enabled {
+                // Best-effort + backgrounded; logs its outcome and the Guardian
+                // panel reflects the resulting state.
+                crate::install::apply_guardian_enable_change(now_sentinel_enabled, cfg_path);
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e)  => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
