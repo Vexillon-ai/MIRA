@@ -211,6 +211,11 @@ impl WorkerTask for SubprocessAdapter {
             "subprocess adapter spawning {:?} (channel={:?}, cwd={:?})",
             self.config.command, self.config.assignment_channel, self.config.cwd
         );
+        // Fix 2: reap the worker's WHOLE tree, not just the direct child. Prepared
+        // before spawn (Unix sets a new process group), assigned after (Windows Job
+        // Object). Held alive until this future ends, so a `python -m http.server`
+        // the agent leaves running is killed with the worker instead of orphaning.
+        let mut tree = crate::agent::process_tree::ProcessTreeGuard::prepare(&mut cmd);
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return Err(WorkerFailure {
@@ -221,6 +226,7 @@ impl WorkerTask for SubprocessAdapter {
                 partial_artifacts: vec![], fault: None,
             }),
         };
+        tree.assign(&child);
 
         // Write the assignment to stdin if that's the channel.
         if matches!(self.config.assignment_channel, AssignmentChannel::Stdin) {

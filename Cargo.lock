@@ -4310,7 +4310,7 @@ dependencies = [
 
 [[package]]
 name = "mira"
-version = "0.315.1"
+version = "0.315.2"
 dependencies = [
  "aes-gcm",
  "ammonia",
@@ -4402,6 +4402,7 @@ dependencies = [
  "webpki-roots 1.0.6",
  "whisper-rs",
  "windows-service",
+ "windows-sys 0.59.0",
  "zip 2.4.2",
 ]
 

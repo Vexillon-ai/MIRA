@@ -173,6 +173,13 @@ impl Gateway {
                 #[cfg(not(unix))]
                 { std::future::pending::<()>().await }
             };
+            // Whether this shutdown is a deliberate RESTART (API restart button /
+            // self-upgrade) vs a genuine stop. Drives the force-exit exit code so
+            // a restart is relaunched deterministically even when the graceful path
+            // times out (Fix 3): on Windows SCM a clean exit(0) gets no recovery and
+            // leaves the service Stopped, so a restart exits non-zero to trigger it
+            // (systemd Restart=always / launchd KeepAlive relaunch regardless).
+            let mut is_restart = false;
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     info!("ctrl_c received — stopping MIRA");
@@ -181,7 +188,8 @@ impl Gateway {
                     info!("SIGTERM received — stopping MIRA (supervisor should relaunch)");
                 }
                 _ = restart_notify.notified() => {
-                    info!("Restart requested via API — stopping MIRA (supervisor should relaunch)");
+                    is_restart = true;
+                    info!("Restart requested (API/self-upgrade) — stopping MIRA to relaunch");
                 }
                 _ = scm => {
                     info!("SCM stop received — stopping MIRA");
@@ -213,13 +221,19 @@ impl Gateway {
             // which never complete on their own. axum's graceful shutdown
             // would wait on them indefinitely. After a short drain window,
             // force-exit so the supervisor can relaunch us.
-            tokio::spawn(async {
+            tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(FORCE_EXIT_GRACE_SECS)).await;
+                // Exit non-zero on a restart so a supervisor that only relaunches
+                // on failure (Windows SCM recovery) still brings MIRA back; a
+                // genuine stop exits 0 to stay stopped. The clean-shutdown marker
+                // was already written above, so this non-zero exit is NOT counted
+                // as a crash by the restart-loop detector.
+                let code = if is_restart { 1 } else { 0 };
                 warn!(
-                    "Graceful-shutdown grace period ({}s) elapsed — forcing process exit",
-                    FORCE_EXIT_GRACE_SECS,
+                    "Graceful-shutdown grace period ({}s) elapsed — forcing process exit ({})",
+                    FORCE_EXIT_GRACE_SECS, code,
                 );
-                std::process::exit(0);
+                std::process::exit(code);
             });
         };
 

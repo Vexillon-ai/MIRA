@@ -26,6 +26,7 @@ pub mod definitions;
 pub mod guardian;
 pub mod guardian_actions;
 pub mod instance;
+pub mod process_tree;
 pub mod context_budget;
 pub mod memory_hook;
 pub mod named_agent;

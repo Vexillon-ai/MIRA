@@ -2,7 +2,7 @@
 name = "mira"
 # First public release: 0.272.0 = "public beta 1" (tag v0.272.0; GitHub release
 # marked pre-release). Post-beta fixes continue from 0.272.1.
-version = "0.315.1"
+version = "0.315.2"
 edition = "2024"
 description = "Multi-tasking Intelligent Responsive Assistant - A personal AI agent framework"
 authors = ["Tarek El Diab"]
@@ -290,6 +290,15 @@ seccompiler = { version = "0.5", optional = true }
 # launched by SCM vs the console.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-service = "0.8"
+# Raw Win32 for: clearing socket handle-inheritance on our listeners
+# (SetHandleInformation) so children can't leak the listening ports, and Job
+# Objects (KILL_ON_JOB_CLOSE) to reap a coding-agent worker's whole process tree.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",         # SetHandleInformation, HANDLE_FLAG_INHERIT, CloseHandle
+    "Win32_System_JobObjects",  # SetInformationJobObject, AssignProcessToJobObject, limit flags
+    "Win32_Security",           # CreateJobObjectW takes a SECURITY_ATTRIBUTES pointer
+    "Win32_System_Threading",   # JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds IO_COUNTERS
+] }
 
 [features]
 default = ["sandbox-linux", "sandbox-wasm"]

@@ -208,6 +208,10 @@ impl MiraServer {
         if let (Some(addr), Some(apps_router)) = (self.apps_addr, self.apps_router.take()) {
             match TcpListener::bind(addr).await {
                 Ok(l) => {
+                    // Fix 1: don't let a spawned child (a coding-agent worker, or
+                    // its `python -m http.server` grandchild) inherit this socket
+                    // and squat the port after MIRA exits.
+                    make_non_inheritable(&l);
                     info!("MIRA web-apps (port mode) listening on http://{}", addr);
                     tokio::spawn(async move {
                         if let Err(e) = axum::serve(l, apps_router).await {
@@ -221,10 +225,30 @@ impl MiraServer {
             }
         }
 
-        let listener = TcpListener::bind(self.bind_addr).await
-            .map_err(|e| MiraError::ServerError(format!(
+        let listener = match TcpListener::bind(self.bind_addr).await {
+            Ok(l) => l,
+            // Fix 3: a busy MAIN port is fatal and must be actionable — not a terse
+            // error that SCM/systemd silently crash-loops on. Name the condition
+            // and how to find + free the holder (commonly a leaked child socket
+            // from before Fix 1, or a stale MIRA still shutting down).
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                let port = self.bind_addr.port();
+                return Err(MiraError::ServerError(format!(
+                    "Failed to bind the main port {} — already in use. A stale MIRA instance \
+                     or a leaked child process may be squatting it (see \
+                     design-docs/restart-socket-leak-fix.md). Find + kill the holder, then \
+                     start again:  Windows: `netstat -ano | findstr :{port}` then \
+                     `taskkill /PID <pid> /F`;  Linux: `ss -ltnp | grep :{port}`.",
+                    self.bind_addr,
+                )));
+            }
+            Err(e) => return Err(MiraError::ServerError(format!(
                 "Failed to bind {}: {}", self.bind_addr, e
-            )))?;
+            ))),
+        };
+        // Fix 1: clear inheritance so no spawned child keeps this port bound past
+        // our exit (the root cause of the post-self-upgrade crash-loop).
+        make_non_inheritable(&listener);
 
         info!("MIRA server listening on http://{}", self.bind_addr);
 
@@ -232,6 +256,38 @@ impl MiraServer {
             .with_graceful_shutdown(shutdown_signal)
             .await
             .map_err(|e| MiraError::ServerError(e.to_string()))
+    }
+}
+
+/// Clear handle-inheritance on a freshly-bound listener so processes MIRA spawns
+/// (coding-agent workers, and THEIR children — e.g. a `python -m http.server`
+/// verification server) never inherit a duplicate of the listening socket and
+/// keep the port bound after MIRA exits. On Windows that inherited handle was the
+/// root cause of the crash-loop after a self-upgrade (ports 8387/8388 held by an
+/// orphaned grandchild of a dead MIRA). Best-effort — a failure is logged, never
+/// fatal.
+fn make_non_inheritable(listener: &TcpListener) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+        // A SOCKET is usable as a HANDLE for SetHandleInformation.
+        let handle = listener.as_raw_socket() as HANDLE;
+        // SAFETY: `handle` is a valid, open socket owned by `listener` for the
+        // duration of this call; SetHandleInformation only toggles the inherit bit.
+        let ok = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+        if ok == 0 {
+            tracing::warn!(
+                "could not clear listening-socket inheritance (SetHandleInformation failed) — \
+                 a spawned child could inherit this port and hold it after MIRA exits"
+            );
+        }
+    }
+    // On Unix, Rust's std/tokio create listener sockets with SOCK_CLOEXEC, so a
+    // child never inherits them across exec — nothing to do.
+    #[cfg(not(windows))]
+    {
+        let _ = listener;
     }
 }
 
