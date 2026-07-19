@@ -2,7 +2,7 @@
 
 //! Subprocess adapter framework (slice C1).
 //!
-//! Wraps an external CLI (Claude Code, OpenCode, HERMES, custom shell
+//! Wraps an external CLI (Claude Code, OpenCode, custom shell
 //! scripts, …) as a [`crate::agent::supervisor::WorkerTask`]. The
 //! supervisor spawns one of these when a Skill backed by an external
 //! tool is selected; the adapter takes care of launching the child,
@@ -62,8 +62,8 @@ use crate::agent::supervisor::{
 /// - `LastArg` appends the rendered task as the final argv slot.
 ///   Useful for tools that take "the prompt" as a positional.
 /// - `EnvVar(name)` sets the named env var to the rendered task and
-///   passes nothing on stdin / argv. Some tools (HERMES) use this so
-///   long prompts don't trip shell length limits.
+///   passes nothing on stdin / argv. Useful when long prompts would
+///   otherwise trip shell length limits.
 #[derive(Debug, Clone)]
 pub enum AssignmentChannel {
     Stdin,

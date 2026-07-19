@@ -2646,13 +2646,18 @@ fn build_tool_registry(
         #[allow(unused_mut, unused_assignments)]
         let mut registered = false;
 
+        // Whether the scientific (Pyodide) backend is *intended* per config — so
+        // a chart request that lands without a working backend can say "enabled
+        // but not ready" vs "not enabled" instead of ModuleNotFoundError → ASCII.
+        let sci_enabled = config.sandbox.pyodide.enabled || want == "pyodide";
+
         // Explicit "pyodide" primary backend: every call runs in Pyodide.
         #[cfg(feature = "sandbox-wasm")]
         if !registered && want == "pyodide" {
             if let Some(sb) = pyodide_backend.clone() {
                 registry.register(CodeRunTool::new(
                     sb, pivot.clone(), config.sandbox.code_run.clone(), seccomp_mode, artifacts.clone(),
-                ));
+                ).with_scientific_enabled(sci_enabled));
                 info!("Tool registered: code_run (pyodide primary — scientific Python)");
                 registered = true;
             } else {
@@ -2665,7 +2670,7 @@ fn build_tool_registry(
                 let backend: Arc<dyn crate::sandbox::CodeSandbox> = Arc::from(default_backend());
                 registry.register(CodeRunTool::new(
                     backend, pivot.clone(), config.sandbox.code_run.clone(), seccomp_mode, artifacts.clone(),
-                ).with_scientific(pyodide_backend.clone()));
+                ).with_scientific(pyodide_backend.clone()).with_scientific_enabled(sci_enabled));
                 info!("Tool registered: code_run (namespace, rootfs={}, seccomp={:?}{})",
                       pivot.display(), config.sandbox.seccomp_mode,
                       if pyodide_backend.is_some() { ", +pyodide scientific" } else { "" });
@@ -2692,7 +2697,7 @@ fn build_tool_registry(
                     // WASM backend ignores (it uses its own scratch preopen).
                     registry.register(CodeRunTool::new(
                         backend, wpath.clone(), config.sandbox.code_run.clone(), seccomp_mode, artifacts.clone(),
-                    ).with_scientific(pyodide_backend.clone()));
+                    ).with_scientific(pyodide_backend.clone()).with_scientific_enabled(sci_enabled));
                     info!("Tool registered: code_run (wasm, module={}{})", wpath.display(),
                           if pyodide_backend.is_some() { ", +pyodide scientific" } else { "" });
                     registered = true;

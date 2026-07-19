@@ -52,6 +52,16 @@ use crate::agent::transport::{
     AgentChannel, ChannelSender, Incoming,
 };
 
+// Shared deadline for worker-completion `end_to_end` tests across the adapter
+// suites (claude_code / opencode / research / verify). Those tests await a real
+// supervised worker's `completion` future; the fake executors complete in <1ms,
+// so this timeout ONLY guards against a genuine hang — kept deliberately generous
+// so a worker task that's merely CPU-starved under a fully-parallel `cargo test`
+// on a loaded CI runner doesn't produce a false `.expect("hung")` timeout (the
+// recurring flake this replaces). One value, so it can't drift per-file again.
+#[cfg(test)]
+pub(crate) const WORKER_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 // ─── Session budget ───────────────────────────────────────────────────
 
 /// Default cap on total LLM spend across all agents in one tree.

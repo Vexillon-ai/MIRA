@@ -982,16 +982,19 @@ pub struct WebAppsConfig {
     /// deployer picks (the server can't auto-detect how a browser will reach
     /// it, nor fall back at runtime — it hands back one URL and never sees
     /// whether the client's connection succeeded):
-    /// - `subdomain` (default): `<task_id>.<host_suffix>:<port>` — a distinct
+    /// - `subdomain`: `<task_id>.<host_suffix>:<port>` — a distinct
     ///   origin per app (isolates cookies AND localStorage), no extra port.
     ///   Works when the browser resolves the suffix to the box MIRA runs on
-    ///   (same machine, or WSL reached via `localhost`).
+    ///   (same machine, or WSL reached via `localhost`) — but NOT from a phone,
+    ///   where `localhost` is the phone itself.
     /// - `port`: a separate listener (`web_apps.port`) at `/a/<task_id>/`.
-    ///   Reachable over any host incl. a LAN / WSL-gateway IP, at the cost of
-    ///   weaker isolation (all apps share one origin; port is not a cookie
-    ///   boundary on the same host).
-    /// - `both`: serve via both; the subdomain is the primary link, the port
-    ///   URL an alternate.
+    ///   Reachable over any host incl. a LAN / WSL-gateway IP / the mobile app,
+    ///   at the cost of weaker isolation (all apps share one origin; port is not
+    ///   a cookie boundary on the same host).
+    /// - `both` (default): serve via both — the subdomain link for a same-box
+    ///   browser, the port path (`/a/<id>/`) for LAN / mobile clients that build
+    ///   the URL against their own base host. Default so web apps are reachable
+    ///   from the mobile app out of the box.
     #[serde(default = "default_web_apps_mode")]
     pub mode: String,
 
@@ -3578,7 +3581,7 @@ fn default_tui_token_path()  -> String  { "~/.mira/data/local.token".to_string()
 fn default_server_host()     -> String  { "127.0.0.1".to_string() }
 fn default_server_port()     -> u16     { 8080 }
 fn default_web_apps_enabled()     -> bool   { true }
-fn default_web_apps_mode()        -> String { "subdomain".to_string() }
+fn default_web_apps_mode()        -> String { "both".to_string() }
 fn default_web_app_host_suffix()  -> String { "localhost".to_string() }
 fn default_max_connections() -> u32     { 100 }
 fn default_request_timeout() -> u32     { 30 }

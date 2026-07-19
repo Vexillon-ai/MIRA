@@ -800,7 +800,7 @@ mod tests {
             root_id, depth, "com.test.oc", "list files", None,
             10.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung")
             .unwrap();
         match outcome {
@@ -821,7 +821,7 @@ mod tests {
             root_id, depth, "com.test.oc", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung")
             .unwrap();
         match outcome {
@@ -857,7 +857,7 @@ mod tests {
             root_id, depth, "com.test.oc", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung")
             .unwrap();
         match outcome {
@@ -878,7 +878,7 @@ mod tests {
             root_id, depth, "com.test.oc", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung")
             .unwrap();
         match outcome {
@@ -904,7 +904,7 @@ mod tests {
             "Reply with exactly the word 'pong' and nothing else.", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(120), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("real opencode hung past 120s")
             .unwrap();
         match outcome {
@@ -933,7 +933,7 @@ mod tests {
             root_id, depth, "com.test.oc", "x", None,
             10.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung")
             .unwrap();
         match outcome {

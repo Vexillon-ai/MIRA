@@ -843,7 +843,7 @@ mod tests {
             root_id, depth, "com.test.cc", "refactor it", None,
             10.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung")
             .unwrap();
         match outcome {
@@ -867,7 +867,7 @@ mod tests {
             root_id, depth, "com.test.cc", "do thing", None,
             10.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung")
             .unwrap();
         match outcome {
@@ -890,7 +890,7 @@ mod tests {
             root_id, depth, "com.test.cc", "do thing", None,
             10.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung")
             .unwrap();
         match outcome {
@@ -910,7 +910,7 @@ mod tests {
             root_id, depth, "com.test.cc", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung")
             .unwrap();
         match outcome {
@@ -960,7 +960,7 @@ mod tests {
             adapter as Arc<dyn crate::agent::WorkerTask>,
             None, Some("alice".into()),
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung")
             .unwrap();
 

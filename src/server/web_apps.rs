@@ -105,11 +105,26 @@ pub fn advertised_host(server: &ServerConfig) -> String {
     if let Some(h) = server.public_base_url.as_deref().and_then(host_from_base_url) {
         return h;
     }
+    // The remote-access URL (Tailscale / DDNS / reverse proxy) is the host a
+    // mobile or off-LAN client actually reaches MIRA at — a good fallback so
+    // port-mode app links point somewhere the phone can resolve.
+    if let Some(h) = server.remote_url.as_deref().and_then(host_from_base_url) {
+        return h;
+    }
     let h = server.host.trim();
     if !h.is_empty() && h != "0.0.0.0" && h != "::" {
         return h.to_string();
     }
     "localhost".to_string()
+}
+
+/// The host-relative path a `port`/`both`-mode app is served at: `/a/<task_id>/`.
+/// A client that knows its own base host + the [`effective_apps_port`] can build a
+/// URL reachable from wherever *it* connects (LAN, Tailscale, …) — which the fixed
+/// [`port_url`] can't, since one `advertised_host` can't be right for every client.
+/// The mobile app uses this + `web_app_port` to construct a reachable link.
+pub fn port_path(task_id: &str) -> String {
+    format!("/a/{task_id}/")
 }
 
 /// Port-mode URL: `http://<advertised_host>:<apps_port>/a/<task_id>/`. The
@@ -154,6 +169,61 @@ pub fn web_app_links(server: &ServerConfig, task_id: &str) -> AppLinks {
 /// Back-compat convenience: the primary URL a built app is reachable at.
 pub fn web_app_url(server: &ServerConfig, task_id: &str) -> String {
     web_app_links(server, task_id).primary
+}
+
+/// A friendly display name for a built app: the `<title>` of its
+/// `output/index.html`, or `None` when there's no readable title. Best-effort +
+/// bounded (only the head of the file is scanned) so this never becomes a cost on
+/// the tool path.
+pub fn web_app_title(store: &TaskArtifactsStore, task_id: &str) -> Option<String> {
+    let path = store.resolve_file(task_id, "output/index.html")?;
+    let bytes = std::fs::read(&path).ok()?;
+    let head = &bytes[..bytes.len().min(64 * 1024)]; // <title> lives in <head>, near the top
+    let text = String::from_utf8_lossy(head);
+    let lower = text.to_ascii_lowercase();
+    let open = lower.find("<title")?;
+    let gt = lower[open..].find('>')? + open + 1;
+    let end = lower[gt..].find("</title>")? + gt;
+    let title = text[gt..end]
+        .trim()
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&#39;", "'")
+        .replace("&quot;", "\"");
+    let title: String = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty()).then(|| title.chars().take(80).collect())
+}
+
+/// Turn a slug like `snake-game` into a friendly `Snake game` (fallback name when
+/// the app has no `<title>`).
+fn humanize_slug(slug: &str) -> String {
+    let words = slug.replace(['-', '_'], " ");
+    let words = words.trim();
+    let mut c = words.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// The friendly display name for a built app + a ready-to-use markdown link
+/// `[name](url)` the model can hand the user verbatim. `name` is the app's
+/// `<title>`, else the humanized `slug`, else `"the app"`. The URL is always the
+/// exact one from [`web_app_links`] — the model must never construct its own.
+pub fn web_app_named_link(
+    store:   &TaskArtifactsStore,
+    server:  &ServerConfig,
+    task_id: &str,
+    slug:    Option<&str>,
+) -> (String, String) {
+    let name = web_app_title(store, task_id)
+        .or_else(|| slug.map(str::trim).filter(|s| !s.is_empty()).map(humanize_slug))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "the app".to_string());
+    let url = web_app_links(server, task_id).primary;
+    let markdown = format!("[{name}]({url})");
+    (name, markdown)
 }
 
 /// Whether the configured mode runs the separate `port`-mode listener.
@@ -324,7 +394,8 @@ mod tests {
         s.host = "0.0.0.0".to_string();               // wildcard bind
         s.web_apps.advertised_host = Some("198.51.100.10".to_string());
 
-        // subdomain (default): only a subdomain link.
+        // subdomain: only a subdomain link.
+        s.web_apps.mode = "subdomain".to_string();
         let l = web_app_links(&s, "t1");
         assert_eq!(l.primary, "http://t1.localhost:8087/");
         assert!(l.alt.is_none());
@@ -358,6 +429,23 @@ mod tests {
         let mut s2 = ServerConfig::default();
         s2.host = "192.0.2.9".to_string();
         assert_eq!(advertised_host(&s2), "192.0.2.9");
+        // remote_url (Tailscale / DDNS) is used when no explicit host / public URL —
+        // so port-mode links point where a mobile client reaches MIRA.
+        let mut s3 = ServerConfig::default();
+        s3.host = "0.0.0.0".to_string();
+        s3.remote_url = Some("https://mybox.tail1234.ts.net/".to_string());
+        assert_eq!(advertised_host(&s3), "mybox.tail1234.ts.net");
+    }
+
+    #[test]
+    fn default_mode_is_both_and_exposes_portable_path() {
+        // Default mode now serves the port path too, so mobile/LAN clients can
+        // build a reachable URL from their own base host.
+        let s = ServerConfig::default();
+        assert_eq!(s.web_apps.mode, "both");
+        assert!(port_mode_enabled(&s));
+        assert!(subdomain_mode_enabled(&s));
+        assert_eq!(port_path("019f-abc"), "/a/019f-abc/");
     }
 
     #[test]
@@ -367,6 +455,47 @@ mod tests {
         assert_eq!(effective_apps_port(&s), 8088); // 0 → server.port + 1
         s.web_apps.port = 9000;
         assert_eq!(effective_apps_port(&s), 9000);
+    }
+
+    #[test]
+    fn humanize_slug_titlecases_words() {
+        assert_eq!(humanize_slug("snake-game"), "Snake game");
+        assert_eq!(humanize_slug("my_cool_app"), "My cool app");
+        assert_eq!(humanize_slug(""), "");
+    }
+
+    #[test]
+    fn title_extraction_and_named_link() {
+        let dir   = tempfile::tempdir().unwrap();
+        let store = TaskArtifactsStore::new(dir.path().to_path_buf());
+        let p = store.allocate("com.mira.claudecode", "task-snake", None, None, "x").unwrap();
+        std::fs::write(
+            p.join("output/index.html"),
+            b"<!doctype html><html><head><title>  Snake &amp; Ladders  </title></head><body></body></html>",
+        ).unwrap();
+
+        // <title> extracted, entity-decoded, whitespace-collapsed.
+        assert_eq!(web_app_title(&store, "task-snake").as_deref(), Some("Snake & Ladders"));
+        assert_eq!(web_app_title(&store, "task-missing"), None);
+
+        let mut s = ServerConfig::default();
+        s.port = 8087;
+        s.web_apps.host_suffix = "localhost".to_string();
+
+        // Title wins → a friendly markdown link with the exact URL.
+        let (name, md) = web_app_named_link(&store, &s, "task-snake", Some("snake-game"));
+        assert_eq!(name, "Snake & Ladders");
+        assert_eq!(md, "[Snake & Ladders](http://task-snake.localhost:8087/)");
+
+        // No <title> → humanized slug fallback.
+        let p2 = store.allocate("com.mira.claudecode", "task-plain", None, None, "x").unwrap();
+        std::fs::write(p2.join("output/index.html"), b"<canvas></canvas>").unwrap();
+        let (name2, _) = web_app_named_link(&store, &s, "task-plain", Some("snake-game"));
+        assert_eq!(name2, "Snake game");
+
+        // No <title>, no slug → generic "the app".
+        let (name3, _) = web_app_named_link(&store, &s, "task-plain", None);
+        assert_eq!(name3, "the app");
     }
 
     #[tokio::test]

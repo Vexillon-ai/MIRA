@@ -25,7 +25,6 @@ pub mod core;
 pub mod definitions;
 pub mod guardian;
 pub mod guardian_actions;
-pub mod hermes;
 pub mod instance;
 pub mod context_budget;
 pub mod memory_hook;
@@ -56,7 +55,6 @@ pub use adapter::{
 };
 pub use claude_code::{ClaudeCodeAdapter, ClaudeCodeConfig};
 pub use opencode::{OpenCodeAdapter, OpenCodeConfig};
-pub use hermes::{HermesAdapter, HermesConfig};
 pub use research::{
     FetchedDoc, HttpPolicyFetcher, ResearchAdapter, ResearchConfig,
     ResearchFetcher, StubFetcher,

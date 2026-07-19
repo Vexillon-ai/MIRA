@@ -173,6 +173,13 @@ pub struct CodeRunTool {
     // the script imports a scientific package, the call routes here instead of
     // `sandbox`. None on builds/hosts without it — routing then no-ops.
     scientific:   Option<Arc<dyn CodeSandbox>>,
+    // Whether the scientific (Pyodide) backend is *intended* per config
+    // (`sandbox.pyodide.enabled` / `backend = "pyodide"`), regardless of whether
+    // it's provisioned yet. Lets a chart/scientific request that lands without a
+    // working backend explain WHY — "enabled but still downloading / Node
+    // missing" vs "not enabled" — instead of a bare ModuleNotFoundError the model
+    // papers over with ASCII art.
+    scientific_enabled: bool,
     rootfs_path:  PathBuf,
     cfg:          CodeRunConfig,
     seccomp_mode: SeccompMode,
@@ -194,7 +201,7 @@ impl CodeRunTool {
         seccomp_mode: SeccompMode,
         artifacts:    Arc<ArtifactStore>,
     ) -> Self {
-        Self { sandbox, scientific: None, rootfs_path, cfg, seccomp_mode, artifacts }
+        Self { sandbox, scientific: None, scientific_enabled: false, rootfs_path, cfg, seccomp_mode, artifacts }
     }
 
     // Attach a scientific (Pyodide) backend. Calls whose code imports a
@@ -203,6 +210,20 @@ impl CodeRunTool {
     pub fn with_scientific(mut self, backend: Option<Arc<dyn CodeSandbox>>) -> Self {
         self.scientific = backend;
         self
+    }
+
+    // Record whether the scientific backend is *intended* per config (may still
+    // be provisioning). Drives the actionable message when a scientific import
+    // lands without a working backend.
+    pub fn with_scientific_enabled(mut self, on: bool) -> Self {
+        self.scientific_enabled = on;
+        self
+    }
+
+    // Can the effective backend actually run the scientific stack? True when a
+    // Pyodide backend is wired, or the primary backend *is* Pyodide.
+    fn scientific_capable(&self) -> bool {
+        self.scientific.is_some() || self.sandbox.name() == "pyodide"
     }
 
     // Pick the backend for this call: the scientific one when it's wired and
@@ -285,6 +306,14 @@ impl Tool for CodeRunTool {
          need to compute something a calculator can't, or run a tiny one-off \
          script — not for long-running tasks. Returns the script's exit \
          code, stdout, and stderr.\n\n\
+         THIS is the right tool for real, accurate data charts and \
+         visualizations — pie/bar/line charts, BI/business graphs, plots — \
+         via Python's scientific stack (matplotlib, numpy, pandas, and other \
+         common libraries are available; missing wheels are fetched on demand). \
+         Prefer this over `image_generate` for anything data-driven: \
+         `image_generate` makes artistic pictures and will NOT produce an \
+         accurate chart. Never hand-draw a chart as ASCII/text when a real one \
+         is possible — write matplotlib and save a PNG.\n\n\
          To show the user an image (chart, plot, generated picture, etc.), \
          save it to `/tmp/output/` with one of these extensions: .png, .jpg, \
          .jpeg, .gif, .svg, .webp. Files written there are captured as \
@@ -389,6 +418,31 @@ impl Tool for CodeRunTool {
 
         // Route the call: scientific backend (Pyodide) when the script imports a
         // scientific package and one is wired, else the primary backend.
+        let sci_wanted = wants_scientific(code);
+
+        // The script reaches for the scientific stack (matplotlib/numpy/…) but no
+        // backend on this host can run it. Fail with an ACTIONABLE message — and
+        // tell the model NOT to fall back to ASCII — instead of letting it hit a
+        // bare ModuleNotFoundError on the plain-CPython backend. Only fires on a
+        // genuine scientific attempt, per design.
+        if sci_wanted && !self.scientific_capable() {
+            let why = if self.scientific_enabled {
+                "The scientific Python backend (matplotlib/numpy/pandas) is enabled \
+                 but not ready on this host yet — it downloads on first enable and \
+                 needs a resolvable Node runtime. Retry in a moment; if it keeps \
+                 failing, check that MIRA can find Node and that the Pyodide download \
+                 finished (see the server logs)."
+            } else {
+                "This needs the scientific Python backend (matplotlib/numpy/pandas), \
+                 which isn't enabled on this host. An admin can turn it on with \
+                 `sandbox.pyodide.enabled = true` (it downloads once, then works)."
+            };
+            return Ok(ToolResult::failure(format!(
+                "code_run: {why} Do NOT substitute an ASCII/text chart — tell the user \
+                 the chart backend isn't available and why, and offer to retry once it is."
+            )));
+        }
+
         let backend = self.select_backend(code);
         let backend_name = backend.name();
 
@@ -444,7 +498,18 @@ impl Tool for CodeRunTool {
             Err(SandboxError::Unsupported) => Ok(ToolResult::failure(
                 "code_run: sandbox backend reports the host can't run Tier 4 tools"
             )),
-            Err(e) => Ok(ToolResult::failure(format!("code_run: sandbox error: {e}"))),
+            Err(e) => {
+                let mut msg = format!("code_run: sandbox error: {e}");
+                if sci_wanted {
+                    // A chart/scientific run that got a backend but errored (e.g. Node
+                    // couldn't spawn). Keep the model from quietly drawing ASCII.
+                    msg.push_str(
+                        " — the scientific (chart) backend failed to run. Do NOT substitute \
+                         an ASCII/text chart; tell the user the chart backend errored.",
+                    );
+                }
+                Ok(ToolResult::failure(msg))
+            }
         }
     }
 }

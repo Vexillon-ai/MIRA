@@ -578,7 +578,7 @@ pub enum SkillAction {
         out:  Option<std::path::PathBuf>,
     },
     // Manage encrypted env-var secrets used by subprocess adapters
-    // (Claude Code, OpenCode, HERMES). Values are stored in
+    // (Claude Code, OpenCode). Values are stored in
     // `~/.mira/data/skill_secrets.db`, encrypted with the master
     // key at `~/.mira/data/master.key`. Back that file up — losing
     // it discards every stored secret.

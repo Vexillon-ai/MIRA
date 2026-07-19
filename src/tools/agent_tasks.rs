@@ -736,13 +736,30 @@ impl Tool for GetTaskResultTool {
                 let tid = agent.id.to_string();
                 if crate::server::web_apps::has_web_app(store, &tid) {
                     let links = crate::server::web_apps::web_app_links(&cfg.server, &tid);
-                    body["web_app_url"] = json!(links.primary);
+                    let (name, link) = crate::server::web_apps::web_app_named_link(store, &cfg.server, &tid, None);
+                    body["web_app_url"]  = json!(links.primary);
+                    body["web_app_name"] = json!(name);
+                    // A ready-to-use friendly markdown link — hand this to the user as-is.
+                    body["web_app_link"] = json!(link);
                     if let Some(alt) = links.alt {
                         body["web_app_alt_url"] = json!(alt);
                     }
+                    // Portable reference: a client that reaches MIRA at its own base host
+                    // (mobile app over LAN / Tailscale) builds a reachable URL as
+                    // `<its base host>:<web_app_port>/a/<task_id>/` — the fixed URL above
+                    // can't be right for every client. Present only when the port listener
+                    // is actually running.
+                    if crate::server::web_apps::port_mode_enabled(&cfg.server) {
+                        body["web_app_path"] = json!(crate::server::web_apps::port_path(&tid));
+                        body["web_app_port"] = json!(crate::server::web_apps::effective_apps_port(&cfg.server));
+                    }
                     body["web_app_hint"] = json!(
-                        "This task built a runnable web app. Give the user this exact URL to open \
-                         in their browser — MIRA cannot open a tab itself, so do NOT claim you did."
+                        "This task built a runnable web app. Give the user a friendly clickable \
+                         link — paste `web_app_link` (a markdown link like `[Name](url)`) as-is, or \
+                         wrap the exact `web_app_url` in a short label. Do NOT dump the bare URL, do \
+                         NOT alter the URL, and MIRA cannot open a tab itself so never claim you did. \
+                         (Native clients may instead build the URL from their own base host + \
+                         `web_app_port` + `web_app_path`.)"
                     );
                 }
             }
@@ -777,14 +794,17 @@ impl Tool for ListWebAppsTool {
 
     fn description(&self) -> &str {
         "List the runnable web apps/games MIRA's coding agent has built — \
-         completed tasks whose output contains an `index.html` — each with the \
-         exact `url` to open it in a browser. \
+         completed tasks whose output contains an `index.html` — each with a \
+         friendly `name`, a ready-made `link` (a markdown link like `[Name](url)`), \
+         and the raw `url`. \
          \n\nUse this whenever the user asks to \"open\", \"play\", \"run\", or \
          \"show\" something you built earlier: find the matching app by its \
-         `brief`, then give the user its `url` verbatim. \
+         `brief`/`name`, then give the user its `link` as-is (a friendly clickable \
+         link) — not the bare URL. The `url` inside the link is exact; never alter \
+         or reconstruct it. \
          \n\nIMPORTANT: MIRA runs as a background service and CANNOT open a \
          browser tab on the user's screen. Never say you opened / launched it \
-         — hand over the URL and let the user click it. If `serving_enabled` \
+         — hand over the link and let the user click it. If `serving_enabled` \
          is false, tell the user the app exists but serving is turned off in \
          settings (`server.web_apps.enabled`)."
     }
@@ -804,25 +824,39 @@ impl Tool for ListWebAppsTool {
             }).to_string()));
         };
 
+        let port_mode = crate::server::web_apps::port_mode_enabled(&self.config.server);
         let mut apps: Vec<Value> = Vec::new();
         for entry in store.list() {
             if entry.manifest.status != "completed" { continue; }
             if !entry.path.join("output").join("index.html").is_file() { continue; }
             let tid = entry.manifest.task_id.clone();
             let links = crate::server::web_apps::web_app_links(&self.config.server, &tid);
+            let (name, link) = crate::server::web_apps::web_app_named_link(
+                store, &self.config.server, &tid, entry.manifest.slug.as_deref(),
+            );
             apps.push(json!({
                 "task_id":    tid,
+                "name":       name,
                 "brief":      entry.manifest.brief_excerpt,
                 "slug":       entry.manifest.slug,
                 "created_at": entry.manifest.created_at,
                 "url":        links.primary,
+                // A ready-to-use friendly markdown link — hand this to the user as-is.
+                "link":       link,
                 "alt_url":    links.alt,
+                // Portable reference for native clients (mobile): build the URL as
+                // `<own base host>:<port><path>`. Present only when the port listener runs.
+                "path":       port_mode.then(|| crate::server::web_apps::port_path(&tid)),
+                "port":       port_mode.then(|| crate::server::web_apps::effective_apps_port(&self.config.server)),
             }));
         }
 
         Ok(ToolResult::success(json!({
             "web_apps":         apps,
             "serving_enabled":  self.config.server.web_apps.enabled,
+            // The port-listener port (present when a native client should build the
+            // URL from its own base host + each app's `path`).
+            "apps_port":        port_mode.then(|| crate::server::web_apps::effective_apps_port(&self.config.server)),
         }).to_string()))
     }
 }

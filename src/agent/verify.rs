@@ -443,7 +443,7 @@ mod tests {
             root_id, depth, "com.test.verify", "task text", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
 
         match outcome {
@@ -472,7 +472,7 @@ mod tests {
             root_id, depth, "com.test.verify", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
 
         match outcome {
@@ -497,7 +497,7 @@ mod tests {
             root_id, depth, "com.test.verify", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
 
         match outcome {
@@ -536,7 +536,7 @@ mod tests {
             root_id, depth, "com.test.verify", "x", None,
             1.0, None, exec,
         );
-        let _ = timeout(Duration::from_secs(5), h.completion).await
+        let _ = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
 
         let saw = v.workspace.lock().unwrap().clone();
@@ -552,7 +552,7 @@ mod tests {
             root_id, depth, "com.test.verify", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Complete(c) => assert_eq!(c.result_summary, "[verified] happy"),

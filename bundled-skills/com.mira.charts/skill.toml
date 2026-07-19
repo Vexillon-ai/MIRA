@@ -1,0 +1,20 @@
+[skill]
+id            = "com.mira.charts"
+version       = "0.1.0"
+display_name  = "Charts"
+description   = "Create professional, accurate data charts and BI graphs — pie, bar, line, scatter, histogram, stacked/grouped bars, etc. Renders a REAL chart with matplotlib via the code_run tool, saved as an inline PNG. Use whenever the user asks for a chart, graph, plot, or data visualization. Never hand-draw a chart as ASCII/text, and never use image_generate (a generative art model cannot draw an accurate chart)."
+authors       = ["MIRA Team <hello@mira.dev>"]
+license       = "MIT"
+
+# Guidance skill: it does NOT re-expose code_run (that stays admin-gated). It
+# reinforces the right approach + carries the professional-styling playbook; the
+# actual chart runs through the model's own code_run tool.
+[permissions]
+network_egress = []
+filesystem     = []
+subprocess     = false
+secrets        = []
+llm_providers  = []
+
+[tools]
+chart = { kind = "prompt", template = "prompts/chart.md" }

@@ -52,12 +52,16 @@ impl Tool for ImageGenerateTool {
     }
 
     fn description(&self) -> &str {
-        "Generate an image from a text prompt and return it inline. Use for \
-         illustrations, diagrams-as-art, mockups, icons, etc. Returns a markdown \
-         image the user sees rendered (with download/copy). Not for editing an \
-         existing image. Optional `negative_prompt` (things to avoid) and \
-         `backend` (openai | automatic1111 | comfyui) are honoured by local \
-         Stable Diffusion / ComfyUI backends."
+        "Generate an ARTISTIC image from a text prompt (a generative image \
+         model) and return it inline. Use for illustrations, concept art, \
+         mockups, icons, and similar pictures. \
+         NOT for data charts/graphs — a generative model cannot draw an \
+         accurate pie/bar/line chart; for any data-driven chart or BI graph use \
+         `code_run` with matplotlib instead. \
+         Returns a markdown image the user sees rendered (with download/copy). \
+         Not for editing an existing image. Optional `negative_prompt` (things \
+         to avoid) and `backend` (openai | automatic1111 | comfyui) are honoured \
+         by local Stable Diffusion / ComfyUI backends."
     }
 
     fn tier(&self) -> Tier {

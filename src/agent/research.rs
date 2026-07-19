@@ -674,7 +674,7 @@ mod tests {
             root_id, depth, "com.test.research", "What is X?", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
 
         match outcome {
@@ -714,7 +714,7 @@ mod tests {
             root_id, depth, "com.test.research", "obscure question", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Failed(f) => {
@@ -736,7 +736,7 @@ mod tests {
             root_id, depth, "com.test.research", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Failed(f) => {
@@ -764,7 +764,7 @@ mod tests {
             root_id, depth, "com.test.research", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Failed(f) => {
@@ -795,7 +795,7 @@ mod tests {
             root_id, depth, "com.test.research", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Complete(c) => {
@@ -823,7 +823,7 @@ mod tests {
             root_id, depth, "com.test.research", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Failed(f) => {
@@ -847,7 +847,7 @@ mod tests {
             root_id, depth, "com.test.research", "   ", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Failed(f) => {
@@ -878,7 +878,7 @@ mod tests {
             root_id, depth, "com.test.research", "x", None,
             1.0, None, exec,
         );
-        let outcome = timeout(Duration::from_secs(5), h.completion).await
+        let outcome = timeout(crate::agent::supervisor::WORKER_JOIN_TIMEOUT, h.completion).await
             .expect("hung").unwrap();
         match outcome {
             WorkerOutcome::Complete(c) => {
