@@ -209,8 +209,10 @@ fn humanize_slug(slug: &str) -> String {
 
 /// The friendly display name for a built app + a ready-to-use markdown link
 /// `[name](url)` the model can hand the user verbatim. `name` is the app's
-/// `<title>`, else the humanized `slug`, else `"the app"`. The URL is always the
-/// exact one from [`web_app_links`] — the model must never construct its own.
+/// `<title>`, else the humanized `slug`, else `"the app"`. The URL is the
+/// **canonical main-host form** (see [`canonical_app_url`]) — reachable from the
+/// same access path as the API (incl. through a reverse proxy). The model must
+/// never construct its own.
 pub fn web_app_named_link(
     store:   &TaskArtifactsStore,
     server:  &ServerConfig,
@@ -221,9 +223,18 @@ pub fn web_app_named_link(
         .or_else(|| slug.map(str::trim).filter(|s| !s.is_empty()).map(humanize_slug))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "the app".to_string());
-    let url = web_app_links(server, task_id).primary;
-    let markdown = format!("[{name}]({url})");
+    let markdown = format!("[{name}]({})", canonical_app_url(server, task_id));
     (name, markdown)
+}
+
+/// The canonical URL to give a user for a built app: the absolute main-host URL
+/// when a public base is known (`<public base>/a/<id>/`), else the host-relative
+/// `/a/<id>/` — which the web UI resolves against whatever origin the user is on.
+/// Either form is reachable from the same access path as the API (LAN, reverse
+/// proxy, tunnel) via the main-host serving — unlike the old `*.localhost` /
+/// internal-port URLs.
+pub fn canonical_app_url(server: &ServerConfig, task_id: &str) -> String {
+    main_host_url(server, task_id).unwrap_or_else(|| main_host_path(task_id))
 }
 
 /// Whether the configured mode runs the separate `port`-mode listener.
@@ -256,7 +267,7 @@ pub async fn dispatch(
         .map(|s| s.to_string());
 
     match task_id {
-        Some(task_id) => serve_app_file(&state.store, &task_id, req.uri().path()).await,
+        Some(task_id) => serve_app_file(&state.store, &task_id, req.uri().path(), false).await,
         None          => next.run(req).await,
     }
 }
@@ -265,7 +276,18 @@ pub async fn dispatch(
 /// (e.g. `/`, `/game.js`); `/` maps to `index.html`. Path-traversal is blocked
 /// by [`TaskArtifactsStore::resolve_file`], which canonicalises and confirms
 /// the target sits under the task dir.
-async fn serve_app_file(store: &TaskArtifactsStore, task_id: &str, req_path: &str) -> Response {
+async fn serve_app_file(
+    store: &TaskArtifactsStore,
+    task_id: &str,
+    req_path: &str,
+    // Whether this file is being served into a sandboxed (opaque-origin) iframe
+    // on MIRA's MAIN host (the reverse-proxy-reachable `/a/<id>/_/…` path). In
+    // that context a `connect-src 'self'` CSP would break asset loading (the
+    // document's origin is opaque, so 'self' matches nothing), and isolation is
+    // already provided by the iframe sandbox — so we omit the confining CSP.
+    // The separate-origin serving (subdomain/port) keeps it.
+    sandboxed: bool,
+) -> Response {
     let raw = req_path.trim_start_matches('/');
     let rel = if raw.is_empty() { "index.html" } else { raw };
     let full = format!("output/{rel}");
@@ -283,15 +305,17 @@ async fn serve_app_file(store: &TaskArtifactsStore, task_id: &str, req_path: &st
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type_for(&path)));
     // Built apps can be rebuilt in place under the same task_id → revalidate.
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    // Defence in depth on top of the origin isolation: keep the (arbitrary,
-    // model-generated) app contained — it may run its own inline script but
-    // can only talk back to its own origin, never a third party or MIRA's API.
-    h.insert(
-        HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(
-            "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self'",
-        ),
-    );
+    if !sandboxed {
+        // Separate-origin serving: keep the (arbitrary, model-generated) app
+        // contained — it may run inline scripts but can only talk back to its
+        // own origin, never a third party or MIRA's API.
+        h.insert(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(
+                "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self'",
+            ),
+        );
+    }
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     // Don't leak the capability URL (which contains the task_id) via Referer.
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
@@ -317,14 +341,110 @@ async fn port_serve_root(
     State(store):     State<Arc<TaskArtifactsStore>>,
     UrlPath(task_id): UrlPath<String>,
 ) -> Response {
-    serve_app_file(&store, &task_id, "").await
+    serve_app_file(&store, &task_id, "", false).await
 }
 
 async fn port_serve_path(
     State(store):             State<Arc<TaskArtifactsStore>>,
     UrlPath((task_id, path)): UrlPath<(String, String)>,
 ) -> Response {
-    serve_app_file(&store, &task_id, &path).await
+    serve_app_file(&store, &task_id, &path, false).await
+}
+
+// ── main-host serving (reverse-proxy reachable, sandboxed) ───────────────────
+//
+// Subdomain/port modes serve apps at a SEPARATE origin — great isolation, but
+// unreachable behind a reverse proxy that only exposes one host on 443 (Traefik,
+// `tailscale serve`), where the app port isn't addressable. So we ALSO serve apps
+// from MIRA's MAIN HTTP server at `/a/<task_id>/…` (the host every deployment
+// already exposes). To keep the model-built, untrusted app from running with
+// MIRA's own origin privileges (reading the session token from localStorage,
+// calling the API), `/a/<id>/` returns a trusted SHELL that runs the app inside a
+// `sandbox`ed iframe (no `allow-same-origin` → opaque origin) whose files are
+// served from `/a/<id>/_/…`. Reachable everywhere, isolated everywhere.
+
+/// The host-relative path the main server serves an app's shell at: `/a/<id>/`.
+/// The mobile app builds `<its own base host>` + this — reachable through any
+/// reverse proxy / tunnel / LAN that fronts the main host, with no extra config.
+pub fn main_host_path(task_id: &str) -> String {
+    format!("/a/{task_id}/")
+}
+
+/// The canonical absolute main-host app URL, when a public base is known
+/// (`public_base_url`). `None` when we can't determine an externally-valid base —
+/// callers then rely on the host-relative [`main_host_path`] built against the
+/// client's own base.
+pub fn main_host_url(server: &ServerConfig, task_id: &str) -> Option<String> {
+    let base = server.public_base_url.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?
+        .trim_end_matches('/');
+    Some(format!("{base}/a/{task_id}/"))
+}
+
+/// Trusted shell served at `/a/<id>/` on the main origin: it embeds the untrusted
+/// app in a sandboxed (opaque-origin) iframe loaded from `/a/<id>/_/`. The shell
+/// itself is our HTML (no app code), so it's safe on MIRA's origin.
+fn app_shell_html(task_id: &str) -> String {
+    // `allow-scripts` WITHOUT `allow-same-origin` = opaque origin: the app runs
+    // its JS but cannot read MIRA's localStorage/token or call its API.
+    format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <title>App</title>\
+         <style>html,body{{margin:0;height:100%;background:#fff;overflow:hidden}}\
+         iframe{{border:0;width:100vw;height:100vh;display:block}}</style></head>\
+         <body><iframe src=\"/a/{task_id}/_/\" \
+         sandbox=\"allow-scripts allow-forms allow-popups allow-modals allow-pointer-lock allow-downloads\" \
+         allow=\"fullscreen; autoplay\"></iframe></body></html>"
+    )
+}
+
+/// Router for the main-host app path. Public — the unguessable `task_id` is the
+/// capability. Merged into MIRA's main router.
+pub fn app_main_router(store: Arc<TaskArtifactsStore>) -> Router {
+    Router::new()
+        .route("/a/{task_id}",           get(main_serve_shell))
+        .route("/a/{task_id}/",          get(main_serve_shell))
+        .route("/a/{task_id}/_",         get(main_serve_inner_root))
+        .route("/a/{task_id}/_/",        get(main_serve_inner_root))
+        .route("/a/{task_id}/_/{*path}", get(main_serve_inner_path))
+        .with_state(store)
+}
+
+async fn main_serve_shell(
+    State(store):     State<Arc<TaskArtifactsStore>>,
+    UrlPath(task_id): UrlPath<String>,
+) -> Response {
+    if !has_web_app(&store, &task_id) {
+        return (StatusCode::NOT_FOUND, "web app not found").into_response();
+    }
+    let mut resp = Response::new(Body::from(app_shell_html(&task_id)));
+    let h = resp.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    // The shell frames only its own inner path and runs no app code itself.
+    h.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("default-src 'none'; frame-src 'self'; style-src 'unsafe-inline'; base-uri 'none'"),
+    );
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    resp
+}
+
+async fn main_serve_inner_root(
+    State(store):     State<Arc<TaskArtifactsStore>>,
+    UrlPath(task_id): UrlPath<String>,
+) -> Response {
+    serve_app_file(&store, &task_id, "", true).await
+}
+
+async fn main_serve_inner_path(
+    State(store):             State<Arc<TaskArtifactsStore>>,
+    UrlPath((task_id, path)): UrlPath<(String, String)>,
+) -> Response {
+    serve_app_file(&store, &task_id, &path, true).await
 }
 
 /// Extension → MIME map covering what a built static web app emits.
@@ -482,10 +602,15 @@ mod tests {
         s.port = 8087;
         s.web_apps.host_suffix = "localhost".to_string();
 
-        // Title wins → a friendly markdown link with the exact URL.
+        // Title wins → a friendly markdown link with the canonical (main-host,
+        // reverse-proxy-reachable) URL. No public_base_url set → host-relative path.
         let (name, md) = web_app_named_link(&store, &s, "task-snake", Some("snake-game"));
         assert_eq!(name, "Snake & Ladders");
-        assert_eq!(md, "[Snake & Ladders](http://task-snake.localhost:8087/)");
+        assert_eq!(md, "[Snake & Ladders](/a/task-snake/)");
+        // With a public base it's the absolute main-host URL (no port).
+        s.public_base_url = Some("https://mira.example.com".to_string());
+        let (_, md2) = web_app_named_link(&store, &s, "task-snake", None);
+        assert_eq!(md2, "[Snake & Ladders](https://mira.example.com/a/task-snake/)");
 
         // No <title> → humanized slug fallback.
         let p2 = store.allocate("com.mira.claudecode", "task-plain", None, None, "x").unwrap();
@@ -525,6 +650,71 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    #[test]
+    fn canonical_url_prefers_public_base_else_relative_path() {
+        let mut s = ServerConfig::default();
+        assert_eq!(main_host_path("t1"), "/a/t1/");
+        // No public base → host-relative path (resolves against the client's origin).
+        assert_eq!(main_host_url(&s, "t1"), None);
+        assert_eq!(canonical_app_url(&s, "t1"), "/a/t1/");
+        // Public base → absolute main-host URL (reverse-proxy reachable, no port).
+        s.public_base_url = Some("https://mira.example.com/".to_string());
+        assert_eq!(main_host_url(&s, "t1").as_deref(), Some("https://mira.example.com/a/t1/"));
+        assert_eq!(canonical_app_url(&s, "t1"), "https://mira.example.com/a/t1/");
+    }
+
+    #[tokio::test]
+    async fn main_router_serves_sandboxed_shell_and_inner() {
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use tower::ServiceExt;
+
+        let dir   = tempfile::tempdir().unwrap();
+        let store = Arc::new(TaskArtifactsStore::new(dir.path().to_path_buf()));
+        let p = store.allocate("com.mira.claudecode", "task-snake", None, None, "x").unwrap();
+        std::fs::write(p.join("output/index.html"), b"<canvas id=game></canvas>").unwrap();
+        std::fs::write(p.join("output/game.js"), b"console.log('hi')").unwrap();
+
+        let app = app_main_router(Arc::clone(&store));
+        let read = |resp: Response| async {
+            axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()
+        };
+
+        // /a/<id>/ → the trusted SHELL: a sandboxed iframe (no allow-same-origin),
+        // NOT the app HTML directly.
+        let resp = app.clone()
+            .oneshot(HttpRequest::builder().uri("/a/task-snake/").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = String::from_utf8_lossy(&read(resp).await).into_owned();
+        assert!(html.contains("<iframe"), "{html}");
+        assert!(html.contains("sandbox=\"allow-scripts"), "{html}");
+        assert!(!html.contains("allow-same-origin"), "iframe must NOT be same-origin: {html}");
+        assert!(html.contains("/a/task-snake/_/"), "{html}");
+        assert!(!html.contains("<canvas"), "shell must not inline the app: {html}");
+
+        // /a/<id>/_/ → the raw app index, sandboxed (no confining CSP that would
+        // break asset loading under an opaque origin).
+        let resp = app.clone()
+            .oneshot(HttpRequest::builder().uri("/a/task-snake/_/").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get("content-security-policy").is_none(), "sandboxed inner keeps no confining CSP");
+        assert!(String::from_utf8_lossy(&read(resp).await).contains("<canvas"));
+
+        // /a/<id>/_/game.js → raw asset.
+        let resp = app.clone()
+            .oneshot(HttpRequest::builder().uri("/a/task-snake/_/game.js").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Unknown app shell → 404.
+        let resp = app
+            .oneshot(HttpRequest::builder().uri("/a/nope/").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn serves_index_and_blocks_traversal() {
         let dir   = tempfile::tempdir().unwrap();
@@ -536,18 +726,18 @@ mod tests {
         assert!(!has_web_app(&store, "task-missing"));
 
         // Root → index.html, served as HTML with the isolation headers.
-        let resp = serve_app_file(&store, "task-snake", "/").await;
+        let resp = serve_app_file(&store, "task-snake", "/", false).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), "text/html; charset=utf-8");
         assert!(resp.headers().get("content-security-policy").is_some());
         assert_eq!(resp.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
 
         // Traversal escape → 404.
-        let resp = serve_app_file(&store, "task-snake", "/../../MANIFEST.json").await;
+        let resp = serve_app_file(&store, "task-snake", "/../../MANIFEST.json", false).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         // Unknown file → 404.
-        let resp = serve_app_file(&store, "task-snake", "/nope.js").await;
+        let resp = serve_app_file(&store, "task-snake", "/nope.js", false).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

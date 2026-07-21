@@ -1,0 +1,8 @@
+# Pin an EXACT rustc so every CI runner + local dev use the same compiler.
+# Previously CI ran `rustup default 1.94` (a floating minor alias), so each
+# self-hosted runner resolved it to whatever 1.94.x patch it had installed —
+# the Windows runner drifted to a stricter patch that rejected latent
+# type-inference ambiguity in a few integration tests that 1.94.1 (local + the
+# macOS runner) compile cleanly. Pinning removes that per-runner drift.
+[toolchain]
+channel = "1.94.1"

@@ -735,22 +735,22 @@ impl Tool for GetTaskResultTool {
             if let (Some(cfg), Some(store)) = (self.config.as_ref(), self.task_artifacts.as_ref()) {
                 let tid = agent.id.to_string();
                 if crate::server::web_apps::has_web_app(store, &tid) {
-                    let links = crate::server::web_apps::web_app_links(&cfg.server, &tid);
                     let (name, link) = crate::server::web_apps::web_app_named_link(store, &cfg.server, &tid, None);
-                    body["web_app_url"]  = json!(links.primary);
+                    // Canonical, reverse-proxy-reachable URL (main host `/a/<id>/`),
+                    // served sandboxed by MIRA's main server — reachable from the same
+                    // access path as the API (LAN / proxy / tunnel), unlike the old
+                    // `*.localhost` / internal-port URLs.
+                    body["web_app_url"]  = json!(crate::server::web_apps::canonical_app_url(&cfg.server, &tid));
                     body["web_app_name"] = json!(name);
                     // A ready-to-use friendly markdown link — hand this to the user as-is.
                     body["web_app_link"] = json!(link);
-                    if let Some(alt) = links.alt {
-                        body["web_app_alt_url"] = json!(alt);
-                    }
-                    // Portable reference: a client that reaches MIRA at its own base host
-                    // (mobile app over LAN / Tailscale) builds a reachable URL as
-                    // `<its base host>:<web_app_port>/a/<task_id>/` — the fixed URL above
-                    // can't be right for every client. Present only when the port listener
-                    // is actually running.
+                    // Host-relative path — a native client (mobile app) builds a reachable
+                    // URL as `<its own base host>/a/<task_id>/`. Always present (the main
+                    // host always serves it when web apps are enabled).
+                    body["web_app_path"] = json!(crate::server::web_apps::main_host_path(&tid));
+                    // Optional: the separate app-listener port, for a LAN client that
+                    // prefers `<base host>:<port>/a/<id>/` (only when port mode runs).
                     if crate::server::web_apps::port_mode_enabled(&cfg.server) {
-                        body["web_app_path"] = json!(crate::server::web_apps::port_path(&tid));
                         body["web_app_port"] = json!(crate::server::web_apps::effective_apps_port(&cfg.server));
                     }
                     body["web_app_hint"] = json!(
@@ -758,8 +758,7 @@ impl Tool for GetTaskResultTool {
                          link — paste `web_app_link` (a markdown link like `[Name](url)`) as-is, or \
                          wrap the exact `web_app_url` in a short label. Do NOT dump the bare URL, do \
                          NOT alter the URL, and MIRA cannot open a tab itself so never claim you did. \
-                         (Native clients may instead build the URL from their own base host + \
-                         `web_app_port` + `web_app_path`.)"
+                         (Native clients build the URL from their own base host + `web_app_path`.)"
                     );
                 }
             }
@@ -830,7 +829,6 @@ impl Tool for ListWebAppsTool {
             if entry.manifest.status != "completed" { continue; }
             if !entry.path.join("output").join("index.html").is_file() { continue; }
             let tid = entry.manifest.task_id.clone();
-            let links = crate::server::web_apps::web_app_links(&self.config.server, &tid);
             let (name, link) = crate::server::web_apps::web_app_named_link(
                 store, &self.config.server, &tid, entry.manifest.slug.as_deref(),
             );
@@ -840,13 +838,13 @@ impl Tool for ListWebAppsTool {
                 "brief":      entry.manifest.brief_excerpt,
                 "slug":       entry.manifest.slug,
                 "created_at": entry.manifest.created_at,
-                "url":        links.primary,
+                // Canonical, reverse-proxy-reachable main-host URL.
+                "url":        crate::server::web_apps::canonical_app_url(&self.config.server, &tid),
                 // A ready-to-use friendly markdown link — hand this to the user as-is.
                 "link":       link,
-                "alt_url":    links.alt,
-                // Portable reference for native clients (mobile): build the URL as
-                // `<own base host>:<port><path>`. Present only when the port listener runs.
-                "path":       port_mode.then(|| crate::server::web_apps::port_path(&tid)),
+                // Host-relative path — native clients build `<own base host>/a/<id>/`.
+                "path":       crate::server::web_apps::main_host_path(&tid),
+                // Optional LAN-direct port (only when the separate app listener runs).
                 "port":       port_mode.then(|| crate::server::web_apps::effective_apps_port(&self.config.server)),
             }));
         }

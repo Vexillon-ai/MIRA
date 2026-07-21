@@ -1416,6 +1416,20 @@ pub fn build_router(
             api_routes.layer(Extension(Arc::clone(w)))
         } else { api_routes };
 
+        // Web apps on the MAIN host at `/a/<id>/` — reachable wherever the main
+        // host is exposed (reverse proxy / tailscale / LAN), served as a
+        // sandboxed iframe so a same-host app can't touch MIRA's session/API.
+        // Public: the unguessable `task_id` is the capability. Merged before the
+        // SPA fallback so `/a/<id>/` isn't swallowed by it. Independent of the
+        // subdomain/port serving modes.
+        if config.server.web_apps.enabled {
+            if let Some(store) = task_artifacts.as_ref() {
+                router = router.merge(
+                    crate::server::web_apps::app_main_router(Arc::clone(store)),
+                );
+            }
+        }
+
         let spa_route = spa_router();
 
         router = router
