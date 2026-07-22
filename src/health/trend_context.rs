@@ -240,7 +240,7 @@ fn module_specific_hint(module: &str) -> Option<&'static str> {
             "channel.signal.daemon_alive" =>
                 "Restart auto-action wired — calls `ChannelManager::restart_account` on each dead Signal account. Set policy to **Auto-cleanup**. Or restart manually via the Channels page.",
             "channel.signal.no_received_24h" =>
-                "Verify signal-cli is registered and reachable: `signal-cli -u <phone> receive --timeout 5`. Could also indicate a paired-device dropoff.",
+                "Usually just means nobody has messaged in a while (not a fault). If you DO expect traffic, verify signal-cli is registered and reachable: `signal-cli -u <phone> receive --timeout 5`, and check channel.signal.daemon_alive for actual liveness / a paired-device dropoff.",
             "watchdog.analysis_stuck_in_progress_30m" =>
                 "Reset auto-action wired — flips stuck rows to `failed` so the Analyze button works again. Set policy to **Auto-cleanup**.",
             "watchdog.same_fingerprint_count_24h" =>

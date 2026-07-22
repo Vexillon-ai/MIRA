@@ -2210,13 +2210,15 @@ fn build_tool_registry(
         health_store,
         Some(degradation_tracker),
         Some(config.log_file_path()),
+        Arc::clone(&guardian_channel_manager),
     ));
     // MIRA-Guardian propose tool (P4) — records pending remediation proposals.
     // System-visibility; only reachable when the Guardian's allowlist includes
     // it (active mode). Registered when the store opened.
     if let Some(store) = guardian_actions {
         registry.register(crate::tools::guardian_propose::GuardianProposeTool::new(
-            Arc::clone(&store), guardian_audit.clone()));
+            Arc::clone(&store), guardian_audit.clone(),
+            Arc::clone(&guardian_channel_manager)));
         // P4b — conversational approval, authorized to the Guardian's operator.
         registry.register(crate::tools::guardian_decide::GuardianDecideTool::new(
             store,

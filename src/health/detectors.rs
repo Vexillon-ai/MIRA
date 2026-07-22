@@ -2054,9 +2054,17 @@ async fn probe_telegram(token: &str) -> (bool, Option<String>) {
     }
 }
 
-// Hours since signal-cli last logged an inbound message. Log-scan based
-// the `mira::providers::signal_cli` modules log INFO when a message
-// is received. >24h with active accounts → Yellow; >72h → Red.
+// Inbound-quiet indicator: scans for the last time signal-cli logged an
+// inbound message. IMPORTANT: absence of inbound traffic is NOT evidence of a
+// fault — a perfectly healthy daemon simply has nothing to receive when the
+// user hasn't messaged. Daemon *liveness* (a crashed/wedged process) is the
+// job of `channel.signal.daemon_alive`, which actually probes the child
+// process. So this detector deliberately NEVER escalates to Red: 24h of
+// silence is normal (Green); only a long 72h dead-quiet window is worth a
+// Yellow heads-up, worded so the Guardian treats it as "possibly quiet", not
+// "restart the bridge". (Prior to this it Red'd on 72h silence, which drove
+// the Guardian to repeatedly propose bogus `restart_bridge` actions on a
+// merely-quiet channel.)
 pub struct SignalNoReceivedDetector;
 impl Detector for SignalNoReceivedDetector {
     fn name(&self) -> &'static str { "channel.signal.no_received_24h" }
@@ -2088,13 +2096,15 @@ impl Detector for SignalNoReceivedDetector {
             "received_lines_24h": recent_24h,
             "received_lines_72h": recent_72h,
         });
-        let level = if recent_72h == 0 { HealthLevel::Red }
-                    else if recent_24h == 0 { HealthLevel::Yellow }
-                    else { HealthLevel::Green };
+        // Never Red — inbound silence is not a fault. Any inbound in 72h → Green
+        // (24h silence alone is unremarkable); only a full 72h with zero inbound
+        // earns an informational Yellow.
+        let level = if recent_72h > 0 { HealthLevel::Green } else { HealthLevel::Yellow };
         let message = match level {
-            HealthLevel::Red    => "no signal inbound traffic in last 72h".into(),
-            HealthLevel::Yellow => "no signal inbound traffic in last 24h (last 72h: present)".into(),
-            HealthLevel::Green  => format!("{recent_24h} signal inbound log line(s) in last 24h"),
+            HealthLevel::Yellow =>
+                "no Signal inbound in 72h — the channel may simply be quiet; \
+                 daemon liveness is tracked separately by channel.signal.daemon_alive".into(),
+            _ => format!("Signal inbound present in last 72h ({recent_72h} line(s))"),
         };
         DetectorReport {
             name: self.name().into(), level, message,

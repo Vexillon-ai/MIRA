@@ -421,7 +421,10 @@ async fn llm_triage(
     // out-of-process — the live state is in the down MIRA — so pass None.)
     let mut registry = crate::tools::ToolRegistry::new();
     registry.register(crate::tools::guardian_inspect::GuardianInspectTool::new(
+        // Out-of-process: no live ChannelManager here (it's in the down MIRA),
+        // so the channels section renders "not wired yet" — expected.
         health_store.cloned(), None, Some(config.log_file_path()),
+        std::sync::Arc::new(std::sync::OnceLock::new()),
     ));
     registry.register(crate::tools::mira_help::MiraHelpTool);
     let mut allowed = vec![ "guardian_inspect".to_string(), "mira_help".to_string() ];

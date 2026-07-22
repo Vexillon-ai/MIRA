@@ -57,7 +57,7 @@ MIRA can connect to external **MCP servers** (stdio or Streamable-HTTP) and surf
 
 ### Just-in-Time Tools (adaptive tool selection)
 
-With many tools installed, sending every tool's schema on every request bloats the prompt (and hurts selection quality). Turn on `agent.tool_selection.mode = "adaptive"` and MIRA sends only the tools a turn plausibly needs: a small **core** set, the **semantic top-K** for your message, and tools you've **used recently** in the conversation — plus a `find_tools` meta-tool the model calls to pull in anything else on demand (so nothing is ever hidden). Off by default (`mode = "all"` = send everything, as before); selection runs on the local embedding model, so it's ~milliseconds and free. Typically cuts the per-turn tool payload by 80%+.
+With many tools installed, sending every tool's schema on every request bloats the prompt (and hurts selection quality). Turn on `agent.tool_selection.mode = "adaptive"` and MIRA sends only the tools a turn plausibly needs: a small **core** set, the **semantic top-K** for your message, and tools you've **used recently** in the conversation — plus a `find_tools` meta-tool the model calls to pull in anything else on demand (so nothing is ever hidden). A one-line hint tells the model how many tools are loaded vs. how many more it can pull in, so it searches for a capability rather than wrongly claiming it's unavailable. Off by default (`mode = "all"` = send everything, as before); selection runs on the local embedding model, so it's ~milliseconds and free. Typically cuts the per-turn tool payload by 80%+.
 
 ## Calendar
 

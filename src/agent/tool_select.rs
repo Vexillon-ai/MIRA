@@ -57,6 +57,23 @@ pub fn find_tools_spec() -> ToolSpec {
     )
 }
 
+/// One-line system-prompt hint telling the model how many tools are loaded this
+/// turn, how many more exist behind `find_tools`, and the contract: search
+/// before declaring a capability unavailable. Returns `None` when there is
+/// nothing more to load (`total <= loaded`) — with the full set present there's
+/// nothing to discover, so the hint would be false. Only injected on turns
+/// where adaptive selection actually narrowed the toolset AND `find_tools` is
+/// exposed. See `design-docs/just-in-time-tools.md` §3.
+pub fn find_tools_hint(loaded: usize, total: usize) -> Option<String> {
+    let more = total.checked_sub(loaded).filter(|m| *m > 0)?;
+    Some(format!(
+        "Tool availability: {loaded} of {total} tools are loaded for this turn. {more} more \
+         can be loaded on demand — call {FIND_TOOLS_NAME}(\"<capability you need>\") to pull in \
+         any that seem missing. ALWAYS call {FIND_TOOLS_NAME} before telling the user a \
+         capability is unavailable; the tool you need is very likely among the {more} not yet loaded."
+    ))
+}
+
 /// Rank the full catalog for an on-demand `find_tools` query: top-`k` by
 /// cosine, excluding already-active tools and `find_tools` itself. No
 /// min-similarity gate — the model explicitly asked, so return the best
@@ -231,6 +248,19 @@ mod tests {
         let mut t = ToolIndex::default();
         for (n, v) in pairs { t.vectors.insert(n.to_string(), v.clone()); }
         t
+    }
+
+    #[test]
+    fn find_tools_hint_counts_and_gating() {
+        // Narrowed set (8 of 120) → a hint naming both counts + the contract.
+        let h = find_tools_hint(8, 120).expect("should hint when more exist");
+        assert!(h.contains("8 of 120"));
+        assert!(h.contains("112 more"));
+        assert!(h.contains(FIND_TOOLS_NAME));
+        assert!(h.to_lowercase().contains("before telling the user"));
+        // Nothing more to load → no hint (avoids a false "N more available").
+        assert!(find_tools_hint(120, 120).is_none());
+        assert!(find_tools_hint(120, 8).is_none()); // loaded > total → saturates to None
     }
 
     #[test]

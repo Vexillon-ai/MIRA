@@ -796,9 +796,17 @@ async fn run_find_tools(
     let already = active.as_deref().unwrap_or(&[]).to_vec();
     // Draw only from the user's allow-list pool (empty slice → none available).
     let loaded = exp.expand(query, pool.unwrap_or(&[]), &already).await;
+    // `find_tools` is dispatched here (not via ToolRegistry), so it otherwise
+    // produces no `[Tool: …]` line — log it for observability (query + hits).
     if loaded.is_empty() {
+        tracing::info!("find_tools: query={query:?} → 0 tools matched");
         return "No additional tools matched that — the tools you already have are likely the relevant ones.".to_string();
     }
+    tracing::info!(
+        "find_tools: query={query:?} → loaded {} tool(s): {}",
+        loaded.len(),
+        loaded.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "),
+    );
     if let Some(a) = active.as_mut() {
         for (n, _) in &loaded {
             if !a.iter().any(|x| x == n) { a.push(n.clone()); }
@@ -1569,6 +1577,85 @@ Nice to meet you!
             })
         }
         async fn health_check(&self) -> bool { true }
+    }
+
+    // Provider that, on its FIRST call, asks for `find_tools` (as a model would
+    // when its narrow toolset seems to lack a capability), then on the second
+    // call — with the newly-loaded tool available — answers. Models the exact
+    // JIT-Tools failure the hint fixes: without discovery the model would say
+    // "I don't have that tool"; with it, one turn succeeds.
+    struct FindToolsThenAnswer { calls: std::sync::atomic::AtomicUsize }
+    #[async_trait::async_trait]
+    impl ModelProvider for FindToolsThenAnswer {
+        fn name(&self) -> &str { "find-then-answer" }
+        async fn generate(&self, _msgs: &[ChatMessage], _opts: &GenerationOptions)
+            -> Result<GenerationResponse, MiraError>
+        {
+            use std::sync::atomic::Ordering;
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            let tool_calls = (n == 0).then(|| vec![crate::types::ToolCall::new(
+                crate::agent::tool_select::FIND_TOOLS_NAME,
+                serde_json::json!({ "query": "generate an image" }),
+            )]);
+            Ok(GenerationResponse {
+                content:     if n == 0 { String::new() } else { "generated an image".into() },
+                tool_calls,
+                reasoning:   None,
+                usage:       TokenUsage::default(),
+                provider_id: ProviderId::Local("find-then-answer".into()),
+                model_name:  "find-then-answer".into(),
+                fallback:    None,
+            })
+        }
+        async fn health_check(&self) -> bool { true }
+    }
+
+    // Records the queries it's asked, and always offers `image_generate`.
+    struct RecordingExpander { seen: std::sync::Mutex<Vec<String>> }
+    #[async_trait::async_trait]
+    impl crate::agent::tool_select::ToolExpander for RecordingExpander {
+        async fn expand(&self, query: &str, _pool: &[String], _already: &[String])
+            -> Vec<(String, String)>
+        {
+            self.seen.lock().unwrap().push(query.to_string());
+            vec![("image_generate".into(), "generate images from a text prompt".into())]
+        }
+    }
+
+    #[tokio::test]
+    async fn find_tools_round_trip_recovers_a_missing_tool_in_one_turn() {
+        // Regression for design-docs/jit-tools-find-tools-hint.md: with adaptive
+        // selection narrowing the toolset so `image_generate` is NOT loaded, a
+        // request needing it must cause `find_tools` to be invoked and the turn
+        // to succeed — without the user re-prompting.
+        let provider: Arc<dyn ModelProvider> =
+            Arc::new(FindToolsThenAnswer { calls: std::sync::atomic::AtomicUsize::new(0) });
+        let tools = Arc::new(registry_with(StubTool {
+            name: "image_generate", reply: ToolResult::success("<image>"),
+        }));
+        // Narrowed active set EXCLUDES image_generate; the pool (find_tools'
+        // candidate set) includes it.
+        let allowed = vec!["now".to_string()];
+        let pool    = vec!["now".to_string(), "image_generate".to_string()];
+        let expander = RecordingExpander { seen: std::sync::Mutex::new(vec![]) };
+
+        let mut messages = vec![ChatMessage::user("generate an image of a cat")];
+        let opts = GenerationOptions::default();
+        let (tx, mut rx) = mpsc::channel(64);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let res = run_tool_loop_with_context(
+            &provider, &tools, &mut messages, &opts, &ToolMode::Auto, 4, &tx,
+            Some(&allowed), &serde_json::Map::new(), ToolEventCtx::NONE,
+            Some(&expander as &dyn crate::agent::tool_select::ToolExpander), Some(&pool),
+        ).await;
+        drop(tx);
+        let _ = drain.await;
+
+        let (content, _usage) = res.expect("turn must succeed via find_tools, not error");
+        assert_eq!(content, "generated an image");
+        let seen = expander.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "find_tools must have been invoked exactly once");
+        assert!(seen[0].contains("image"), "find_tools query should carry the capability");
     }
 
     #[tokio::test]

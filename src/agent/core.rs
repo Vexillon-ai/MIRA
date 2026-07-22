@@ -1171,6 +1171,24 @@ impl AgentCore {
         let expand_pool: Option<&[String]> =
             if expander.is_some() { Some(&pool) } else { None };
 
+        // Progressive-disclosure hint (JIT Tools §3): when we narrowed the
+        // toolset AND `find_tools` is exposed, tell the model how many tools are
+        // loaded, how many more it can pull in, and that it must search before
+        // claiming a capability is missing. Without this the model sees a small
+        // set + a generic `find_tools` and no signal that ~N others exist, so it
+        // wrongly concludes "I don't have that tool". Injected as a system block
+        // after the leading system prompt(s), only when adaptive actually ran —
+        // never under mode="all" or flow-restricted turns (expander is None).
+        if expander.is_some() {
+            let loaded = adaptive_allowed.as_ref().map(|v| v.len()).unwrap_or(0);
+            if let Some(hint) = crate::agent::tool_select::find_tools_hint(loaded, pool.len()) {
+                let sys_end = messages.iter()
+                    .take_while(|m| m.role == crate::types::MessageRole::System)
+                    .count();
+                messages.insert(sys_end, ChatMessage::system(hint));
+            }
+        }
+
         let (response_text, usage) = tool_loop::run_tool_loop_with_context(
             provider,
             &self.tools,

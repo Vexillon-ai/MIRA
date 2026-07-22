@@ -214,6 +214,20 @@ impl ChannelManager {
             .collect()
     }
 
+    // Every known channel account id (across all channels/users), as recorded
+    // in the account store. This is the authoritative set of valid
+    // `restart_account` / `restart_bridge` targets. Empty when the store deps
+    // haven't been wired yet (pre-`start_all`) or the lookup fails — callers
+    // treat empty as "can't validate" and fail open. Used by the Guardian's
+    // propose/inspect tools so the model targets a real account instead of
+    // guessing a label like "signal" or "guardian".
+    pub fn known_account_ids(&self) -> Vec<String> {
+        self.deps.as_ref()
+            .and_then(|d| d.store.list_all().ok())
+            .map(|rows| rows.into_iter().map(|a| a.id).collect())
+            .unwrap_or_default()
+    }
+
     // Fan out all enabled accounts. Errors on individual accounts are
     // logged and swallowed — one misconfigured row shouldn't block the
     // others.

@@ -12,11 +12,13 @@
 //! `design-docs/guardian-agent.md` (P1).
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio::sync::RwLock;
 
+use crate::gateway::channel_manager::ChannelManager;
 use crate::health::degradation::DegradationTracker;
 use crate::health::store::HealthStore;
 use crate::tools::{Tool, ToolArgs, ToolResult, ToolVisibility, Tier};
@@ -32,6 +34,11 @@ pub struct GuardianInspectTool {
     health:       Option<Arc<HealthStore>>,
     degradations: Option<Arc<DegradationTracker>>,
     log_path:     Option<PathBuf>,
+    /// Deferred ChannelManager (filled by the gateway after the registry is
+    /// built). Lets the "channels" section list the REAL account ids + Signal
+    /// daemon liveness, so the Guardian proposes a valid `restart_bridge`
+    /// target instead of guessing.
+    channel_manager: Arc<OnceLock<Arc<RwLock<ChannelManager>>>>,
 }
 
 impl GuardianInspectTool {
@@ -39,8 +46,9 @@ impl GuardianInspectTool {
         health:       Option<Arc<HealthStore>>,
         degradations: Option<Arc<DegradationTracker>>,
         log_path:     Option<PathBuf>,
+        channel_manager: Arc<OnceLock<Arc<RwLock<ChannelManager>>>>,
     ) -> Self {
-        Self { health, degradations, log_path }
+        Self { health, degradations, log_path, channel_manager }
     }
 }
 
@@ -50,9 +58,11 @@ impl Tool for GuardianInspectTool {
 
     fn description(&self) -> &str {
         "Read MIRA's current operational state: the latest health snapshot (detector \
-         levels + messages), active subsystem degradations, and a tail of the application \
-         log. Read-only. Pass `what` = \"health\" | \"degradations\" | \"logs\" | \"all\" \
-         (default \"all\"), and optionally `log_lines` (default 40, max 200)."
+         levels + messages), active subsystem degradations, the channel accounts (with \
+         their exact ids — the valid `restart_bridge` targets — and Signal daemon \
+         liveness), and a tail of the application log. Read-only. Pass `what` = \"health\" \
+         | \"degradations\" | \"channels\" | \"logs\" | \"all\" (default \"all\"), and \
+         optionally `log_lines` (default 40, max 200)."
     }
 
     fn args_schema(&self) -> Value {
@@ -61,7 +71,7 @@ impl Tool for GuardianInspectTool {
             "properties": {
                 "what": {
                     "type": "string",
-                    "enum": ["health", "degradations", "logs", "all"],
+                    "enum": ["health", "degradations", "channels", "logs", "all"],
                     "description": "Which section(s) to return. Default \"all\"."
                 },
                 "log_lines": {
@@ -92,6 +102,10 @@ impl Tool for GuardianInspectTool {
         }
         if want("degradations") {
             out.push_str(&self.render_degradations());
+            out.push('\n');
+        }
+        if want("channels") {
+            out.push_str(&self.render_channels().await);
             out.push('\n');
         }
         if want("logs") {
@@ -153,6 +167,32 @@ impl GuardianInspectTool {
         s
     }
 
+    async fn render_channels(&self) -> String {
+        let Some(mgr) = self.channel_manager.get() else {
+            return "## Channels\n(channel manager not wired yet)".to_string();
+        };
+        // One brief write lock: `known_account_ids` reads the store,
+        // `signal_account_aliveness` needs `&mut` for its `try_wait` probe.
+        let mut guard = mgr.write().await;
+        let ids   = guard.known_account_ids();
+        let alive = guard.signal_account_aliveness();
+        drop(guard);
+
+        if ids.is_empty() {
+            return "## Channels\n- no channel accounts configured".to_string();
+        }
+        let mut s = String::from(
+            "## Channels\n(the ids below are the exact, valid `restart_bridge` targets)\n");
+        for id in &ids {
+            match alive.iter().find(|(a, _)| a == id) {
+                Some((_, true))  => s.push_str(&format!("- {id} (Signal daemon: alive)\n")),
+                Some((_, false)) => s.push_str(&format!("- {id} (Signal daemon: DOWN)\n")),
+                None             => s.push_str(&format!("- {id}\n")),
+            }
+        }
+        s
+    }
+
     fn render_logs(&self, lines: usize) -> String {
         let Some(path) = self.log_path.as_ref() else {
             return "## Logs\n(log path not configured for this instance)".to_string();
@@ -191,11 +231,20 @@ mod tests {
 
     #[tokio::test]
     async fn reports_gracefully_when_stores_absent() {
-        let t = GuardianInspectTool::new(None, None, None);
+        let t = GuardianInspectTool::new(None, None, None, Arc::new(OnceLock::new()));
         let r = t.execute(json!({"what": "all"})).await.unwrap();
         assert!(r.success);
         assert!(r.output.contains("Health"));
         assert!(!t.enabled());
+    }
+
+    #[tokio::test]
+    async fn channels_section_reports_when_manager_absent() {
+        let t = GuardianInspectTool::new(None, None, None, Arc::new(OnceLock::new()));
+        let r = t.execute(json!({"what": "channels"})).await.unwrap();
+        assert!(r.success);
+        assert!(r.output.contains("Channels"));
+        assert!(r.output.contains("not wired yet"));
     }
 
     #[test]

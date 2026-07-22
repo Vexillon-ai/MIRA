@@ -12,13 +12,15 @@
 //! System-visibility; added to the Guardian's allowlist only when
 //! `guardian.mode = active` (see `agent::guardian::active_tools`).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio::sync::RwLock;
 
 use crate::agent::audit::{AuditEvent, AuditStore, guardian_agent_id};
 use crate::agent::guardian_actions::{GuardianActionKind, GuardianActionStore};
+use crate::gateway::channel_manager::ChannelManager;
 use crate::tools::{Tool, ToolArgs, ToolResult, ToolVisibility, Tier};
 use crate::MiraError;
 
@@ -27,11 +29,23 @@ pub struct GuardianProposeTool {
     /// HMAC-chained audit log (optional). Records the "proposed" event so the
     /// full proposal→decision→execution chain is tamper-evident.
     audit: Option<Arc<AuditStore>>,
+    /// Deferred ChannelManager (built after the tool registry; the gateway
+    /// fills it later). Used to validate a `restart_bridge` target against the
+    /// real channel account ids at propose time — so a hallucinated target
+    /// like "signal"/"guardian" is rejected up front with the valid list,
+    /// instead of being recorded as pending and failing "account not found" on
+    /// approval. Empty (not yet filled, or no accounts) → validation is skipped
+    /// and execution's own graceful failure is the backstop.
+    channel_manager: Arc<OnceLock<Arc<RwLock<ChannelManager>>>>,
 }
 
 impl GuardianProposeTool {
-    pub fn new(store: Arc<GuardianActionStore>, audit: Option<Arc<AuditStore>>) -> Self {
-        Self { store, audit }
+    pub fn new(
+        store: Arc<GuardianActionStore>,
+        audit: Option<Arc<AuditStore>>,
+        channel_manager: Arc<OnceLock<Arc<RwLock<ChannelManager>>>>,
+    ) -> Self {
+        Self { store, audit, channel_manager }
     }
 }
 
@@ -44,8 +58,9 @@ impl Tool for GuardianProposeTool {
          execute it — it is recorded as pending and the operator approves it out-of-band. Only \
          propose when a detector-confirmed problem has a clear, safe fix. `action` must be one of: \
          rerun_audit (re-run the health audit), restart_bridge (restart a wedged channel; `target` \
-         = the channel account id), requeue_automation (requeue a stuck schedule; `target` = its \
-         name), trim_logs (relieve disk pressure). Always give a one-line `reason`."
+         = the exact channel account id from guardian_inspect's Channels section — NOT a guessed \
+         label), requeue_automation (requeue a stuck schedule; `target` = its name), trim_logs \
+         (relieve disk pressure). Always give a one-line `reason`."
     }
 
     fn args_schema(&self) -> Value {
@@ -81,6 +96,27 @@ impl Tool for GuardianProposeTool {
         }
         if reason.is_empty() {
             return Ok(ToolResult::failure("a one-line `reason` is required.".to_string()));
+        }
+
+        // For restart_bridge, validate the target is a REAL channel account id
+        // before recording the proposal. The model is otherwise prone to
+        // guessing a plausible-sounding label ("signal", "guardian",
+        // "voice-synthesis-tts") that no account matches, which then fails
+        // "account not found" on approval. Reject early with the valid ids so
+        // the model can retry with a real one this turn. Fail open when we
+        // can't enumerate accounts (manager not wired yet / none configured).
+        if kind == GuardianActionKind::RestartBridge {
+            if let (Some(t), Some(mgr)) = (target.as_deref(), self.channel_manager.get()) {
+                let known = mgr.read().await.known_account_ids();
+                if !known.is_empty() && !known.iter().any(|id| id == t) {
+                    return Ok(ToolResult::failure(format!(
+                        "No channel account with id {t:?} — restart_bridge `target` must be an \
+                         exact channel account id. Valid ids: {}. Re-propose with one of these, \
+                         or just alert the operator if none fits.",
+                        known.iter().map(|id| format!("{id:?}")).collect::<Vec<_>>().join(", "),
+                    )));
+                }
+            }
         }
 
         let id = self.store.create_pending(kind, target.as_deref(), &reason)?;
