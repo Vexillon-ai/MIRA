@@ -15,9 +15,15 @@
 //! - **Redirect handling**: manual, each hop revalidated.
 //! - **Schemes**: only `http` / `https`; everything else rejected.
 //!
-//! The only escape hatch is a single user-configured SearXNG host+port
-//! (to support home-server setups). That one host bypasses the IP-range
-//! block but still gets every other check (scheme, size, time, rate).
+//! Two scoped escape hatches from the IP-range block (both keep every other
+//! check — scheme, size, time, rate):
+//! - a single user-configured **SearXNG** host+port (home-server setups);
+//! - per-request **LAN egress** (`RequestContext::allow_private_hosts`): an
+//!   app's declared, admin-configured egress hosts may resolve to
+//!   **private-network** addresses (RFC1918 / CGNAT / IPv6 ULA). Loopback,
+//!   link-local, and cloud-metadata (169.254.169.254) are NEVER relaxed — see
+//!   `is_ip_hard_blocked`. Used by the apps framework so an app can reach a
+//!   declared LAN service (e.g. a home Home Assistant box).
 //!
 //! See `design-docs/phase7-tier2-web-tools.md` for the full security model.
 
@@ -166,6 +172,12 @@ pub struct RequestContext {
     pub user_id:  String,
     pub agent_id: Option<crate::agent::instance::AgentId>,
     pub skill_id: Option<String>,
+    /// Hostnames for which the SSRF **private-network** block is relaxed for THIS
+    /// request — an app's declared, admin-configured LAN-egress hosts (apps
+    /// framework). Loopback, link-local, and cloud-metadata (169.254.169.254)
+    /// addresses are NEVER relaxed. Empty (the default for every non-app caller)
+    /// = the full SSRF guard applies.
+    pub allow_private_hosts: Vec<String>,
 }
 
 impl RequestContext {
@@ -174,7 +186,15 @@ impl RequestContext {
     // callable through the new context-aware path so tests can
     // exercise the engine seam without faking an AgentId.
     pub fn user_only(user_id: impl Into<String>) -> Self {
-        Self { user_id: user_id.into(), agent_id: None, skill_id: None }
+        Self { user_id: user_id.into(), agent_id: None, skill_id: None, allow_private_hosts: Vec::new() }
+    }
+
+    /// Relax the SSRF **private-network** block for these hostnames on this
+    /// request (LAN egress for a declared app host). Loopback / link-local /
+    /// metadata stay blocked regardless.
+    pub fn with_private_hosts(mut self, hosts: Vec<String>) -> Self {
+        self.allow_private_hosts = hosts;
+        self
     }
 }
 
@@ -273,7 +293,7 @@ impl HttpPolicy {
     pub async fn get(&self, url: &str, user_id: &str) -> Result<HttpResponse, PolicyError> {
         let host_for_rate = Url::parse(url).ok().and_then(|u| u.host_str().map(|s| s.to_owned()));
         self.inner.rate.check_fetch(user_id, host_for_rate.as_deref().unwrap_or(""))?;
-        self.follow(url, &[]).await
+        self.follow(url, &[], &[]).await
     }
 
     // GET `url` for a search backend — uses the separate search rate bucket
@@ -286,7 +306,7 @@ impl HttpPolicy {
         headers: &[(&str, &str)],
     ) -> Result<HttpResponse, PolicyError> {
         self.inner.rate.check_search(user_id)?;
-        self.follow(url, headers).await
+        self.follow(url, headers, &[]).await
     }
 
     // context-aware variant of [`Self::get`]. Consults
@@ -304,6 +324,30 @@ impl HttpPolicy {
     ) -> Result<HttpResponse, PolicyError> {
         self.evaluate_engine(url, ctx).await?;
         self.get(url, &ctx.user_id).await
+    }
+
+    // General method-aware, context-aware request. Consults the policy engine,
+    // rate-limits under the fetch bucket, then runs the SAME SSRF/denylist/pin
+    // guard as `get`. `GET` (no body) follows redirects like `get`; other
+    // methods do a single guarded hop (no redirect chase — avoids the
+    // method-downgrade ambiguity of 301/302 on a POST). Used by the apps
+    // framework's `http` tool handler.
+    pub async fn request_with_context(
+        &self,
+        method:  reqwest::Method,
+        url:     &str,
+        headers: &[(&str, &str)],
+        body:    Option<Vec<u8>>,
+        ctx:     &RequestContext,
+    ) -> Result<HttpResponse, PolicyError> {
+        self.evaluate_engine(url, ctx).await?;
+        let host_for_rate = Url::parse(url).ok().and_then(|u| u.host_str().map(|s| s.to_owned()));
+        self.inner.rate.check_fetch(&ctx.user_id, host_for_rate.as_deref().unwrap_or(""))?;
+        if method == reqwest::Method::GET && body.is_none() {
+            self.follow(url, headers, &ctx.allow_private_hosts).await
+        } else {
+            self.do_one_hop(url, headers, &method, body.as_deref(), &ctx.allow_private_hosts).await
+        }
     }
 
     // Search-bucket variant of [`Self::get_with_context`].
@@ -360,12 +404,13 @@ impl HttpPolicy {
     // *not* consult the rate limiter — callers own that choice.
     async fn follow(
         &self,
-        url:     &str,
-        headers: &[(&str, &str)],
+        url:           &str,
+        headers:       &[(&str, &str)],
+        allow_private: &[String],
     ) -> Result<HttpResponse, PolicyError> {
         let mut current = url.to_owned();
         for hop in 0..=self.inner.max_redirects {
-            let resp = self.do_one_hop(&current, headers).await?;
+            let resp = self.do_one_hop(&current, headers, &reqwest::Method::GET, None, allow_private).await?;
             if let Some(location) = resp.redirect_to.as_deref() {
                 if hop == self.inner.max_redirects {
                     return Err(PolicyError::TooManyRedirects);
@@ -383,8 +428,11 @@ impl HttpPolicy {
 
     async fn do_one_hop(
         &self,
-        url:     &str,
-        headers: &[(&str, &str)],
+        url:           &str,
+        headers:       &[(&str, &str)],
+        method:        &reqwest::Method,
+        body:          Option<&[u8]>,
+        allow_private: &[String],
     ) -> Result<HttpResponse, PolicyError> {
         let parsed = Url::parse(url).map_err(|_| PolicyError::InvalidUrl(url.to_owned()))?;
 
@@ -427,25 +475,40 @@ impl HttpPolicy {
             &self.inner.searxng_exception,
             Some((h, p)) if h.eq_ignore_ascii_case(&host) && *p == port
         );
+        // LAN egress: this host is on the caller's declared allowlist (an app's
+        // admin-configured egress host), so private-network addresses are allowed
+        // — but loopback / link-local / metadata stay hard-blocked.
+        let lan_allowed = allow_private.iter().any(|h| h.eq_ignore_ascii_case(&host));
 
         // 6. Pick the first IP that passes the SSRF guard.
         let chosen: Option<SocketAddr> = addrs.into_iter().find(|addr| {
-            if searxng_bypass { true } else { !is_ip_blocked(addr.ip()) }
+            if searxng_bypass { true }
+            else if lan_allowed { !is_ip_hard_blocked(addr.ip()) }
+            else { !is_ip_blocked(addr.ip()) }
         });
 
         let chosen = chosen.ok_or_else(|| PolicyError::BlockedHost {
             reason: if searxng_bypass { "no usable address".into() }
+                    else if lan_allowed { "resolved ips are loopback/link-local/metadata (never relaxed)".into() }
                     else { "all resolved ips are in blocked range".into() },
             host:   host.clone(),
         })?;
+        if lan_allowed && is_ip_lan_relaxable(chosen.ip()) {
+            debug!("http_policy: LAN egress to {} ({}) — private-network block relaxed for declared app host", host, chosen.ip());
+        }
 
         // 7. Build a one-shot client with the pinned IP.
         let client = build_client(&self.inner.user_agent, self.inner.request_timeout, &host, chosen)?;
 
         // 8. Issue the request and stream the body with the size cap applied.
-        let mut req = client.get(url);
+        //    Method + optional body are caller-supplied; the SSRF/denylist/pin
+        //    guard above is identical for every method.
+        let mut req = client.request(method.clone(), url);
         for (k, v) in headers {
             req = req.header(*k, *v);
+        }
+        if let Some(b) = body {
+            req = req.body(b.to_vec());
         }
         let resp = match req.send().await {
             Ok(r) => r,
@@ -546,6 +609,36 @@ fn is_ip_blocked(ip: IpAddr) -> bool {
         IpAddr::V4(v4) => is_ipv4_blocked(v4),
         IpAddr::V6(v6) => is_ipv6_blocked(v6),
     }
+}
+
+/// Private-network ranges a declared LAN-egress host may legitimately resolve to
+/// — the ONLY addresses the SSRF block is relaxed for, and only for an
+/// allowlisted host. Deliberately excludes loopback, link-local (incl. the
+/// 169.254.169.254 cloud-metadata endpoint), multicast, and unspecified.
+fn is_ip_lan_relaxable(ip: IpAddr) -> bool {
+    fn v4_relaxable(ip: Ipv4Addr) -> bool {
+        // RFC 1918 private (10/8, 172.16/12, 192.168/16), or CGNAT / RFC 6598
+        // 100.64/10 (also the Tailscale range) — but never loopback/link-local.
+        ip.is_private()
+            || (ip.octets()[0] == 100 && (ip.octets()[1] & 0b1100_0000) == 0b0100_0000)
+    }
+    match ip {
+        IpAddr::V4(v4) => v4_relaxable(v4),
+        IpAddr::V6(v6) => {
+            if let Some(m) = v6.to_ipv4_mapped() {
+                return v4_relaxable(m);
+            }
+            (v6.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+        }
+    }
+}
+
+/// SSRF addresses blocked even for an allowlisted LAN-egress host: everything
+/// [`is_ip_blocked`] blocks EXCEPT the LAN-relaxable private ranges. So loopback,
+/// link-local + metadata, multicast, unspecified, documentation, and reserved
+/// stay blocked no matter what an app declares.
+fn is_ip_hard_blocked(ip: IpAddr) -> bool {
+    is_ip_blocked(ip) && !is_ip_lan_relaxable(ip)
 }
 
 fn is_ipv4_blocked(ip: Ipv4Addr) -> bool {
@@ -741,6 +834,31 @@ mod tests {
     // ── SSRF classifier ─────────────────────────────────────────────────────
 
     fn v4(s: &str) -> IpAddr { IpAddr::V4(Ipv4Addr::from_str(s).unwrap()) }
+
+    #[test]
+    fn lan_egress_relaxes_private_but_never_loopback_or_metadata() {
+        let ip = |s: &str| IpAddr::from_str(s).unwrap();
+        // Private LAN + CGNAT/tailnet are LAN-relaxable (allowed for a declared
+        // host) but still blocked by the default guard.
+        for s in ["192.168.1.10", "10.0.0.1", "172.16.0.1", "100.64.0.1"] {
+            assert!(is_ip_lan_relaxable(ip(s)), "{s} should be LAN-relaxable");
+            assert!(!is_ip_hard_blocked(ip(s)), "{s} must not be hard-blocked");
+            assert!(is_ip_blocked(ip(s)), "{s} is still blocked without an allowlist");
+        }
+        // Loopback / link-local / cloud-metadata / unspecified are NEVER relaxed.
+        for s in ["127.0.0.1", "169.254.169.254", "169.254.1.1", "0.0.0.0"] {
+            assert!(!is_ip_lan_relaxable(ip(s)), "{s} must not be LAN-relaxable");
+            assert!(is_ip_hard_blocked(ip(s)), "{s} must stay hard-blocked");
+        }
+        // Public addresses aren't blocked at all.
+        assert!(!is_ip_blocked(ip("8.8.8.8")));
+        assert!(!is_ip_hard_blocked(ip("8.8.8.8")));
+        // IPv6: unique-local + mapped-private relaxable; loopback/link-local not.
+        assert!(is_ip_lan_relaxable(ip("fd00::1")));
+        assert!(is_ip_lan_relaxable(ip("::ffff:192.168.1.1")));
+        assert!(is_ip_hard_blocked(ip("::1")));
+        assert!(is_ip_hard_blocked(ip("fe80::1")));
+    }
     fn v6(s: &str) -> IpAddr { IpAddr::V6(Ipv6Addr::from_str(s).unwrap()) }
 
     #[test]
@@ -996,6 +1114,7 @@ mod tests {
             user_id:  "u1".into(),
             agent_id: Some(AgentId::new()),
             skill_id: Some("com.example.x".into()),
+            allow_private_hosts: Vec::new(),
         };
         // Use a blocked-scheme URL so we don't actually attempt a
         // network call; the engine consult happens before scheme
@@ -1024,6 +1143,7 @@ mod tests {
             user_id:  "u1".into(),
             agent_id: Some(AgentId::new()),
             skill_id: None,
+            allow_private_hosts: Vec::new(),
         };
         // Even a perfectly-valid URL is denied — the engine decision
         // is checked before the request ever leaves the process.
@@ -1045,6 +1165,7 @@ mod tests {
             user_id:  "u1".into(),
             agent_id: Some(AgentId::new()),
             skill_id: Some("com.test.search".into()),
+            allow_private_hosts: Vec::new(),
         };
         let err = p.get_for_search_with_context("https://example.com/", &ctx, &[])
             .await.unwrap_err();
@@ -1061,6 +1182,7 @@ mod tests {
             user_id:  "u1".into(),
             agent_id: Some(AgentId::new()),
             skill_id: None,
+            allow_private_hosts: Vec::new(),
         };
         let err = p.get_with_context("file:///etc/passwd", &ctx).await.unwrap_err();
         assert!(matches!(err, PolicyError::BlockedScheme { .. }));
@@ -1077,6 +1199,7 @@ mod tests {
             user_id:  "u1".into(),
             agent_id: Some(AgentId::new()),
             skill_id: None,
+            allow_private_hosts: Vec::new(),
         };
         let err = p.get_with_context("file:///etc/passwd", &ctx).await.unwrap_err();
         assert!(matches!(err, PolicyError::BlockedScheme { .. }));

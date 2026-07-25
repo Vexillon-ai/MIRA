@@ -166,6 +166,12 @@ pub trait Tool: Send + Sync {
     // code must override this so `/api/tools` can badge them accurately.
     fn tier(&self) -> Tier { Tier::Pure }
 
+    // The owning app id, for tools exposed by an installed app (apps framework).
+    // Default `None` (built-ins, MCP, skill tools). App tools override this so
+    // the policy gate can attribute a `ToolInvocation` to its app and a
+    // `PerAppRule` can allow/deny it. See [`crate::packages::apps::AppTool`].
+    fn app_id(&self) -> Option<&str> { None }
+
     // Whether the tool is currently operable. A tool may ship in the binary
     // but be effectively off (missing allowlist, missing backend, etc.); the
     // registry uses this to mark it in the UI without unregistering it.
@@ -188,6 +194,12 @@ pub struct ToolRegistry {
     // MCP tool names are `mcp__*`, so they never collide with built-ins;
     // lookups check `tools` first, then this map.
     mcp: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    // App tools (Phase 2 apps framework), hot-swappable exactly like `mcp`.
+    // Installed apps register MIRA-callable tools here at runtime via
+    // [`Self::set_app_tools`], with no rebuild/restart. Names are
+    // `app__<id>__<tool>`, so they never collide with built-ins or `mcp__*`;
+    // lookups check `tools`, then `mcp`, then this map.
+    app: RwLock<HashMap<String, Arc<dyn Tool>>>,
     audit: Option<Arc<ToolAuditStore>>,
     // when set, every `execute()` call emits a
     // `ToolInvocation` event to this engine before running the tool.
@@ -196,6 +208,17 @@ pub struct ToolRegistry {
     // adjust its plan. Audit row is still written (with Failure
     // outcome) so denials are forensically visible.
     policy_engine: Option<Arc<dyn crate::policy::PolicyEngine>>,
+    // Apps-framework deps needed to (re)build app tools with real handlers
+    // (`http` needs the shared SSRF-guarded client; secret config values come
+    // from the vault). Set once at startup via [`Self::with_app_deps`]; the
+    // hot-reload path (`set_app_tools` after install/uninstall) reads them back
+    // so rebuilt app tools keep their handlers. `None` in minimal/test builds.
+    app_http:    Option<Arc<crate::tools::http_policy::HttpPolicy>>,
+    app_secrets: Option<Arc<crate::skills::SecretsStore>>,
+    // Root dir of extracted app payloads (`<data_dir>/packages`), so the hot-
+    // reload path can rebuild `subprocess`-handler app tools with their install
+    // dir. `None` in minimal/test builds.
+    app_packages_dir: Option<std::path::PathBuf>,
 }
 
 impl ToolRegistry {
@@ -204,9 +227,42 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             mcp:   RwLock::new(HashMap::new()),
+            app:   RwLock::new(HashMap::new()),
             audit: None,
             policy_engine: None,
+            app_http:    None,
+            app_secrets: None,
+            app_packages_dir: None,
         }
+    }
+
+    // Attach the apps-framework deps used to build app tools with real handlers:
+    // the SSRF-guarded HTTP client (`http` handler), the secret vault
+    // (`${config.<secret>}`), and the app payload root (`subprocess` handler's
+    // install dir). Chainable, mirrors `with_audit`.
+    pub fn with_app_deps(
+        mut self,
+        http:         Option<Arc<crate::tools::http_policy::HttpPolicy>>,
+        secrets:      Option<Arc<crate::skills::SecretsStore>>,
+        packages_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.app_http         = http;
+        self.app_secrets      = secrets;
+        self.app_packages_dir = packages_dir;
+        self
+    }
+
+    /// The shared SSRF-guarded HTTP handle for app `http` tool handlers.
+    pub fn app_http(&self) -> Option<Arc<crate::tools::http_policy::HttpPolicy>> {
+        self.app_http.clone()
+    }
+    /// The secret vault for resolving `${config.<secret>}` in app handlers.
+    pub fn app_secrets(&self) -> Option<Arc<crate::skills::SecretsStore>> {
+        self.app_secrets.clone()
+    }
+    /// The app payload root dir (`subprocess` handlers resolve their command here).
+    pub fn app_packages_dir(&self) -> Option<std::path::PathBuf> {
+        self.app_packages_dir.clone()
     }
 
     // Replace the entire MCP tool surface in one shot. Called at startup
@@ -229,6 +285,29 @@ impl ToolRegistry {
     // list/visibility helpers to merge MCP tools with built-ins.
     fn mcp_snapshot(&self) -> Vec<Arc<dyn Tool>> {
         self.mcp.read()
+            .map(|g| g.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    // Replace the entire APP tool surface in one shot — the apps-framework
+    // analog of [`Self::set_mcp_tools`]. Called at startup and after every
+    // app install/uninstall (hot-reload) via the shared `Arc<ToolRegistry>`,
+    // so an app's `app__<id>__<tool>` tools go live/dead with no restart.
+    pub fn set_app_tools(&self, tools: Vec<Arc<dyn Tool>>) {
+        let mut g = match self.app.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(), // poisoned: recover, we fully replace anyway
+        };
+        g.clear();
+        for t in tools {
+            g.insert(t.name().to_string(), t);
+        }
+        debug!("ToolRegistry: app surface reloaded ({} tools)", g.len());
+    }
+
+    // Snapshot of the current app tool pairs, mirroring `mcp_snapshot`.
+    fn app_snapshot(&self) -> Vec<Arc<dyn Tool>> {
+        self.app.read()
             .map(|g| g.values().cloned().collect())
             .unwrap_or_default()
     }
@@ -295,7 +374,10 @@ impl ToolRegistry {
         if let Some(t) = self.tools.get(name) {
             return Some(Arc::clone(t));
         }
-        self.mcp.read().ok().and_then(|g| g.get(name).cloned())
+        if let Some(t) = self.mcp.read().ok().and_then(|g| g.get(name).cloned()) {
+            return Some(t);
+        }
+        self.app.read().ok().and_then(|g| g.get(name).cloned())
     }
 
     // Iterate over `(name, Arc<dyn Tool>)` pairs. Used by the Skills
@@ -330,12 +412,19 @@ impl ToolRegistry {
         let t0            = Instant::now();
 
         // consult the policy engine before running.
-        // Skipped when (a) no engine is wired, OR (b) the args don't
-        // carry an `_agent_id` (no agent context = nothing per-Skill
-        // rules can match against). The shorter of the two early-outs
-        // first to keep the legacy hot path branch-predictable.
+        // Skipped when (a) no engine is wired, OR (b) there is neither an
+        // `_agent_id` (agent context per-Skill rules match on) NOR an app id
+        // (app tools carry their own id via `Tool::app_id`, so a `PerAppRule`
+        // can gate them even on an ordinary user turn with no agent).
         if let Some(engine) = &self.policy_engine {
-            if let Some(agent_id) = parse_agent_id(&args) {
+            let agent_id = parse_agent_id(&args);
+            let app_id   = tool.app_id().map(str::to_owned);
+            if agent_id.is_some() || app_id.is_some() {
+                // App-tool calls on a plain user turn have no agent; use a nil
+                // AgentId so the event still constructs (no ToolInvocation rule
+                // keys on the agent id — they match tool name / app id).
+                let agent_id = agent_id
+                    .unwrap_or_else(|| crate::agent::instance::AgentId(uuid::Uuid::nil()));
                 let event = crate::policy::PolicyEvent::ToolInvocation {
                     agent_id,
                     skill_id:         parse_skill_id(&args),
@@ -343,6 +432,7 @@ impl ToolRegistry {
                     args_summary:     summarise_args(&args),
                     running_cost_usd: 0.0,
                     session_cost_usd: 0.0,
+                    app_id,
                 };
                 if let crate::policy::PolicyDecision::Deny { rule, reason } =
                     engine.evaluate(&event).await
@@ -400,6 +490,7 @@ impl ToolRegistry {
     pub fn list_tools(&self) -> Vec<String> {
         let mut names: Vec<String> = self.tools.keys().cloned().collect();
         names.extend(self.mcp_snapshot().iter().map(|t| t.name().to_owned()));
+        names.extend(self.app_snapshot().iter().map(|t| t.name().to_owned()));
         names
     }
 
@@ -408,6 +499,7 @@ impl ToolRegistry {
     pub fn list_visible_tools(&self) -> Vec<String> {
         self.tools.values()
             .chain(self.mcp_snapshot().iter())
+            .chain(self.app_snapshot().iter())
             .filter(|t| !matches!(t.visibility(), ToolVisibility::System { .. }))
             .map(|t| t.name().to_owned())
             .collect()
@@ -422,6 +514,7 @@ impl ToolRegistry {
     pub fn list_for_flow(&self, flow: &str) -> Vec<String> {
         self.tools.values()
             .chain(self.mcp_snapshot().iter())
+            .chain(self.app_snapshot().iter())
             .filter(|t| match t.visibility() {
                 ToolVisibility::User | ToolVisibility::Admin => flow == "chat",
                 ToolVisibility::System { flow: f }           => f == flow,

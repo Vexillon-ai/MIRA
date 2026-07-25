@@ -805,6 +805,15 @@ impl GatewayBuilder {
         // Built-in tools are registered above; MCP tools land via the
         // registry's reload (which calls `set_mcp_tools`) once the Arc
         // exists so startup and hot-reload share one path.
+        // Apps framework (Slice 2): attach the SSRF-guarded HTTP + secret vault
+        // handles so app `http` tool handlers work at startup AND after every
+        // hot-reload (the packages handler reads them back off the registry).
+        let tool_registry = tool_registry
+            .with_app_deps(
+                Some(Arc::clone(&http_policy)),
+                secrets_store.clone(),
+                Some(data_dir.join("packages")),
+            );
         let tools = Arc::new(tool_registry);
         mcp_servers.attach_tool_registry(Arc::clone(&tools));
         // Weak self-handle so background browser (Chrome) provisioning can
@@ -820,6 +829,16 @@ impl GatewayBuilder {
         {
             let reg = Arc::clone(&mcp_servers);
             tokio::spawn(async move { reg.reload().await; });
+        }
+
+        // Apps framework (Phase 2): build the app-tool surface for already-installed
+        // apps at startup so `app__<id>__<tool>` tools survive a restart (installs
+        // hot-swap them via the packages handler afterwards). Best-effort: a missing
+        // store just means no app tools yet.
+        if let Ok(pkg_store) = crate::packages::PackageStore::open(&data_dir.join("auth.db")) {
+            tools.set_app_tools(crate::packages::build_app_tools(
+                &pkg_store, &data_dir.join("packages"), tools.app_http(), tools.app_secrets(),
+            ));
         }
 
         // Phase B slice 2 — hand the tool registry to the named-agent
@@ -1177,6 +1196,35 @@ impl GatewayBuilder {
         if let Err(e) = agent_core.set_event_bus(Arc::clone(&event_bus)) {
             warn!("AgentCore event bus already installed: {e:?}");
         }
+
+        // Apps framework (Phase 2): the Guardian's monitoring subscription to the
+        // shared bus. Always on (independent of automations): it observes only
+        // app-domain *issue* events (severity warn+), surfaces them via the
+        // Guardian's telemetry, and — with the deps below and guardian.mode != off
+        // — runs a real triage turn (LLM alert + a proposed fix in active mode),
+        // deduped per issue (Slice 3). Wired before the server accepts traffic so
+        // no early event is missed.
+        crate::agent::guardian_app_events::spawn_app_event_triage(
+            Arc::clone(&event_bus),
+            Some(crate::agent::guardian_app_events::AppTriageDeps {
+                agent:            Arc::clone(&agent_core),
+                notifications:    Arc::clone(&notification_bus),
+                config:           Arc::clone(&config),
+                notify_user_id:   config.automations.watchdog.notify_user_id.clone(),
+                guardian_actions: guardian_action_store.clone(),
+            }),
+        );
+
+        // Apps framework: the health-check poller. Polls every installed app that
+        // declares a `health_check` and emits its declared *issue* event on a
+        // transition to unreachable → the app-event triage above triages it. This
+        // is what makes an app a Guardian detection source without its own backend.
+        crate::packages::apps_poll::spawn_app_health_pollers(
+            Arc::clone(&event_bus),
+            Some(Arc::clone(&http_policy)),
+            secrets_store.clone(),
+            data_dir.to_path_buf(),
+        );
 
         // MIRA-Guardian (P3) — proactive watch loop. Self-contained 15-min (cfg)
         // background task: on a *new* non-green health snapshot it runs a Guardian
@@ -1939,21 +1987,27 @@ pub(crate) fn build_provider_chain(
                keep everything on-box.");
     }
 
-    // No fallbacks → return the primary directly. Fail-closed: if the local
-    // chain is later exhausted, the caller surfaces a clear "provider
-    // unavailable" rather than silently reaching for the cloud.
-    if fallbacks.is_empty() {
-        return Ok(Arc::from(primary));
-    }
+    // No fallbacks → the primary directly. Fail-closed: if the local chain is
+    // later exhausted, the caller surfaces a clear "provider unavailable" rather
+    // than silently reaching for the cloud.
+    let chain: Arc<dyn crate::providers::ModelProvider> = if fallbacks.is_empty() {
+        Arc::from(primary)
+    } else {
+        let mut chain = FailoverProvider::new(primary, vec![]);
+        for (_, fb) in fallbacks {
+            chain = chain.with_fallback(fb);
+        }
+        if let Some(tracker) = degradations {
+            chain = chain.with_degradation_tracker(tracker);
+        }
+        Arc::new(chain)
+    };
 
-    let mut chain = FailoverProvider::new(primary, vec![]);
-    for (_, fb) in fallbacks {
-        chain = chain.with_fallback(fb);
-    }
-    if let Some(tracker) = degradations {
-        chain = chain.with_degradation_tracker(tracker);
-    }
-    Ok(Arc::new(chain))
+    // Wrap the assembled chain in the degenerate-output guard (outermost), so a
+    // wedged model's repetitive/garbage output is aborted early and surfaced as a
+    // failed turn + provider error — for EVERY call path built from this chain
+    // (chat, extractors, Guardian, tool loops). Inert when disabled.
+    Ok(crate::providers::degeneracy::guard(chain, config.agent.degeneracy_guard.clone()))
 }
 
 /// Build a SINGLE provider by slug for a one-shot per-turn override (the web

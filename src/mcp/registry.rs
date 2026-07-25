@@ -176,6 +176,14 @@ impl McpServerRegistry {
         }
     }
 
+    // Borrow the attached shared `ToolRegistry`, if any. Lets other subsystems
+    // that already hold this registry (e.g. the packages handler, which reloads
+    // MCP + app tools together) hot-swap the app-tool surface without threading a
+    // separate `Extension<Arc<ToolRegistry>>` through the router.
+    pub fn tool_registry(&self) -> Option<Arc<ToolRegistry>> {
+        self.tools.read().ok().and_then(|g| g.clone())
+    }
+
     // Record a weak handle to the owning `Arc<Self>` so background tasks (e.g.
     // Chrome provisioning for the Puppeteer server) can trigger a reconnect.
     // Call once, right after building the `Arc`.

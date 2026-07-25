@@ -1,0 +1,35 @@
+{
+  "format": "1",
+  "id": "com.mira.demo-hello",
+  "name": "Hello Demo App",
+  "version": "1.0.0",
+  "description": "Slice-1 demo of the MIRA apps framework: its own UI, a tool MIRA can call, and events (one to MIRA's interaction layer, one issue the Guardian monitors).",
+  "publisher": "MIRA",
+  "components": [
+    {
+      "type": "app",
+      "capabilities": {},
+      "payload": "ui",
+      "spec": {
+        "ui": { "entry": "ui/index.html" },
+        "tools": [
+          {
+            "name": "echo",
+            "description": "Echo a message back to the caller.",
+            "args_schema": {
+              "type": "object",
+              "properties": { "text": { "type": "string" } },
+              "required": ["text"]
+            },
+            "handler": { "kind": "echo" }
+          }
+        ],
+        "events": [
+          { "name": "app.demo.hello", "domain": "demo", "severity": "info" },
+          { "name": "app.demo.issue", "domain": "demo", "severity": "warn" }
+        ],
+        "permissions": { "emit_events": ["app.demo.hello", "app.demo.issue"] }
+      }
+    }
+  ]
+}

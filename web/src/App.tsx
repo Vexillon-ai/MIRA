@@ -23,6 +23,7 @@ import ProvidersPage from '@/pages/ProvidersPage'
 import SessionsPage from '@/pages/SessionsPage'
 import SkillsPage from '@/pages/SkillsPage'
 import PluginsPage from '@/pages/PluginsPage'
+import AppsPage from '@/pages/AppsPage'
 import AgentsPage from '@/pages/AgentsPage'
 import AgentDefinitionsPage from '@/pages/AgentDefinitionsPage'
 import WorkflowsPage from '@/pages/WorkflowsPage'
@@ -121,6 +122,7 @@ export default function App() {
             <Route path="/incidents/:id" element={<IncidentPage />} />
             <Route element={<AdminGuard />}>
               <Route path="/plugins"  element={<PluginsPage />} />
+              <Route path="/apps"     element={<AppsPage />} />
               <Route path="/users"    element={<UsersPage />} />
               <Route path="/groups"   element={<GroupsPage />} />
               <Route path="/policy"   element={<PolicyPage />} />

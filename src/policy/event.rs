@@ -49,6 +49,12 @@ pub enum PolicyEvent {
         args_summary:      String,
         running_cost_usd:  f64,
         session_cost_usd:  f64,
+        // The owning app id when this tool is exposed by an installed app
+        // (apps framework); `None` for built-ins / MCP / skill tools. Lets a
+        // `PerAppRule` allow/deny a specific app's tools. `serde(default)` keeps
+        // existing audit rows + admin-stored events deserialising cleanly.
+        #[serde(default)]
+        app_id:            Option<String>,
     },
 
     // An LLM call is about to be issued. Fired by the LLM client
@@ -164,7 +170,7 @@ mod tests {
         assert_eq!(PolicyEvent::ToolInvocation {
             agent_id: id(), skill_id: None, tool: "x".into(),
             args_summary: "".into(),
-            running_cost_usd: 0.0, session_cost_usd: 0.0,
+            running_cost_usd: 0.0, session_cost_usd: 0.0, app_id: None,
         }.kind(), "tool_invocation");
 
         assert_eq!(PolicyEvent::LlmCall {
@@ -212,6 +218,7 @@ mod tests {
             args_summary: "query=rust".into(),
             running_cost_usd: 0.42,
             session_cost_usd: 1.18,
+            app_id: None,
         };
         let json = serde_json::to_string(&e).unwrap();
         // Tag is on the outside as `"kind": "tool_invocation"`.

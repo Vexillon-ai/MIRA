@@ -250,6 +250,7 @@ fn build_request_context(user_id: &str, args: &ToolArgs) -> super::http_policy::
         user_id: user_id.to_owned(),
         agent_id,
         skill_id,
+        allow_private_hosts: Vec::new(), // web_fetch never relaxes the SSRF guard
     }
 }
 

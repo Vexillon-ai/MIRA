@@ -10,11 +10,14 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::{Multipart, Path};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
+
+use crate::events::{Event, EventBus};
 
 use crate::auth::middleware::AdminUser;
 use crate::channel_accounts::{ChannelAccountStore, UpdateChannelAccount};
@@ -27,11 +30,28 @@ use crate::packages::store::{LedgerEntry, NewInstall};
 use crate::packages::{self, Capabilities, ComponentKind, PackageManifest, PackageStore, Runtime, TrustLevel};
 use crate::server::handlers::channel_accounts::ChannelManagerExt;
 use crate::server::handlers::onboarding::DataDir;
-use crate::skills::secrets::{default_paths as secret_paths, SecretsStore};
+use crate::skills::secrets::{default_paths as secret_paths, Scope, SecretsStore};
 use crate::skills::{self, trust::TrustStore};
 use crate::web::LiveConfig;
 
 const MAX_BUNDLE_BYTES: usize = 10 * 1024 * 1024; // 10 MB compressed
+
+// Rebuild the whole app-tool surface from the currently-active installed apps and
+// hot-swap it into the shared tool registry (reached via the MCP registry, which
+// already holds it). Called after any install/uninstall/enable/disable so an app's
+// `app__<id>__<tool>` tools go live/dead with no restart — the app analog of
+// `McpServerRegistry::reload`.
+fn reload_app_tools(registry: &McpServerRegistry, pkg_store: &PackageStore) {
+    if let Some(tools) = registry.tool_registry() {
+        // Rebuild with the registry's app deps (SSRF-guarded HTTP + vault +
+        // payload dir) so hot-reloaded http/subprocess handlers keep working
+        // without a restart.
+        let pkgs_dir = tools.app_packages_dir().unwrap_or_else(|| std::path::PathBuf::from("packages"));
+        tools.set_app_tools(packages::build_app_tools(
+            pkg_store, &pkgs_dir, tools.app_http(), tools.app_secrets(),
+        ));
+    }
+}
 
 #[derive(Serialize)]
 pub struct ComponentSummary {
@@ -259,6 +279,8 @@ pub async fn install_package(
     };
     // Hot-reload so the new server's tools come live without a restart.
     registry.reload().await;
+    // Same for app tools (app__<id>__<tool>) — no restart.
+    reload_app_tools(&registry, &pkg_store);
 
     (
         StatusCode::OK,
@@ -269,6 +291,7 @@ pub async fn install_package(
             "version":     outcome.package.version,
             "trust":       trust,
             "mcp_servers": outcome.mcp_server_ids,
+            "apps":        outcome.app_ids,
             "warnings":    outcome.warnings,
         })),
     )
@@ -317,7 +340,11 @@ pub async fn uninstall_package(
     };
     match do_uninstall(&id, &mcp_store, &channel_store, &secrets, &pkg_store) {
         Ok(removed) => {
+            // Purge any config secrets set post-install (admin-set app config
+            // secrets aren't ledgered, so the ledger reversal won't catch them).
+            let _ = secrets.purge_skill(&id);
             registry.reload().await;
+            reload_app_tools(&registry, &pkg_store);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({ "uninstalled": true, "id": id, "removed_mcp_servers": removed })),
@@ -334,21 +361,28 @@ pub async fn uninstall_package(
 pub async fn disable_package(
     AdminUser(_admin): AdminUser,
     Extension(data_dir): Extension<DataDir>,
+    Extension(registry): Extension<Arc<McpServerRegistry>>,
     Path(id): Path<String>,
 ) -> Response {
-    set_package_enabled(&data_dir.0, &id, false).await
+    set_package_enabled(&data_dir.0, &id, false, &registry).await
 }
 
 // `POST /api/admin/packages/{id}/enable` — re-activate a disabled package.
 pub async fn enable_package(
     AdminUser(_admin): AdminUser,
     Extension(data_dir): Extension<DataDir>,
+    Extension(registry): Extension<Arc<McpServerRegistry>>,
     Path(id): Path<String>,
 ) -> Response {
-    set_package_enabled(&data_dir.0, &id, true).await
+    set_package_enabled(&data_dir.0, &id, true, &registry).await
 }
 
-async fn set_package_enabled(data_dir: &std::path::Path, id: &str, on: bool) -> Response {
+async fn set_package_enabled(
+    data_dir: &std::path::Path,
+    id: &str,
+    on: bool,
+    registry: &McpServerRegistry,
+) -> Response {
     let auth_db = data_dir.join("auth.db");
     let pkg_store = match PackageStore::open(&auth_db) {
         Ok(s) => s,
@@ -388,11 +422,243 @@ async fn set_package_enabled(data_dir: &std::path::Path, id: &str, on: bool) -> 
     if let Err(e) = pkg_store.set_state(id, state) {
         return ise(e.to_string());
     }
+    // An app's tools follow its enabled state: build_app_tools only includes
+    // active apps, so a reload drops (disable) or restores (enable) them live.
+    reload_app_tools(registry, &pkg_store);
     (
         StatusCode::OK,
         Json(serde_json::json!({ "id": id, "state": state, "warnings": warnings })),
     )
         .into_response()
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Apps framework — event emit + UI serving (Phase 2)
+// ════════════════════════════════════════════════════════════════════════════
+
+#[derive(Deserialize)]
+pub struct EmitAppEventBody {
+    // The event name the app declares (must be in its permissions.emit_events).
+    pub event: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+// `POST /api/admin/apps/{id}/emit` — an installed app (via its sandboxed UI, which
+// postMessages the trusted SPA host, which calls this) emits a **declared** event
+// onto the shared bus. The name must be allowlisted in the app's
+// `permissions.emit_events`; the declared `domain`/`severity` are stamped so
+// MIRA's interaction layer and the Guardian's monitor each route it correctly.
+pub async fn emit_app_event(
+    AdminUser(_admin): AdminUser,
+    Extension(data_dir): Extension<DataDir>,
+    Extension(bus): Extension<Arc<EventBus>>,
+    Path(id): Path<String>,
+    Json(body): Json<EmitAppEventBody>,
+) -> Response {
+    let pkg_store = match PackageStore::open(&data_dir.0.join("auth.db")) {
+        Ok(s) => s,
+        Err(e) => return ise(e.to_string()),
+    };
+    let ev = match packages::resolve_emit_event(&pkg_store, &id, &body.event) {
+        Ok(e) => e,
+        Err(e) => return bad(e),
+    };
+    bus.emit(Event::new_app(
+        ev.name.clone(),
+        None, // system-wide app event in slice 1 (no per-user scoping yet)
+        ev.domain.clone(),
+        ev.severity.clone(),
+        id.clone(), // entity = the emitting app
+        body.payload,
+    ));
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "emitted": true, "event": ev.name, "domain": ev.domain, "severity": ev.severity,
+        })),
+    )
+        .into_response()
+}
+
+// `GET /api/admin/apps/{id}/config` — the app's config schema, its current
+// **non-secret** values, and which secret keys are set. Secret *values* are
+// never returned (mirrors the skill-secrets endpoints). Admin-only.
+pub async fn get_app_config(
+    AdminUser(_admin): AdminUser,
+    Extension(data_dir): Extension<DataDir>,
+    Path(id): Path<String>,
+) -> Response {
+    let auth_db = data_dir.0.join("auth.db");
+    let pkg_store = match PackageStore::open(&auth_db) {
+        Ok(s) => s,
+        Err(e) => return ise(e.to_string()),
+    };
+    let pkg = match pkg_store.get(&id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return (StatusCode::NOT_FOUND, err("app not installed")).into_response(),
+        Err(e) => return ise(e.to_string()),
+    };
+    let schema = packages::app_config_schema(&pkg_store, &id);
+    // Which secret keys actually have a stored value (metadata only).
+    let secrets_set: Vec<String> = match open_secrets(&data_dir.0) {
+        Ok(v) => v.list(Scope::System, "", &id).map(|es| es.into_iter().map(|e| e.key).collect()).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "id": id,
+            "config_schema": schema,
+            "values": pkg.config,      // non-secret values only
+            "secrets_set": secrets_set,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct PutAppConfigBody {
+    /// Key → value for every field the admin is setting. Keys declared `secret`
+    /// in the app's `config_schema` are routed to the vault (value must be a
+    /// string); the rest are stored in the package's non-secret `config`.
+    pub config: serde_json::Map<String, serde_json::Value>,
+}
+
+// `PUT /api/admin/apps/{id}/config` — set app config. Every key must be a
+// declared `config_schema` key (declared-keys gate, mirroring the MCP installer).
+// Declared-`secret` keys go to the vault; the rest to `pkg.config`. Admin-only.
+pub async fn put_app_config(
+    AdminUser(_admin): AdminUser,
+    Extension(data_dir): Extension<DataDir>,
+    Extension(registry): Extension<Arc<McpServerRegistry>>,
+    Path(id): Path<String>,
+    Json(body): Json<PutAppConfigBody>,
+) -> Response {
+    let auth_db = data_dir.0.join("auth.db");
+    let pkg_store = match PackageStore::open(&auth_db) {
+        Ok(s) => s,
+        Err(e) => return ise(e.to_string()),
+    };
+    let pkg = match pkg_store.get(&id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return (StatusCode::NOT_FOUND, err("app not installed")).into_response(),
+        Err(e) => return ise(e.to_string()),
+    };
+
+    let schema = packages::app_config_schema(&pkg_store, &id);
+    if schema.is_empty() {
+        return bad("this app declares no config_schema — nothing to configure".to_string());
+    }
+    let declared: std::collections::HashSet<&str> = schema.iter().map(|f| f.key.as_str()).collect();
+    let secret_keys = packages::app_secret_keys(&pkg_store, &id);
+
+    // Declared-keys gate: reject any undeclared key up front.
+    for k in body.config.keys() {
+        if !declared.contains(k.as_str()) {
+            return bad(format!("unknown config key {k:?} — not in this app's config_schema"));
+        }
+    }
+
+    // Split: secrets → vault (string values only); non-secrets → pkg.config.
+    let mut merged = pkg.config.as_object().cloned().unwrap_or_default();
+    let mut vault: Option<SecretsStore> = None;
+    for (k, v) in &body.config {
+        if secret_keys.contains(k) {
+            let Some(s) = v.as_str() else {
+                return bad(format!("secret config key {k:?} must be a string value"));
+            };
+            if vault.is_none() {
+                vault = Some(match open_secrets(&data_dir.0) { Ok(v) => v, Err(e) => return ise(e) });
+            }
+            if let Err(e) = vault.as_ref().unwrap().set(Scope::System, "", &id, k, s) {
+                return ise(format!("store secret {k:?}: {e}"));
+            }
+        } else {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    if let Err(e) = pkg_store.set_config(&id, &serde_json::Value::Object(merged)) {
+        return ise(e.to_string());
+    }
+    // Hot-reload the app's tools so http/subprocess handlers pick up the new
+    // config immediately (they capture non-secret config at build time).
+    reload_app_tools(&registry, &pkg_store);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true, "id": id }))).into_response()
+}
+
+// `GET /api/admin/apps/{id}/ui/` — serve the app's declared UI entry file.
+pub async fn app_ui_root(
+    AdminUser(_admin): AdminUser,
+    Extension(data_dir): Extension<DataDir>,
+    Path(id): Path<String>,
+) -> Response {
+    serve_app_ui(&data_dir.0, &id, "").await
+}
+
+// `GET /api/admin/apps/{id}/ui/{*path}` — serve a file from the app's UI dir.
+pub async fn app_ui_path(
+    AdminUser(_admin): AdminUser,
+    Extension(data_dir): Extension<DataDir>,
+    Path((id, path)): Path<(String, String)>,
+) -> Response {
+    serve_app_ui(&data_dir.0, &id, &path).await
+}
+
+// Serve a static file from an installed app's UI directory. The SPA embeds this
+// in a `sandbox="allow-scripts"` iframe (opaque origin → can't read MIRA's Bearer
+// token), so the app's only path back to MIRA is a postMessage the SPA brokers.
+// Path traversal is blocked by canonicalising and confirming the target sits
+// under the app's install dir. `connect-src 'none'` is defence-in-depth: the app
+// must not make its own network calls.
+async fn serve_app_ui(data_dir: &std::path::Path, id: &str, req_path: &str) -> Response {
+    use std::path::{Path as FsPath, PathBuf};
+
+    let pkg_store = match PackageStore::open(&data_dir.join("auth.db")) {
+        Ok(s) => s,
+        Err(e) => return ise(e.to_string()),
+    };
+    let Some(entry) = packages::app_ui_entry(&pkg_store, id) else {
+        return (StatusCode::NOT_FOUND, "app not found, disabled, or has no UI").into_response();
+    };
+
+    let install_dir = data_dir.join("packages").join(id);
+    let entry_rel = PathBuf::from(&entry);
+    let ui_base = install_dir.join(entry_rel.parent().unwrap_or(FsPath::new("")));
+    let rel = req_path.trim_start_matches('/');
+    let target = if rel.is_empty() {
+        install_dir.join(&entry_rel) // the entry file itself
+    } else {
+        ui_base.join(rel)
+    };
+
+    // Traversal safety: both the base and the resolved target must canonicalise,
+    // and the target must sit under the app's install dir.
+    let Ok(base) = install_dir.canonicalize() else {
+        return (StatusCode::NOT_FOUND, "app files not found").into_response();
+    };
+    let Ok(full) = target.canonicalize() else {
+        return (StatusCode::NOT_FOUND, "file not found").into_response();
+    };
+    if !full.starts_with(&base) {
+        return (StatusCode::FORBIDDEN, "path outside app").into_response();
+    }
+    let bytes = match tokio::fs::read(&full).await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::NOT_FOUND, "file not found").into_response(),
+    };
+
+    let mut resp = Response::new(Body::from(bytes));
+    let h = resp.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(crate::server::web_apps::content_type_for(&full)));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    h.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("default-src 'self' 'unsafe-inline' data: blob:; connect-src 'none'"),
+    );
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    resp
 }
 
 // ════════════════════════════════════════════════════════════════════════════

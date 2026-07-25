@@ -1979,6 +1979,19 @@ pub struct AgentConfig {
     #[serde(default = "default_context_safety_margin")]
     pub context_safety_margin_tokens: usize,
 
+    // EFFECTIVE context window (tokens) to budget to when the active provider is
+    // LOCAL and `context_length_tokens` is unset (0). Local quantized models on
+    // consumer runtimes reliably attend to only a few thousand tokens even though
+    // they advertise 128K, so budgeting to the ADVERTISED window packs history
+    // into a region the model can't recall (design-docs/effective-vs-advertised-
+    // context.md). This conservative default turns token budgeting (and therefore
+    // compaction) ON for local providers with a small window, keeping the prompt
+    // inside the reliable-recall zone. An explicit `context_length_tokens > 0`
+    // overrides this (cloud models with a real large window); `0` here restores
+    // the legacy fixed `max_context_turns` window for local providers too.
+    #[serde(default = "default_local_effective_context_tokens")]
+    pub local_effective_context_tokens: usize,
+
     // Phase-0 prompt caching: when true, keep the system-prompt PREFIX
     // byte-stable turn-to-turn by moving per-turn retrieved context (memory +
     // wiki) OUT of the system prompt and folding it into the current user
@@ -1994,6 +2007,15 @@ pub struct AgentConfig {
     // budgeting is enabled, so the default is behaviour-preserving.
     #[serde(default)]
     pub compaction: CompactionConfig,
+
+    // Degenerate-output guard (design-docs/degenerate-output-guard.md). Detects a
+    // model stuck emitting pathologically repetitive text (a wedged local model
+    // once produced 8k tokens of `/`), aborts that generation, and treats it as a
+    // failed turn + provider error so the garbage is neither shown nor fanned into
+    // the extractors. Enabled by default; disable it (or widen the thresholds) for
+    // a legitimate "output a long repeated pattern" request.
+    #[serde(default)]
+    pub degeneracy_guard: DegeneracyGuardConfig,
 
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -2145,8 +2167,10 @@ impl Default for AgentConfig {
             max_context_turns: default_max_context_turns(),
             context_length_tokens: 0,
             context_safety_margin_tokens: default_context_safety_margin(),
+            local_effective_context_tokens: default_local_effective_context_tokens(),
             prompt_cache_enabled: false,
             compaction: CompactionConfig::default(),
+            degeneracy_guard: DegeneracyGuardConfig::default(),
             tools:             ToolsConfig::default(),
             tool_selection:    ToolSelectionConfig::default(),
             reasoning:         ReasoningConfig::default(),
@@ -3624,6 +3648,10 @@ fn default_max_tool_rounds()     -> usize   { 8 }
 fn default_tool_mode()           -> String  { "auto".to_string() }
 fn default_max_context_turns()   -> usize   { 20 }
 fn default_context_safety_margin() -> usize { 2048 }
+// Conservative effective context for LOCAL providers (see the field doc): budget
+// to ~8K so the packed prompt stays inside the reliable-recall zone measured on
+// consumer local-model hardware, and so compaction turns on for evicted turns.
+fn default_local_effective_context_tokens() -> usize { 8192 }
 fn default_compaction_enabled()    -> bool  { true }
 fn default_keep_last_turns()       -> usize { 6 }
 fn default_max_summary_tokens()    -> usize { 1024 }
@@ -3666,6 +3694,64 @@ impl Default for CompactionConfig {
             keep_last_turns:    default_keep_last_turns(),
             summary_model:      String::new(),
             max_summary_tokens: default_max_summary_tokens(),
+        }
+    }
+}
+
+fn default_degen_min_chars()          -> usize { 400 }
+fn default_degen_window_chars()       -> usize { 512 }
+fn default_degen_min_distinct_chars() -> usize { 1 }
+fn default_degen_min_window_tokens()  -> usize { 24 }
+fn default_degen_min_distinct_tokens()-> usize { 2 }
+
+/// Degenerate-output guard settings (`agent.degeneracy_guard`). Trips when the
+/// tail of a generation collapses to pathological repetition — very few distinct
+/// characters, or a repeated word/phrase — past a minimum length. Defaults are
+/// conservative: normal prose, code, JSON, long tables, and base64 blobs never
+/// trip; a wedged model emitting one repeated token aborts within a few hundred
+/// characters. See design-docs/degenerate-output-guard.md.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DegeneracyGuardConfig {
+    /// Master switch. Default true. Turn off (or widen the thresholds) for a
+    /// legitimate request to emit a long repeated pattern.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Minimum generated length (chars) before the guard can trip, so short
+    /// legitimate repeats / small ASCII art survive. Default 400.
+    #[serde(default = "default_degen_min_chars")]
+    pub min_chars: usize,
+
+    /// Size (chars) of the trailing window inspected for degeneracy. Default 512.
+    #[serde(default = "default_degen_window_chars")]
+    pub window_chars: usize,
+
+    /// Char-collapse threshold: trip if the window has this many or fewer DISTINCT
+    /// non-whitespace characters (and real substance). Default 1 (pure single-char
+    /// runs like `////`).
+    #[serde(default = "default_degen_min_distinct_chars")]
+    pub min_distinct_chars: usize,
+
+    /// Minimum whitespace-separated tokens in the window before the token-collapse
+    /// check applies. Default 24.
+    #[serde(default = "default_degen_min_window_tokens")]
+    pub min_window_tokens: usize,
+
+    /// Token-collapse threshold: with at least `min_window_tokens` tokens, trip if
+    /// this many or fewer are DISTINCT (a repeated word/phrase). Default 2.
+    #[serde(default = "default_degen_min_distinct_tokens")]
+    pub min_distinct_tokens: usize,
+}
+
+impl Default for DegeneracyGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled:             true,
+            min_chars:           default_degen_min_chars(),
+            window_chars:        default_degen_window_chars(),
+            min_distinct_chars:  default_degen_min_distinct_chars(),
+            min_window_tokens:   default_degen_min_window_tokens(),
+            min_distinct_tokens: default_degen_min_distinct_tokens(),
         }
     }
 }

@@ -916,6 +916,19 @@ pub fn build_router(
                    post(crate::server::handlers::packages::disable_package))
             .route("/api/admin/packages/{id}/enable",
                    post(crate::server::handlers::packages::enable_package))
+            // Apps framework (Phase 2): an installed app's UI (served into a
+            // sandboxed iframe) + its declared-event emit endpoint.
+            .route("/api/admin/apps/{id}/ui/",
+                   get(crate::server::handlers::packages::app_ui_root))
+            .route("/api/admin/apps/{id}/ui/{*path}",
+                   get(crate::server::handlers::packages::app_ui_path))
+            .route("/api/admin/apps/{id}/emit",
+                   post(crate::server::handlers::packages::emit_app_event))
+            // Apps framework (Phase 2, Slice 2): per-app configuration —
+            // schema + non-secret values (GET), set values/secrets (PUT).
+            .route("/api/admin/apps/{id}/config",
+                   get(crate::server::handlers::packages::get_app_config)
+                       .put(crate::server::handlers::packages::put_app_config))
             // cpp_provider install wizard: begin → step → cancel, with
             // a resumable session GET. Guided + verified channel-bridge install.
             .route("/api/admin/packages/cpp/install",

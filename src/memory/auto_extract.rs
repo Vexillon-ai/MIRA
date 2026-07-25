@@ -260,9 +260,11 @@ impl LlmMemoryExtractor {
 
         let opts = GenerationOptions {
             temperature: 0.0,
-            // 4096 fits the capped 5 memories comfortably; `parse_raw_extraction`
+            // Right-sized to the actual payload (the capped 5 memories emit a small
+            // JSON object). 4096 was far too generous — only a runaway/degenerate
+            // model ever reached it, burning the budget; `parse_raw_extraction`
             // salvages a response truncated mid-array as a backstop.
-            max_tokens:  Some(4096),
+            max_tokens:  Some(768),
             ..Default::default()
         };
 

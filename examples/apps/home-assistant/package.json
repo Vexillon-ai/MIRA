@@ -1,0 +1,101 @@
+{
+  "format": "1",
+  "id": "com.mira.home-assistant",
+  "name": "Home Assistant",
+  "version": "1.0.0",
+  "description": "Connect MIRA to your Home Assistant instance: read sensor state and control devices by asking MIRA. Exposes read + control tools backed by the HA REST API, plus a status panel.",
+  "publisher": "MIRA",
+  "components": [
+    {
+      "type": "app",
+      "capabilities": {
+        "secrets": ["token"],
+        "network_egress": ["${config.base_url}"]
+      },
+      "config_schema": [
+        {
+          "key": "base_url",
+          "label": "Home Assistant URL",
+          "type": "url",
+          "required": true,
+          "help": "Your HA base URL with no trailing slash, e.g. http://homeassistant.local:8123"
+        },
+        {
+          "key": "token",
+          "label": "Long-Lived Access Token",
+          "type": "secret",
+          "secret": true,
+          "required": true,
+          "help": "In Home Assistant: your profile → Security → Long-Lived Access Tokens → Create Token."
+        }
+      ],
+      "payload": "ui",
+      "spec": {
+        "ui": { "entry": "ui/index.html" },
+        "tools": [
+          {
+            "name": "get_state",
+            "description": "Get the current state and attributes of one Home Assistant entity, e.g. sensor.living_room_temperature or light.kitchen. Returns the HA state JSON.",
+            "args_schema": {
+              "type": "object",
+              "properties": {
+                "entity_id": { "type": "string", "description": "The entity id, e.g. light.kitchen or sensor.outdoor_temperature." }
+              },
+              "required": ["entity_id"]
+            },
+            "handler": {
+              "kind": "http",
+              "method": "GET",
+              "url": "${config.base_url}/api/states/${args.entity_id}",
+              "headers": { "Authorization": "Bearer ${config.token}" }
+            }
+          },
+          {
+            "name": "list_states",
+            "description": "List every Home Assistant entity and its current state. Use this to discover entity ids before reading or controlling them.",
+            "args_schema": { "type": "object", "properties": {} },
+            "handler": {
+              "kind": "http",
+              "method": "GET",
+              "url": "${config.base_url}/api/states",
+              "headers": { "Authorization": "Bearer ${config.token}" }
+            }
+          },
+          {
+            "name": "call_service",
+            "description": "Control a device by calling a Home Assistant service, e.g. domain=light service=turn_on entity_id=light.kitchen, or domain=switch service=toggle. Returns the entities that changed.",
+            "args_schema": {
+              "type": "object",
+              "properties": {
+                "domain": { "type": "string", "description": "Service domain, e.g. light, switch, climate, cover, media_player." },
+                "service": { "type": "string", "description": "Service name, e.g. turn_on, turn_off, toggle, set_temperature." },
+                "entity_id": { "type": "string", "description": "The target entity id, e.g. light.kitchen." }
+              },
+              "required": ["domain", "service", "entity_id"]
+            },
+            "handler": {
+              "kind": "http",
+              "method": "POST",
+              "url": "${config.base_url}/api/services/${args.domain}/${args.service}",
+              "headers": {
+                "Authorization": "Bearer ${config.token}",
+                "Content-Type": "application/json"
+              },
+              "body": "{\"entity_id\": \"${args.entity_id}\"}"
+            }
+          }
+        ],
+        "events": [
+          { "name": "app.home_assistant.unreachable", "domain": "home", "severity": "warn" }
+        ],
+        "permissions": { "emit_events": ["app.home_assistant.unreachable"] },
+        "health_check": {
+          "url": "${config.base_url}/api/",
+          "headers": { "Authorization": "Bearer ${config.token}" },
+          "interval_secs": 300,
+          "emit_on_failure": "app.home_assistant.unreachable"
+        }
+      }
+    }
+  ]
+}

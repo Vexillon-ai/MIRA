@@ -22,7 +22,7 @@ use crate::mcp::{McpServerStore, NewMcpServer};
 use crate::skills::secrets::{Scope, SecretsStore};
 
 use super::bundle::ParsedBundle;
-use super::manifest::{Component, ComponentKind, PackageManifest, Runtime};
+use super::manifest::{Capabilities, Component, ComponentKind, PackageManifest, Runtime};
 use super::store::{Ledger, LedgerEntry, NewInstall, PackageStore};
 use super::verify::TrustLevel;
 
@@ -31,6 +31,10 @@ use super::verify::TrustLevel;
 pub struct InstallOutcome {
     pub package: super::store::InstalledPackage,
     pub mcp_server_ids: Vec<String>,
+    // App component ids this package provisioned. Lets the caller hot-reload the
+    // app-tool surface (`ToolRegistry::set_app_tools`) so an app's tools go live
+    // without a restart — the app analog of `mcp_server_ids`.
+    pub app_ids: Vec<String>,
     // Non-fatal limitations surfaced to the admin (e.g. best-effort Tier-B egress).
     pub warnings: Vec<String>,
 }
@@ -170,6 +174,7 @@ pub fn install_package(
     let m = &parsed.manifest;
     let mut ledger: Ledger = Vec::new();
     let mut mcp_ids: Vec<String> = Vec::new();
+    let mut app_ids: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
     // 1. Extract payload files to <packages_dir>/<id>/ (path-safety already
@@ -219,11 +224,25 @@ pub fn install_package(
                     }
                 }
             }
+            ComponentKind::App => {
+                // Apps are metadata-only to install: the UI payload is already
+                // extracted (covered by the `Files` ledger entry), and the app's
+                // MIRA-callable tools are (re)built from the stored manifest by
+                // `apps::build_app_tools` after the caller hot-reloads the tool
+                // registry — so there's no external resource to provision here.
+                // We still validate the spec now so a malformed app fails install
+                // cleanly (mirrors how `mcp_server` specs are validated at build).
+                if let Err(e) = crate::packages::apps::AppSpec::parse(&component.spec) {
+                    rollback(&ledger, mcp_store);
+                    return Err(format!("invalid app component: {e}"));
+                }
+                app_ids.push(m.id.clone());
+            }
             other => {
                 rollback(&ledger, mcp_store);
                 return Err(format!(
                     "component type {other:?} is not installable in this MIRA \
-                     (only mcp_server components are supported)"
+                     (only mcp_server and app components are supported)"
                 ));
             }
         }
@@ -247,7 +266,7 @@ pub fn install_package(
             format!("record install: {e}")
         })?;
 
-    Ok(InstallOutcome { package, mcp_server_ids: mcp_ids, warnings })
+    Ok(InstallOutcome { package, mcp_server_ids: mcp_ids, app_ids, warnings })
 }
 
 // Write a bundle's payload files under `install_dir`, stripping the top-level
@@ -354,6 +373,44 @@ fn confine_command(
     let (c, a) = super::launcher::wrap(&exe.to_string_lossy(), &cmd, &new.args, &spec);
     new.command = Some(c);
     new.args = a;
+}
+
+// Build the confinement policy for an **app subprocess handler** (apps
+// framework, Slice 2b), reusing the exact same secret-masking + egress logic as
+// native MCP `confine_command` above — so an app's bundled command runs under
+// the same fail-closed sandbox as a native plugin. Returns the spec + the
+// private writable data dir (also exported as the process `HOME`). The caller
+// (`packages::apps::AppTool`) spawns it short-lived via `apps_exec::run_confined`.
+#[cfg(unix)]
+pub(crate) fn app_subprocess_confine_spec(
+    install_dir: &Path,
+    caps:        &Capabilities,
+    config:      &HashMap<String, String>,
+) -> (super::launcher::ConfineSpec, std::path::PathBuf) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let data_dir = install_dir.join("_data");
+    let _ = fs::create_dir_all(&data_dir);
+
+    let egress: Vec<String> = caps.network_egress.iter()
+        .filter_map(|h| egress_host(h, config))
+        .collect();
+    let no_network = egress.is_empty();
+
+    let mut rw_paths: Vec<String> = caps.filesystem.iter()
+        .map(|p| expand_path(p, &home, config))
+        .collect();
+    rw_paths.push(data_dir.to_string_lossy().to_string());
+    for p in &rw_paths { let _ = fs::create_dir_all(p); }
+
+    let spec = super::launcher::ConfineSpec {
+        fsize_mb:   Some(1024),
+        no_network,
+        fs_scope:   cfg!(target_os = "linux"),
+        rw_paths,
+        mask_paths: secret_mask_paths(install_dir, &home),
+        egress,
+    };
+    (spec, data_dir)
 }
 
 // Replace a container component's spawn with a hardened `docker run … <image>`
@@ -825,5 +882,102 @@ mod tests {
         assert!(mcp_store.list_for_user("admin-1").unwrap().is_empty());
         assert!(pkg_store.get("com.example.nextcloud-mcp").unwrap().is_none());
         assert!(!install_dir.exists(), "extracted dir must be removed");
+    }
+
+    // Apps-framework slice 1: install the demo `app` package end-to-end, then
+    // assert the four seams — install records the app, the UI payload is
+    // extracted, `build_app_tools` yields the callable echo tool, and
+    // `resolve_emit_event` enforces the declared-events allowlist. Then uninstall
+    // and confirm the tool surface + files are gone.
+    #[test]
+    fn end_to_end_install_app_component() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use rusqlite::Connection;
+
+        let manifest = r#"{
+          "format":"1","id":"com.mira.demo-hello","name":"Hello Demo App","version":"1.0.0",
+          "publisher":"MIRA",
+          "components":[{"type":"app","capabilities":{},"payload":"ui","spec":{
+            "ui":{"entry":"ui/index.html"},
+            "tools":[{"name":"echo","description":"Echo a message back.",
+              "args_schema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]},
+              "handler":{"kind":"echo"}}],
+            "events":[
+              {"name":"app.demo.hello","domain":"demo","severity":"info"},
+              {"name":"app.demo.issue","domain":"demo","severity":"warn"}],
+            "permissions":{"emit_events":["app.demo.hello","app.demo.issue"]}}}]
+        }"#;
+
+        let mut tar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
+        let entries: [(&str, &[u8]); 2] = [
+            ("com.mira.demo-hello/package.json", manifest.as_bytes()),
+            ("com.mira.demo-hello/ui/index.html", b"<h1>Hello</h1>"),
+        ];
+        for (path, data) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, path, data).unwrap();
+        }
+        let bundle = tar.into_inner().unwrap().finish().unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("auth.db");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE users(id TEXT PRIMARY KEY); INSERT INTO users(id) VALUES('admin-1');",
+            ).unwrap();
+        }
+        let mcp_store = McpServerStore::open(&db).unwrap();
+        let pkg_store = PackageStore::open(&db).unwrap();
+        let pkgs_dir = dir.path().join("packages");
+
+        let parsed = crate::packages::parse_bundle(&bundle).unwrap();
+        let trust = crate::packages::verify_package(
+            &parsed.manifest, &crate::skills::trust::TrustStore::empty(),
+        );
+        let outcome = install_package(
+            &parsed, &trust, "admin-1", &HashMap::new(), &pkgs_dir, &mcp_store, &pkg_store,
+        ).unwrap();
+
+        // Install recorded the app + extracted its UI; no mcp rows.
+        assert_eq!(outcome.app_ids, vec!["com.mira.demo-hello".to_string()]);
+        assert!(outcome.mcp_server_ids.is_empty());
+        let install_dir = pkgs_dir.join("com.mira.demo-hello");
+        assert!(install_dir.join("ui/index.html").exists());
+
+        // The echo tool is live + provider-safe-named, and actually echoes.
+        let tools = crate::packages::apps::build_app_tools(&pkg_store, &pkgs_dir, None, None);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name(), "app__com-mira-demo-hello__echo");
+        let out = tokio::runtime::Runtime::new().unwrap()
+            .block_on(tools[0].execute(serde_json::json!({"text": "hi"}))).unwrap();
+        assert!(out.success && out.output == "hi");
+
+        // Emit allowlist: declared issue event resolves with its severity; an
+        // undeclared name is rejected.
+        let ev = crate::packages::apps::resolve_emit_event(&pkg_store, "com.mira.demo-hello", "app.demo.issue").unwrap();
+        assert_eq!(ev.severity, "warn");
+        assert!(crate::packages::apps::resolve_emit_event(&pkg_store, "com.mira.demo-hello", "app.demo.sneaky").is_err());
+
+        // UI entry resolvable for the serving handler.
+        assert_eq!(
+            crate::packages::apps::app_ui_entry(&pkg_store, "com.mira.demo-hello").as_deref(),
+            Some("ui/index.html"),
+        );
+
+        // Uninstall drops the tool surface + files.
+        let channel_store = ChannelAccountStore::open(&db).unwrap();
+        let (sdb, skey) = (dir.path().join("skill_secrets.db"), dir.path().join("master.key"));
+        let secrets = SecretsStore::open(&sdb, &skey).unwrap();
+        uninstall_package(
+            "com.mira.demo-hello", &mcp_store, &channel_store, &secrets, &pkg_store,
+        ).unwrap();
+        assert!(pkg_store.get("com.mira.demo-hello").unwrap().is_none());
+        assert!(crate::packages::apps::build_app_tools(&pkg_store, &pkgs_dir, None, None).is_empty());
+        assert!(!install_dir.exists());
     }
 }

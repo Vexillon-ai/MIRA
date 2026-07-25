@@ -306,15 +306,48 @@ fn tier_override(config: &MiraConfig, tier: GuardianTier) -> Option<(String, Opt
     Some((prov.to_string(), model))
 }
 
+/// A provider's configured `default_model`, or `None` when the provider is
+/// unknown here or its default is unset/blank. Mirrors the write-path arms in
+/// `named_agent::build_provider_for_alias` so the two stay in lockstep.
+fn provider_default_model(config: &MiraConfig, provider: &str) -> Option<String> {
+    let p = &config.providers;
+    let m = match provider {
+        "ollama"     => p.ollama.default_model.as_str(),
+        "lmstudio"   => p.lmstudio.default_model.as_str(),
+        "openrouter" => p.openrouter.default_model.as_str(),
+        "openai"     => p.openai.default_model.as_str(),
+        "deepseek"   => p.deepseek.default_model.as_str(),
+        "moonshot"   => p.moonshot.default_model.as_str(),
+        "groq"       => p.groq.default_model.as_str(),
+        "xai"        => p.xai.default_model.as_str(),
+        "anthropic"  => p.anthropic.default_model.as_str(),
+        "gemini"     => p.gemini.default_model.as_str(),
+        _ => "",
+    };
+    let m = m.trim();
+    (!m.is_empty()).then(|| m.to_string())
+}
+
 /// Resolve the `(provider, model)` a Guardian tier binds to. Precedence:
 /// explicit tier override → the `guardian` llm-alias → the primary provider.
 /// So an install with only the alias configured resolves both tiers to it
 /// (unchanged behaviour), while a family can point triage at a stronger model.
+///
+/// When the resolved model is unset (empty tier field, alias with no model, or
+/// the bare primary fallback) we fill it from the provider's configured
+/// `default_model` — honouring the schema contract "empty = the provider's
+/// default model". Without this we would hand `build_provider_for_alias` a
+/// `None` model, and MIRA would send a request naming no model at all — which
+/// makes LM Studio JIT-load an arbitrary model (observed: a rogue 4B that caused
+/// an OOM cascade). Naming the configured default keeps the Guardian pinned to a
+/// known-good local model.
 pub fn tier_model(config: &MiraConfig, tier: GuardianTier) -> (String, Option<String>) {
-    tier_override(config, tier)
+    let (provider, model) = tier_override(config, tier)
         .or_else(|| config.agent.llm_aliases.get(GUARDIAN_ALIAS)
             .map(|a| (a.provider.clone(), a.model.clone())))
-        .unwrap_or_else(|| (config.primary_provider.clone(), None))
+        .unwrap_or_else(|| (config.primary_provider.clone(), None));
+    let model = model.or_else(|| provider_default_model(config, &provider));
+    (provider, model)
 }
 
 /// Fail-closed local-model check (§5) for a specific tier. The Guardian must use
@@ -421,6 +454,14 @@ pub struct WatchStatus {
     pub last_alert_detectors: usize,
     /// Alerts raised since this process started.
     pub alerts_total:         u64,
+    /// App-framework *issue* events (severity warn+) the Guardian has observed on
+    /// the shared bus since this process started. Benign `info` app events belong
+    /// to MIRA's interaction layer and are not counted here.
+    pub app_issues_total:     u64,
+    /// Unix secs of the most recent app-issue event observed.
+    pub last_app_issue_at:      Option<i64>,
+    /// `"<event> from <app>"` of the most recent app-issue event.
+    pub last_app_issue_summary: Option<String>,
 }
 
 static WATCH_STATUS: std::sync::OnceLock<tokio::sync::RwLock<WatchStatus>> =
@@ -790,6 +831,32 @@ mod tests {
         // Blank/whitespace tier fields are treated as unset (a cleared WebUI field).
         c.guardian.routine_provider = Some("   ".into());
         assert_eq!(tier_model(&c, GuardianTier::Routine).0, "ollama", "blank provider falls back, not empty");
+    }
+
+    #[test]
+    fn tier_model_fills_unset_model_from_provider_default() {
+        let mut c = MiraConfig::default();
+        c.primary_provider = "lmstudio".into();
+        c.providers.lmstudio.default_model = "qwen3-coder-next".into();
+        c.providers.ollama.default_model   = "qwen2.5:3b".into();
+        // Bare primary fallback (no alias, no tier fields): the model must be the
+        // provider's default, NEVER None (else LM Studio JIT-loads a rogue model).
+        assert_eq!(tier_model(&c, GuardianTier::Triage),
+                   ("lmstudio".into(), Some("qwen3-coder-next".into())));
+        // A tier override with provider set but model blank also fills the default.
+        c.guardian.triage_provider = Some("ollama".into());
+        c.guardian.triage_model    = Some("  ".into());
+        assert_eq!(tier_model(&c, GuardianTier::Triage),
+                   ("ollama".into(), Some("qwen2.5:3b".into())));
+        // An explicit tier model still wins over the default.
+        c.guardian.triage_model = Some("gemma3:12b".into());
+        assert_eq!(tier_model(&c, GuardianTier::Triage),
+                   ("ollama".into(), Some("gemma3:12b".into())));
+        // A provider whose default_model is blank yields None (no false model).
+        c.primary_provider = "lmstudio".into();
+        c.guardian = Default::default();
+        c.providers.lmstudio.default_model = "".into();
+        assert_eq!(tier_model(&c, GuardianTier::Routine), ("lmstudio".into(), None));
     }
 
     #[test]

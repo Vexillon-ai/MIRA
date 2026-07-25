@@ -115,7 +115,7 @@ mod tests {
             PolicyEvent::ToolInvocation {
                 agent_id: id(), skill_id: None,
                 tool: "web_search".into(), args_summary: "x".into(),
-                running_cost_usd: 0.0, session_cost_usd: 0.0,
+                running_cost_usd: 0.0, session_cost_usd: 0.0, app_id: None,
             },
             PolicyEvent::LlmCall {
                 agent_id: id(), skill_id: None,

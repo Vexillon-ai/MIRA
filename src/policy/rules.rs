@@ -81,6 +81,10 @@ pub struct RuleContext {
     /// rules can fire (events that need a manifest fall through Allow,
     /// since we have no rules to consult).
     pub skill_registry: Option<Arc<SkillRegistry>>,
+    /// App ids whose tools are administratively blocked (apps framework).
+    /// A `ToolInvocation` carrying one of these `app_id`s is denied. Empty by
+    /// default (no app is blocked); populated by an admin denylist.
+    pub denied_apps: std::collections::HashSet<String>,
 }
 
 /// The shipped built-in engine. Holds an ordered list of rules + the
@@ -97,6 +101,13 @@ impl BuiltinRulesEngine {
 
     pub fn with_skill_registry(mut self, registry: Arc<SkillRegistry>) -> Self {
         self.ctx.skill_registry = Some(registry);
+        self
+    }
+
+    /// Administratively block a set of apps (apps framework). Their tools are
+    /// denied by `PerAppRule` even though the apps stay installed.
+    pub fn with_denied_apps(mut self, apps: std::collections::HashSet<String>) -> Self {
+        self.ctx.denied_apps = apps;
         self
     }
 
@@ -128,6 +139,7 @@ impl BuiltinRulesEngine {
         e = e.add_rule(Arc::new(PerAgentBudgetRule {
             default_max_usd: default_agent_budget_usd,
         }));
+        e = e.add_rule(Arc::new(PerAppRule));
         e = e.add_rule(Arc::new(NetworkAllowlistRule));
         e = e.add_rule(Arc::new(FilesystemAllowlistRule));
         e = e.add_rule(Arc::new(SecretsAllowlistRule));
@@ -238,6 +250,22 @@ impl Rule for PerAgentBudgetRule {
     }
 }
 
+/// Denies a `ToolInvocation` whose `app_id` is in the admin denylist
+/// (`RuleContext.denied_apps`). Lets an operator turn off one app's tools
+/// without uninstalling it. No-op for non-app tools (`app_id: None`) and when
+/// the denylist is empty. See the apps framework (`packages::apps`).
+pub struct PerAppRule;
+impl Rule for PerAppRule {
+    fn id(&self) -> &'static str { "per-app" }
+    fn evaluate(&self, event: &PolicyEvent, ctx: &RuleContext) -> Option<String> {
+        let PolicyEvent::ToolInvocation { app_id: Some(app_id), .. } = event else { return None; };
+        if ctx.denied_apps.contains(app_id) {
+            return Some(format!("app {app_id:?} is administratively blocked"));
+        }
+        None
+    }
+}
+
 /// `NetworkEgress.url`'s host must match the Skill's
 /// `permissions.network_egress` allowlist. Stateless — delegates to
 /// the same matcher the Skill loader uses (`check_network_egress`),
@@ -336,6 +364,29 @@ mod tests {
 
     fn id() -> AgentId { AgentId::new() }
 
+    #[tokio::test]
+    async fn per_app_rule_denies_only_blocked_apps() {
+        let denied: std::collections::HashSet<String> =
+            ["com.evil.app".to_string()].into_iter().collect();
+        let eng = BuiltinRulesEngine::new()
+            .add_rule(Arc::new(PerAppRule))
+            .with_denied_apps(denied);
+        let ev = |app: Option<&str>| PolicyEvent::ToolInvocation {
+            agent_id: id(), skill_id: None, tool: "app__x__t".into(),
+            args_summary: String::new(), running_cost_usd: 0.0, session_cost_usd: 0.0,
+            app_id: app.map(String::from),
+        };
+        // Blocked app → denied.
+        assert!(matches!(
+            eng.evaluate(&ev(Some("com.evil.app"))).await,
+            PolicyDecision::Deny { .. },
+        ));
+        // A different app → allowed.
+        assert_eq!(eng.evaluate(&ev(Some("com.good.app"))).await, PolicyDecision::Allow);
+        // Non-app tool (no app_id) → the rule doesn't apply.
+        assert_eq!(eng.evaluate(&ev(None)).await, PolicyDecision::Allow);
+    }
+
     /// Build a SkillRegistry with one Skill whose `permissions` are
     /// supplied by the caller. Lets each test target a single rule.
     fn registry_with(skill_id: &str, perms: Permissions) -> Arc<SkillRegistry> {
@@ -408,7 +459,7 @@ mod tests {
         let event = PolicyEvent::ToolInvocation {
             agent_id: id(), skill_id: None,
             tool: "x".into(), args_summary: "y".into(),
-            running_cost_usd: 0.0, session_cost_usd: 0.0,
+            running_cost_usd: 0.0, session_cost_usd: 0.0, app_id: None,
         };
         assert_eq!(eng.evaluate(&event).await, PolicyDecision::Allow);
     }

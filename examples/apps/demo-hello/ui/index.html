@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hello Demo App</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; color: #111; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    p  { color: #555; margin: 0 0 16px; }
+    button { font: inherit; padding: 8px 14px; margin-right: 8px; border-radius: 6px;
+             border: 1px solid #ccc; cursor: pointer; }
+    .issue { border-color: #e0a; }
+    #log { margin-top: 16px; font-size: 13px; color: #333; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Hello Demo App</h1>
+  <p>A first-class MIRA app: its own UI, running sandboxed. Buttons emit events onto MIRA's shared bus.</p>
+
+  <button id="hello">Say hello (info &rarr; MIRA)</button>
+  <button id="issue" class="issue">Report issue (warn &rarr; Guardian)</button>
+
+  <div id="log"></div>
+
+  <script>
+    // The app runs in a sandboxed, opaque-origin iframe. Its ONLY path to MIRA is
+    // postMessage to the trusted parent, which brokers an authenticated emit.
+    function emit(event, payload) {
+      parent.postMessage({ type: 'mira.emit', event: event, payload: payload }, '*');
+      var log = document.getElementById('log');
+      log.textContent += 'emitted ' + event + '\n';
+    }
+    document.getElementById('hello').onclick = function () {
+      emit('app.demo.hello', { msg: 'hello from the demo app' });
+    };
+    document.getElementById('issue').onclick = function () {
+      emit('app.demo.issue', { msg: 'demo app reports a simulated problem' });
+    };
+  </script>
+</body>
+</html>

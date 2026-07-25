@@ -67,6 +67,12 @@ pub mod names {
     // event_subscription routes this to a ChannelMessage whenever
     // `automations.watchdog.notify_user_id` is set.
     pub const WATCHDOG_ALERT: &str = "watchdog.alert";
+
+    // App-emitted events (Phase 2 apps framework) are NOT declared here — their
+    // names are manifest-declared per installed app (e.g. `app.demo.issue`) and
+    // validated against the app's `permissions.emit_events` allowlist at emit
+    // time. They carry the richer `domain`/`severity` schema on `Event` so the
+    // Guardian can subscribe by severity without a compile-time name registry.
 }
 
 // One event flowing through the bus.
@@ -82,6 +88,26 @@ pub struct Event {
     pub user_id: Option<String>,
     pub payload: Value,
     pub at:      i64,
+    // ── Apps-framework schema (Phase 2) ──────────────────────────────────────
+    // Optional, backward-compatible: every existing `Event::new`/`emit_named`
+    // call site leaves these `None`, and `skip_serializing_if` keeps the JSON
+    // byte-identical to before. App-emitted events populate them so consumers
+    // can route by domain/severity without parsing `payload`.
+    //
+    // `domain`   — the app family the event belongs to (e.g. "demo", "security").
+    // `severity` — "info" | "warn" | "error" | "critical"; the routing key that
+    //              separates MIRA's interaction layer (info) from the Guardian's
+    //              monitoring layer (warn+ = an issue).
+    // `entity`   — what the event is about (here: the emitting app's id).
+    // `scope`    — optional member/household scope for later per-member routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain:   Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity:   Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope:    Option<String>,
 }
 
 impl Event {
@@ -91,7 +117,45 @@ impl Event {
             user_id,
             payload,
             at: chrono::Utc::now().timestamp(),
+            domain:   None,
+            severity: None,
+            entity:   None,
+            scope:    None,
         }
+    }
+
+    /// Builder for an app-emitted event (Phase 2 apps framework). Carries the
+    /// richer routing schema so MIRA's interaction layer and the Guardian's
+    /// monitoring layer can each pick out what's theirs by `severity`.
+    pub fn new_app(
+        name:     impl Into<String>,
+        user_id:  Option<String>,
+        domain:   impl Into<String>,
+        severity: impl Into<String>,
+        entity:   impl Into<String>,
+        payload:  Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            user_id,
+            payload,
+            at: chrono::Utc::now().timestamp(),
+            domain:   Some(domain.into()),
+            severity: Some(severity.into()),
+            entity:   Some(entity.into()),
+            scope:    None,
+        }
+    }
+
+    /// True when this event's severity marks it an *issue* (`warn`/`error`/
+    /// `critical`) — the Guardian monitors only these, never benign `info`
+    /// events (those belong to MIRA's interaction/automations layer). Events
+    /// with no severity are treated as non-issues.
+    pub fn severity_is_issue(&self) -> bool {
+        matches!(
+            self.severity.as_deref(),
+            Some("warn") | Some("warning") | Some("error") | Some("critical")
+        )
     }
 }
 

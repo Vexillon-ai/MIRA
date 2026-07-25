@@ -466,7 +466,7 @@ mod tests {
         assert!(p.matches(&PolicyEvent::ToolInvocation {
             agent_id: id(), skill_id: Some("com.x".into()),
             tool: "t".into(), args_summary: "".into(),
-            running_cost_usd: 0.0, session_cost_usd: 0.0,
+            running_cost_usd: 0.0, session_cost_usd: 0.0, app_id: None,
         }));
         // Spawn worker (skill_id is required, not Option)
         assert!(p.matches(&PolicyEvent::SpawnWorker {
@@ -477,13 +477,13 @@ mod tests {
         assert!(!p.matches(&PolicyEvent::ToolInvocation {
             agent_id: id(), skill_id: Some("com.OTHER".into()),
             tool: "t".into(), args_summary: "".into(),
-            running_cost_usd: 0.0, session_cost_usd: 0.0,
+            running_cost_usd: 0.0, session_cost_usd: 0.0, app_id: None,
         }));
         // No skill_id (root agent action)
         assert!(!p.matches(&PolicyEvent::ToolInvocation {
             agent_id: id(), skill_id: None,
             tool: "t".into(), args_summary: "".into(),
-            running_cost_usd: 0.0, session_cost_usd: 0.0,
+            running_cost_usd: 0.0, session_cost_usd: 0.0, app_id: None,
         }));
     }
 
@@ -611,7 +611,7 @@ mod tests {
         let event = PolicyEvent::ToolInvocation {
             agent_id: id(), skill_id: None,
             tool: "x".into(), args_summary: "".into(),
-            running_cost_usd: 0.0, session_cost_usd: 0.0,
+            running_cost_usd: 0.0, session_cost_usd: 0.0, app_id: None,
         };
         assert!(!r.matches(&event));
     }

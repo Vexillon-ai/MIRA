@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home Assistant</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1c1c22; --muted: #6b6b78;
+    --card: #f5f6f8; --border: #e3e5ea; --accent: #03a9f4;
+    --code-bg: #eceef2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181d; --fg: #e8eaed; --muted: #9aa0aa;
+      --card: #1f232a; --border: #2c313a; --accent: #29b6f6;
+      --code-bg: #12151a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font: 15px/1.55 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg); color: var(--fg);
+  }
+  .wrap { max-width: 640px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  .logo {
+    width: 40px; height: 40px; border-radius: 10px; flex: 0 0 auto;
+    background: var(--accent); color: #fff; display: grid; place-items: center;
+    font-size: 22px;
+  }
+  h1 { font-size: 20px; margin: 0; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 18px; margin-top: 16px;
+  }
+  .card h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); margin: 0 0 10px; }
+  ul { margin: 0; padding-left: 18px; }
+  li { margin: 6px 0; }
+  code {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 1px 6px; font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .ask { font-style: italic; }
+  .tool { display: flex; gap: 10px; align-items: baseline; }
+  .tool b { flex: 0 0 auto; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 18px; text-align: center; }
+</style>
+<div class="wrap">
+  <header>
+    <div class="logo">🏠</div>
+    <div>
+      <h1>Home Assistant</h1>
+      <p class="sub">MIRA can read your sensors and control your devices.</p>
+    </div>
+  </header>
+
+  <div class="card">
+    <h2>Just ask MIRA</h2>
+    <ul>
+      <li class="ask">“What's the temperature in the living room?”</li>
+      <li class="ask">“Turn off the kitchen lights.”</li>
+      <li class="ask">“Is the garage door open?”</li>
+      <li class="ask">“Toggle the office fan.”</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Tools MIRA has</h2>
+    <ul style="list-style:none; padding-left:0;">
+      <li class="tool"><b><code>get_state</code></b><span>read one entity's state + attributes</span></li>
+      <li class="tool"><b><code>list_states</code></b><span>discover entity ids across your home</span></li>
+      <li class="tool"><b><code>call_service</code></b><span>control a device (turn_on / off / toggle / …)</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Setup</h2>
+    <ul>
+      <li>Set your HA URL (<code>base_url</code>) and a Long-Lived Access Token in this app's settings.</li>
+      <li>The token is stored encrypted and never leaves this host except to reach your HA instance.</li>
+    </ul>
+  </div>
+
+  <footer>Connected through MIRA · calls run via MIRA's SSRF-guarded HTTP layer</footer>
+</div>

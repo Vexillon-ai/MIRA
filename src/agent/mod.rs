@@ -25,6 +25,7 @@ pub mod core;
 pub mod definitions;
 pub mod guardian;
 pub mod guardian_actions;
+pub mod guardian_app_events;
 pub mod instance;
 pub mod process_tree;
 pub mod context_budget;

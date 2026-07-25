@@ -1000,13 +1000,30 @@ impl AgentCore {
         // `max_context_turns` window (no behaviour change).
         let history = session.to_messages();
         let acfg = &self.config.agent;
-        let mut skip = if acfg.context_length_tokens > 0 {
+        // Effective context window to budget to. An explicit `context_length_tokens`
+        // always wins (e.g. a cloud model's real large window). Otherwise, for a
+        // LOCAL provider, budget to a small effective window (default 8K) instead of
+        // the advertised one: local quantized models reliably attend to only a few
+        // thousand tokens, so filling the advertised 128K packs history where the
+        // model can't recall it. This keeps the prompt in the reliable-recall zone
+        // AND turns compaction on for the overflow. Cloud providers left unset keep
+        // the legacy fixed-turn window. See effective-vs-advertised-context.md.
+        let effective_ctx = if acfg.context_length_tokens > 0 {
+            acfg.context_length_tokens
+        } else if crate::gateway::builder::provider_is_local(
+            &self.config.primary_provider, &self.config)
+        {
+            acfg.local_effective_context_tokens
+        } else {
+            0
+        };
+        let mut skip = if effective_ctx > 0 {
             // Cap the output reservation so a small window can't underflow the
             // budget to zero.
             let reservation = (acfg.max_response_tokens as usize)
-                .min(acfg.context_length_tokens / 4);
+                .min(effective_ctx / 4);
             let budget = crate::agent::context_budget::context_budget(
-                acfg.context_length_tokens, reservation, acfg.context_safety_margin_tokens);
+                effective_ctx, reservation, acfg.context_safety_margin_tokens);
             // Already-committed cost: system prompt + this turn's user input.
             let fixed = crate::agent::tokens::estimate_message(&system_msg)
                 + crate::agent::tokens::estimate_text(input);
@@ -1021,7 +1038,7 @@ impl AgentCore {
         // inject that. Gated on token budgeting being on, compaction enabled,
         // an actual overflow, and a durable conversation to persist to.
         let mut compaction_block = String::new();
-        if acfg.context_length_tokens > 0 && acfg.compaction.enabled && skip > 0 {
+        if effective_ctx > 0 && acfg.compaction.enabled && skip > 0 {
             // Never summarize away the most recent turns — keep last-K verbatim
             // even if that pushes slightly over budget.
             let keep_msgs = acfg.compaction.keep_last_turns.saturating_mul(2);

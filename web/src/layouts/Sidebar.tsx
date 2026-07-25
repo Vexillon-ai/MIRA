@@ -9,7 +9,7 @@ import {
   MessagesSquare, Brain, BookOpen, Server, Wifi, Search,
   Activity, FileText, Radio, Users2, Calendar, Bot, Boxes, Network,
   ScrollText, ShieldCheck, HeartPulse, Plug, Mail, Package, BotMessageSquare, Workflow,
-  Sparkles,
+  Sparkles, LayoutGrid,
 } from 'lucide-react'
 import { conversationsApi } from '@/api/conversations'
 import { useAuthStore } from '@/store/authStore'
@@ -216,6 +216,7 @@ export default function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             <NavItem to="/users"    icon={<Users size={15} />}        label="Users"    collapsed={sidebarCollapsed} />
             <NavItem to="/groups"   icon={<Users2 size={15} />}       label="Groups"   collapsed={sidebarCollapsed} />
             <NavItem to="/plugins"  icon={<Package size={15} />}      label="Plugins"  collapsed={sidebarCollapsed} />
+            <NavItem to="/apps"     icon={<LayoutGrid size={15} />}   label="Apps"     collapsed={sidebarCollapsed} />
             <NavItem to="/agents/definitions" icon={<BotMessageSquare size={15} />} label="Named Agents" collapsed={sidebarCollapsed} />
             <NavItem to="/workflows" icon={<Workflow size={15} />} label="Workflows" collapsed={sidebarCollapsed} />
             <NavItem to="/policy"   icon={<ShieldCheck size={15} />}  label="Policy"   collapsed={sidebarCollapsed} />

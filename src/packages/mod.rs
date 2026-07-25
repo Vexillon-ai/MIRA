@@ -13,6 +13,9 @@
 //! bundle store, the install/update/teardown engine, and the per-component
 //! installers (`mcp_server`).
 
+pub mod apps;
+pub mod apps_exec;
+pub mod apps_poll;
 pub mod bundle;
 pub mod container;
 pub mod engine;
@@ -27,6 +30,9 @@ pub mod update;
 pub mod verify;
 pub mod wizard;
 
+pub use apps::{
+    app_config_schema, app_secret_keys, app_ui_entry, build_app_tools, resolve_emit_event, AppSpec,
+};
 pub use bundle::{parse_bundle, ParsedBundle, MANIFEST_NAME};
 pub use install::{
     gate_install, install_package, reverse_ledger, uninstall_package, InstallOutcome,

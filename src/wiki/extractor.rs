@@ -75,9 +75,10 @@ pub async fn extract_wiki_ops(
     ];
     let opts = GenerationOptions {
         temperature: 0.0,
-        // Verbose models can blow past a tight cap mid-array; 4096 fits the
-        // typical handful of ops, and `parse_json` salvages a truncated tail.
-        max_tokens: Some(4096),
+        // Right-sized to the actual payload (a handful of wiki ops = a small JSON
+        // object). 4096 was only ever reached by a runaway/degenerate model; the
+        // `parse_json` salvage path still recovers a truncated tail.
+        max_tokens: Some(768),
         ..Default::default()
     };
 

@@ -1314,6 +1314,11 @@
           "type": "integer",
           "minimum": 0
         },
+        "local_effective_context_tokens": {
+          "description": "Effective context window (tokens) to budget to when the active provider is LOCAL and context_length_tokens is 0 (unset). Local quantized models on consumer runtimes reliably attend to only a few thousand tokens despite advertising 128K, so budgeting to the advertised window packs history where the model can't recall it. This conservative default turns token budgeting (and therefore compaction) ON for local providers with a small window, keeping the prompt in the reliable-recall zone. An explicit context_length_tokens > 0 overrides this (cloud models with a real large window); 0 here restores the legacy fixed max_context_turns window for local providers. Default 8192.",
+          "type": "integer",
+          "minimum": 0
+        },
         "prompt_cache_enabled": {
           "description": "Phase-0 prompt caching: when true, keep the system-prompt PREFIX byte-stable turn-to-turn by moving per-turn retrieved context (memory + wiki) out of the system prompt and folding it into the current user message. A stable prefix lets cloud providers (Anthropic/OpenAI/Gemini) and local backends' KV cache reuse it — roughly 90% cheaper/faster input on cloud, a free speedup locally. Default false (unchanged prompt shape).",
           "type": "boolean"
@@ -1340,6 +1345,42 @@
               "description": "Soft cap on the rolling summary's size in tokens, so the compacted block can't grow unbounded. Default 1024.",
               "type": "integer",
               "minimum": 0
+            }
+          }
+        },
+        "degeneracy_guard": {
+          "description": "Degenerate-output guard: detects a model stuck emitting pathologically repetitive text (a wedged local model once produced ~8k tokens of '/'), aborts that generation early, and treats it as a failed turn + provider error so the garbage is neither shown to the user nor fanned into the memory/wiki extractors. Applies to every LLM call. Conservative defaults never trip on normal prose, code, JSON, long tables, or base64 blobs.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Master switch. Default true. Turn off (or widen the thresholds) for a legitimate request to emit a long repeated pattern.",
+              "type": "boolean"
+            },
+            "min_chars": {
+              "description": "Minimum generated length (chars) before the guard can trip, so short legitimate repeats / small ASCII art survive. Default 400.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "window_chars": {
+              "description": "Size (chars) of the trailing window inspected for degeneracy. Default 512.",
+              "type": "integer",
+              "minimum": 16
+            },
+            "min_distinct_chars": {
+              "description": "Char-collapse threshold: trip if the window has this many or fewer DISTINCT non-whitespace characters (with real substance). Default 1 (pure single-char runs like '////').",
+              "type": "integer",
+              "minimum": 1
+            },
+            "min_window_tokens": {
+              "description": "Minimum whitespace-separated tokens in the window before the token-collapse check applies. Default 24.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "min_distinct_tokens": {
+              "description": "Token-collapse threshold: with at least min_window_tokens tokens, trip if this many or fewer are DISTINCT (a repeated word/phrase). Default 2.",
+              "type": "integer",
+              "minimum": 1
             }
           }
         },

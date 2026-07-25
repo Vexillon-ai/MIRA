@@ -447,8 +447,9 @@ async fn main_serve_inner_path(
     serve_app_file(&store, &task_id, &path, true).await
 }
 
-/// Extension → MIME map covering what a built static web app emits.
-fn content_type_for(path: &Path) -> &'static str {
+/// Extension → MIME map covering what a built static web app emits. Also reused
+/// by the apps-framework UI serving (`handlers/packages.rs::app_ui`).
+pub fn content_type_for(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
         Some("html" | "htm")  => "text/html; charset=utf-8",
         Some("js" | "mjs")    => "text/javascript; charset=utf-8",

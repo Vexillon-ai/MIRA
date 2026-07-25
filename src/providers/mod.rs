@@ -11,6 +11,7 @@ pub mod openai_compat;
 pub mod anthropic;
 pub mod gemini;
 pub mod failover;
+pub mod degeneracy;
 pub mod signal_cli;
 pub mod catalog;
 pub mod overlays;

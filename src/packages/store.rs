@@ -224,6 +224,20 @@ impl PackageStore {
         Ok(())
     }
 
+    // Replace a package's resolved **non-secret** config blob (`config_json`).
+    // Secrets never land here — they live in the vault. No-op if absent.
+    pub fn set_config(&self, id: &str, config: &serde_json::Value) -> Result<(), MiraError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| MiraError::DatabaseError(format!("serialize package config: {e}")))?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE installed_packages SET config_json=?1, updated_at=?2 WHERE id=?3",
+            params![json, Self::now_ms(), id],
+        )
+        .map_err(|e| MiraError::DatabaseError(format!("set package config: {e}")))?;
+        Ok(())
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), MiraError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM installed_packages WHERE id = ?1", params![id])
