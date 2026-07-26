@@ -67,6 +67,8 @@ impl ModelProvider for GuardedProvider {
         self.inner.name()
     }
 
+    fn guards_degeneracy(&self) -> bool { true }
+
     async fn generate(
         &self,
         messages: &[ChatMessage],
@@ -75,13 +77,16 @@ impl ModelProvider for GuardedProvider {
         let resp = self.inner.generate(messages, options).await?;
         // Non-streaming: no incremental abort possible (the whole reply already
         // arrived), but still gate the fan-out — a degenerate reply must not be
-        // returned as a normal result, and it counts as a provider error.
-        if is_degenerate(&resp.content, &self.cfg) {
+        // returned as a normal result, and it counts as a provider error. Inspect
+        // BOTH channels: a reasoning model can degenerate entirely in its thinking
+        // stream (empty `content`, garbage in `reasoning_content`).
+        if response_is_degenerate(&resp.content, resp.reasoning.as_deref(), &self.cfg) {
             warn!(
-                "degeneracy guard: provider '{}' returned degenerate output ({} chars); \
-                 treating as provider error",
+                "degeneracy guard: provider '{}' returned degenerate output \
+                 (content {} chars, reasoning {} chars); treating as provider error",
                 self.inner.name(),
-                resp.content.len()
+                resp.content.len(),
+                resp.reasoning.as_deref().map_or(0, str::len),
             );
             return Err(Self::tripped_error());
         }
@@ -129,16 +134,19 @@ impl ModelProvider for GuardedProvider {
         }
 
         // Inner finished and dropped its sender. Collect its result; also catch a
-        // reply that only looks degenerate in aggregate (e.g. it hit the cap
-        // before the sliding window tripped).
+        // reply that only looks degenerate in aggregate — the sliding window may
+        // not have tripped, OR (crucially) the degeneracy was entirely in the
+        // REASONING channel, which providers like openai_compat accumulate off the
+        // `on_token` stream and return in `resp.reasoning` with empty `content`.
         match handle.await {
             Ok(Ok(resp)) => {
-                if is_degenerate(&resp.content, &self.cfg) {
+                if response_is_degenerate(&resp.content, resp.reasoning.as_deref(), &self.cfg) {
                     warn!(
-                        "degeneracy guard: provider '{}' produced degenerate output ({} chars); \
-                         treating as provider error",
+                        "degeneracy guard: provider '{}' produced degenerate output \
+                         (content {} chars, reasoning {} chars); treating as provider error",
                         self.inner.name(),
-                        resp.content.len()
+                        resp.content.len(),
+                        resp.reasoning.as_deref().map_or(0, str::len),
                     );
                     return Err(Self::tripped_error());
                 }
@@ -182,6 +190,19 @@ impl DegeneracyDetector {
         self.checked_at = full.len();
         is_degenerate(full, &self.cfg)
     }
+}
+
+/// True if EITHER the visible `content` or the model's `reasoning` channel is
+/// degenerate. A reasoning model can go degenerate entirely inside its thinking
+/// stream — thousands of repeated tokens in `reasoning_content` with EMPTY
+/// `content` (observed live: ornith-1.0-35b streamed 8192 "?" in reasoning) —
+/// which a content-only check misses. Both channels must count.
+pub fn response_is_degenerate(
+    content: &str,
+    reasoning: Option<&str>,
+    cfg: &DegeneracyGuardConfig,
+) -> bool {
+    is_degenerate(content, cfg) || reasoning.is_some_and(|r| is_degenerate(r, cfg))
 }
 
 /// Pure degeneracy test over the tail window of `text`. Token-level AND
@@ -384,6 +405,72 @@ mod tests {
         let g = guard(inner, DegeneracyGuardConfig::default());
         let r = g.generate(&[ChatMessage::user("hi")], &GenerationOptions::default()).await;
         assert!(r.is_err(), "degenerate non-streamed reply must return Err");
+    }
+
+    /// A mock whose degeneracy lives ENTIRELY in the reasoning channel: empty
+    /// content, garbage in resp.reasoning, and — like openai_compat — it does NOT
+    /// forward reasoning through on_token. Reproduces the live ornith-1.0-35b
+    /// failure (8192 "?" in reasoning_content, empty content).
+    struct ReasoningOnlyProvider {
+        reasoning: String,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ReasoningOnlyProvider {
+        fn name(&self) -> &str { "reasoning-mock" }
+        async fn generate(
+            &self, _m: &[ChatMessage], _o: &GenerationOptions,
+        ) -> Result<GenerationResponse, crate::MiraError> {
+            Ok(resp_reasoning(self.reasoning.clone()))
+        }
+        async fn generate_stream(
+            &self, _m: &[ChatMessage], _o: &GenerationOptions,
+            _on_token: &mut (dyn FnMut(String) + Send),
+        ) -> Result<GenerationResponse, crate::MiraError> {
+            // Nothing forwarded to on_token (content stream empty); the garbage
+            // comes back only in resp.reasoning.
+            Ok(resp_reasoning(self.reasoning.clone()))
+        }
+        async fn health_check(&self) -> bool { true }
+    }
+
+    fn resp_reasoning(reasoning: String) -> GenerationResponse {
+        GenerationResponse {
+            content: String::new(),
+            tool_calls: None,
+            reasoning: Some(reasoning),
+            usage: TokenUsage::default(),
+            provider_id: ProviderId::Local("mock".into()),
+            model_name: "mock".into(),
+            fallback: None,
+        }
+    }
+
+    #[test]
+    fn response_is_degenerate_checks_both_channels() {
+        let c = cfg();
+        assert!(response_is_degenerate("", Some(&"?".repeat(1000)), &c), "reasoning-only degeneracy");
+        assert!(response_is_degenerate(&"/".repeat(1000), None, &c), "content-only degeneracy");
+        assert!(!response_is_degenerate("a normal short answer", Some("brief reasoning"), &c), "clean");
+    }
+
+    #[tokio::test]
+    async fn guard_trips_on_degenerate_reasoning_with_empty_content() {
+        // The exact live failure: repeated tokens entirely in reasoning_content
+        // with EMPTY content. Both the non-streaming and streaming paths must now
+        // treat it as a tripped turn (provider error), not pass it through.
+        let inner = Arc::new(ReasoningOnlyProvider { reasoning: "?".repeat(2000) });
+        let g = guard(inner, DegeneracyGuardConfig::default());
+        assert!(
+            g.generate(&[ChatMessage::user("hi")], &GenerationOptions::default()).await.is_err(),
+            "non-streaming generate must trip on degenerate reasoning",
+        );
+        let mut on_tok = |_t: String| {};
+        assert!(
+            g.generate_stream(&[ChatMessage::user("hi")], &GenerationOptions::default(), &mut on_tok)
+                .await.is_err(),
+            "streaming final check must trip on degenerate reasoning (empty content)",
+        );
     }
 
     #[tokio::test]

@@ -187,6 +187,23 @@ fn add_unique(name: &str, out: &mut Vec<String>, seen: &mut HashSet<String>) {
     }
 }
 
+/// The STABLE core tool set alone: pool names matching any `core_tools` glob, in
+/// pool order. Deterministic — no query/embeddings — so it is byte-stable
+/// turn-to-turn. Used as the cacheable-prefix toolset under prompt-cache (b#3):
+/// ship this small stable set + `find_tools`, so the prefix stays cached AND the
+/// model isn't handed all ~100 tools, pulling in anything else on demand. This is
+/// the core subset of [`select_tools`] without the semantic/sticky parts.
+pub fn core_tools_only(all_names: &[String], cfg: &ToolSelectionConfig) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for name in all_names {
+        if cfg.core_tools.iter().any(|p| glob_match(p, name)) {
+            add_unique(name, &mut out, &mut seen);
+        }
+    }
+    out
+}
+
 /// Compute the active tool set for a turn: **core ∪ semantic-topK ∪ sticky**.
 /// `query_emb` is the embedding of the user's message. Pure + deterministic
 /// given its inputs. Returns deduped tool names (the caller passes them as
@@ -261,6 +278,22 @@ mod tests {
         // Nothing more to load → no hint (avoids a false "N more available").
         assert!(find_tools_hint(120, 120).is_none());
         assert!(find_tools_hint(120, 8).is_none()); // loaded > total → saturates to None
+    }
+
+    #[test]
+    fn core_tools_only_is_stable_glob_matched_and_excludes_non_core() {
+        let pool: Vec<String> = ["memory_read", "memory_write", "wiki_read", "now", "image_generate", "home_assistant"]
+            .iter().map(|s| s.to_string()).collect();
+        let c = cfg(&["memory_*", "wiki_*", "now"], 8, 0.3);
+        let core = core_tools_only(&pool, &c);
+        // Globs expanded, in pool order.
+        assert_eq!(core, vec!["memory_read", "memory_write", "wiki_read", "now"]);
+        // Deterministic — same input → identical output (this is what makes the
+        // cached prefix byte-stable turn to turn).
+        assert_eq!(core_tools_only(&pool, &c), core);
+        // Non-core tools are excluded — the model reaches them via find_tools.
+        assert!(!core.contains(&"image_generate".to_string()));
+        assert!(!core.contains(&"home_assistant".to_string()));
     }
 
     #[test]

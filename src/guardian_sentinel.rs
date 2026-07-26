@@ -458,7 +458,7 @@ async fn llm_triage(
     let fut = crate::agent::tool_loop::run_tool_loop_with_context(
         &provider, &tools, &mut messages, &opts,
         &crate::agent::tool_loop::ToolMode::Auto, 4, &tx,
-        Some(allowed.as_slice()), &inject, crate::agent::tool_loop::ToolEventCtx::NONE, None, None,
+        Some(allowed.as_slice()), &inject, crate::agent::tool_loop::ToolEventCtx::NONE, None, None, 0,
     );
     let out = match tokio::time::timeout(std::time::Duration::from_secs(LLM_TRIAGE_TIMEOUT_SECS), fut).await {
         Ok(Ok((text, _usage))) if !text.trim().is_empty() => Some(text.trim().to_string()),

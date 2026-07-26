@@ -156,6 +156,7 @@ impl WorkerTask for NamedAgentExecutor {
             ToolEventCtx::NONE,
             None, // named agents use a fixed toolset; no progressive disclosure
             None, // …and therefore no find_tools pool
+            0,    // no tool-result clamp on this path
         )
         .await;
 

@@ -272,6 +272,13 @@ struct StreamDelta {
 pub struct OpenAiCompatClient {
     http:   Client,
     config: OpenAiCompatConfig,
+    /// Degenerate-output guard applied to the REASONING channel during streaming.
+    /// Reasoning deltas are accumulated off the `on_token` stream (so they don't
+    /// leak into the answer UI), which means the outer `GuardedProvider` — which
+    /// only sees `on_token` — can't watch them. We watch them here and abort the
+    /// stream early on a degenerate thinking run. `None` = no guard (health
+    /// probes and tests leave it unset). See design-docs/degenerate-output-guard.md.
+    degeneracy: Option<crate::config::DegeneracyGuardConfig>,
 }
 
 impl OpenAiCompatClient {
@@ -290,7 +297,14 @@ impl OpenAiCompatClient {
             "/v1"
         };
         config.base_url = crate::providers::normalize_openai_base_url(&config.base_url, canonical);
-        Self { http, config }
+        Self { http, config, degeneracy: None }
+    }
+
+    /// Watch the reasoning stream for degeneracy (see the field docs). Set on the
+    /// real inference chain; left unset for catalog/health probes.
+    pub fn with_degeneracy(mut self, cfg: crate::config::DegeneracyGuardConfig) -> Self {
+        self.degeneracy = Some(cfg);
+        self
     }
 
     pub fn provider_name(&self) -> &str { &self.config.provider_name }
@@ -483,6 +497,12 @@ impl OpenAiCompatClient {
         let mut usage     = TokenUsage::default();
         let mut line_buf  = String::new();
         let mut stream    = response.bytes_stream();
+        // Watch the reasoning channel for degeneracy — it never reaches `on_token`,
+        // so the outer GuardedProvider can't see it. Trip aborts the stream early
+        // (dropping it frees the backend slot) instead of running to max_tokens.
+        let mut r_detector = self.degeneracy.clone()
+            .filter(|c| c.enabled)
+            .map(crate::providers::degeneracy::DegeneracyDetector::new);
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| crate::MiraError::ProviderError(
@@ -512,6 +532,18 @@ impl OpenAiCompatClient {
                     // detail page to render as collapsible context.
                     if let Some(rc) = choice.delta.reasoning_content {
                         reasoning.push_str(&rc);
+                        if let Some(d) = r_detector.as_mut() {
+                            if d.tripped(&reasoning) {
+                                warn!("{}: degenerate reasoning stream ({} chars); aborting \
+                                       instead of running to the token cap",
+                                      self.config.provider_name, reasoning.len());
+                                return Err(crate::MiraError::ProviderError(
+                                    "degenerate output detected — the model produced \
+                                     pathologically repetitive reasoning; generation was aborted. \
+                                     The model backend may be unhealthy (e.g. out of memory)."
+                                        .to_string()));
+                            }
+                        }
                     }
                 }
                 if let Some(u) = stream_resp.usage {

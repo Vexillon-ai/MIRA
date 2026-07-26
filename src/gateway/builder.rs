@@ -268,6 +268,9 @@ impl GatewayBuilder {
         } else {
             warn!("Provider chain unhealthy at startup — model server may not be running yet");
         }
+        // Guardrail: warn if the context budget exceeds the local model's loaded
+        // window (best-effort; bounded by the provider HTTP timeout).
+        warn_on_context_window_over_model(&config).await;
 
         // ── Auth DB (moved ahead of Tools so onboarding tools
         // can be registered with a live auth service) ───────────────────────
@@ -1840,7 +1843,7 @@ pub(crate) fn build_provider_chain(
                         timeout_secs:  $cfg.timeout_secs,
                         auth_header:   AuthHeader::Bearer,
                         extra_headers: vec![],
-                    });
+                    }).with_degeneracy(config.agent.degeneracy_guard.clone());
                     providers.push(($slug, Box::new(client)));
                     info!("Provider: {} registered (model={})", $slug, $cfg.default_model);
                 }
@@ -1926,7 +1929,7 @@ pub(crate) fn build_provider_chain(
                     timeout_secs:  cc.timeout_secs,
                     auth_header:   auth,
                     extra_headers: vec![],
-                });
+                }).with_degeneracy(config.agent.degeneracy_guard.clone());
                 providers.push(("openai_compat", Box::new(client)));
                 info!("Provider: openai_compat '{}' registered (url={}, model={})",
                       cc.name, cc.base_url, cc.default_model);
@@ -2010,6 +2013,63 @@ pub(crate) fn build_provider_chain(
     Ok(crate::providers::degeneracy::guard(chain, config.agent.degeneracy_guard.clone()))
 }
 
+/// Startup guardrail: warn if MIRA's context budget (`agent.context_length_tokens`)
+/// exceeds the primary LOCAL model's ACTUALLY-loaded context window — which lets
+/// MIRA overfill the model on longer conversations, causing the mid-conversation
+/// truncation/degeneration a mismatched config produces (the ROCm-era "8K limit"
+/// was exactly this: MIRA budgeting to 100K against a model loaded at 8K).
+/// Best-effort + local-only; silent if the model isn't loaded or the backend is
+/// unreachable. Covers LM Studio (`/api/v0/models` `loaded_context_length`) and
+/// Ollama (`/api/ps` `context_length`; Ollama's default `num_ctx` is a small
+/// 2048/4096 unless configured, so this catches a very common trap).
+pub async fn warn_on_context_window_over_model(config: &MiraConfig) {
+    let window = config.agent.context_length_tokens;
+    if window == 0 {
+        return; // legacy fixed-turn window — not budgeting to an absolute number
+    }
+    let (provider, model, loaded) = match config.primary_provider.as_str() {
+        "lmstudio" => {
+            let lm = &config.providers.lmstudio;
+            if lm.default_model.is_empty() { return; }
+            let probe = crate::providers::lmstudio::LmStudioProvider::new(
+                lm.url.clone(), lm.default_model.clone());
+            ("LM Studio", lm.default_model.clone(), probe.fetch_loaded_context(&lm.default_model).await)
+        }
+        "ollama" => {
+            let ol = &config.providers.ollama;
+            if ol.default_model.is_empty() { return; }
+            let probe = crate::providers::local::OllamaProvider::new(
+                ol.url.clone(), ol.default_model.clone());
+            ("Ollama", ol.default_model.clone(), probe.fetch_loaded_context(&ol.default_model).await)
+        }
+        _ => return, // cloud providers manage their own context window
+    };
+    match window_fit(window, loaded) {
+        WindowFit::Exceeds { window, loaded } => warn!(
+            "context: agent.context_length_tokens={window} EXCEEDS the loaded context of model \
+             '{model}' in {provider} ({loaded}). MIRA can overfill the model on longer \
+             conversations → truncation/degeneration. Lower context_length_tokens to ≤{loaded}, \
+             or raise the model's loaded context in {provider}."),
+        WindowFit::Fits(loaded) => info!(
+            "context: budget {window} ≤ {provider} model '{model}' loaded context {loaded} — OK."),
+        WindowFit::Unknown => tracing::debug!(
+            "context guardrail: couldn't read {provider} loaded context for '{model}' \
+             (model not loaded / API unavailable) — skipping."),
+    }
+}
+
+/// Pure verdict for the context guardrail (testable without a live backend):
+/// does MIRA's budget `window` fit the model's `loaded` context? `Fits` on equal.
+#[derive(Debug, PartialEq)]
+pub(crate) enum WindowFit { Fits(usize), Exceeds { window: usize, loaded: usize }, Unknown }
+pub(crate) fn window_fit(window: usize, loaded: Option<usize>) -> WindowFit {
+    match loaded {
+        Some(l) if window > l => WindowFit::Exceeds { window, loaded: l },
+        Some(l) => WindowFit::Fits(l),
+        None => WindowFit::Unknown,
+    }
+}
+
 /// Build a SINGLE provider by slug for a one-shot per-turn override (the web
 /// chat model/provider picker). Reuses the same construction as
 /// [`build_provider_chain`] so **every** provider — not just a hand-picked few —
@@ -2043,7 +2103,7 @@ pub(crate) fn build_single_provider(
         Arc::new(OpenAiCompatClient::new(OpenAiCompatConfig {
             provider_name: name.into(), base_url, api_key: key, model,
             timeout_secs: timeout, auth_header: AuthHeader::Bearer, extra_headers: vec![],
-        }))
+        }).with_degeneracy(config.agent.degeneracy_guard.clone()))
     };
 
     let out: P = match slug {
@@ -2080,7 +2140,12 @@ pub(crate) fn build_single_provider(
             compat("xai", keyed(&c.api_key)?, c.base_url.clone(), model_of(&c.default_model), c.timeout_secs) }
         _ => return None,
     };
-    Some(out)
+    // Wrap the single provider in the degenerate-output guard, exactly as
+    // `build_provider_chain` does for the main chain. Without this, a per-turn
+    // model override (web UI model picker → chat.rs) runs UNGUARDED — the very
+    // path where a user experimenting with models is most likely to hit a wedged
+    // one, and with no failover to catch it. Inert when the guard is disabled.
+    Some(crate::providers::degeneracy::guard(out, config.agent.degeneracy_guard.clone()))
 }
 
 /// The ordered fallback slugs to use as the automatic-failover tail, given the
@@ -3169,6 +3234,34 @@ mod failover_policy_tests {
         assert!(build_single_provider(&c, "gemini", None).is_some());
         // Unknown slug → None.
         assert!(build_single_provider(&c, "nope", None).is_none());
+    }
+
+    #[test]
+    fn context_window_guardrail_flags_only_over_budget() {
+        use super::{window_fit, WindowFit};
+        // Equal or under the model's loaded context → fits (the live case: 100K ≤ 128K).
+        assert_eq!(window_fit(8192, Some(8192)), WindowFit::Fits(8192));
+        assert_eq!(window_fit(100_000, Some(128_256)), WindowFit::Fits(128_256));
+        // Over the loaded context → flagged (the ROCm-era 100K-budget-vs-8K-model trap).
+        assert_eq!(window_fit(100_000, Some(8192)), WindowFit::Exceeds { window: 100_000, loaded: 8192 });
+        // Ollama's small default num_ctx trap.
+        assert_eq!(window_fit(4096, Some(2048)), WindowFit::Exceeds { window: 4096, loaded: 2048 });
+        // Model not loaded / API unavailable → unknown (degrade quietly, no false alarm).
+        assert_eq!(window_fit(100_000, None), WindowFit::Unknown);
+    }
+
+    #[test]
+    fn single_provider_override_is_wrapped_in_the_degeneracy_guard() {
+        // F4: the per-turn model-override path must apply the degeneracy guard
+        // (like build_provider_chain), so a wedged model picked for one message is
+        // still caught. `guard()` reports "guarded" via name() only when it wraps.
+        let mut c = cfg();
+        c.agent.degeneracy_guard.enabled = true;
+        let p = build_single_provider(&c, "lmstudio", None).expect("lmstudio builds");
+        assert!(p.guards_degeneracy(), "override provider must be degeneracy-guarded when enabled");
+        // Disabled → the guard is inert (returns the inner provider), still builds.
+        c.agent.degeneracy_guard.enabled = false;
+        assert!(build_single_provider(&c, "lmstudio", None).is_some());
     }
 
     #[test]

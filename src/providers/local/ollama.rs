@@ -59,6 +59,34 @@ impl OllamaProvider {
     
     pub fn model_name(&self) -> &str { &self.model }
 
+    /// Best-effort: the loaded context length (`num_ctx`) of `model` from Ollama's
+    /// `/api/ps` (running models — recent Ollama reports `context_length` there).
+    /// Returns `None` if the model isn't running, the field is absent (older
+    /// Ollama), or the API is unavailable. Ollama defaults `num_ctx` to a SMALL
+    /// value (often 2048/4096) unless configured, so this is an important overfill
+    /// check for the startup guardrail.
+    pub async fn fetch_loaded_context(&self, model: &str) -> Option<usize> {
+        let url = format!("{}/api/ps", self.url.trim_end_matches('/'));
+        #[derive(serde::Deserialize)]
+        struct Resp { #[serde(default)] models: Vec<Row> }
+        #[derive(serde::Deserialize)]
+        struct Row {
+            #[serde(default)] name: String,
+            #[serde(default)] model: String,
+            #[serde(default)] context_length: Option<usize>,
+        }
+        let resp = self.client.get(&url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let parsed: Resp = resp.json().await.ok()?;
+        parsed
+            .models
+            .into_iter()
+            .find(|r| r.name == model || r.model == model)
+            .and_then(|r| r.context_length)
+    }
+
     /// Get the full API URL
     fn api_url(&self) -> String {
         format!("{}/api/chat", self.url.trim_end_matches('/'))

@@ -87,6 +87,13 @@ pub trait ModelProvider: Send + Sync {
         Ok(resp)
     }
 
+    /// Whether this provider wraps generation in the degenerate-output guard.
+    /// Default `false`; only [`degeneracy::GuardedProvider`] overrides it. Lets
+    /// callers/tests assert the guard is applied on a given construction path
+    /// (e.g. the per-turn model-override path) without affecting `name()`,
+    /// logging, or failover.
+    fn guards_degeneracy(&self) -> bool { false }
+
     /// Return `true` if the provider is reachable and ready to serve requests.
     async fn health_check(&self) -> bool;
 }

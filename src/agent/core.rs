@@ -251,6 +251,23 @@ impl AgentCore {
     // (local fastembed, ~ms), keeps the tool-embedding index current, and
     // runs the semantic + core selector. Returns `None` (→ all tools) when
     // embeddings are unavailable so chat never breaks.
+    /// The effective context window (tokens) to budget to: an explicit
+    /// `context_length_tokens` wins; else, for a LOCAL provider, the conservative
+    /// local default; else 0 (legacy fixed-turn window). Single source of truth
+    /// for both the history budget and the RAG cap (b#4).
+    fn effective_context_tokens(&self) -> usize {
+        let acfg = &self.config.agent;
+        if acfg.context_length_tokens > 0 {
+            acfg.context_length_tokens
+        } else if crate::gateway::builder::provider_is_local(
+            &self.config.primary_provider, &self.config)
+        {
+            acfg.local_effective_context_tokens
+        } else {
+            0
+        }
+    }
+
     async fn select_adaptive_tools(
         &self,
         input:    &str,
@@ -909,6 +926,12 @@ impl AgentCore {
         // providers + local KV cache). It's folded into the current user
         // message instead (below).
         let cache_prefix = self.config.agent.prompt_cache_enabled;
+        // b#4: cap the injected RAG (memory + wiki) to a fraction of the context
+        // window, so retrieval can't dominate the prompt (top_k memories + topic
+        // expansion + wiki can be large). Curated wiki keeps priority over
+        // auto-extracted memory when trimming. 0 window (legacy) → no cap.
+        let (wiki_context, memory_context) =
+            cap_rag_context(wiki_context, memory_context, self.effective_context_tokens());
         let volatile_context = format!("{wiki_context}{memory_context}");
         let sys_wiki:   &str = if cache_prefix { "" } else { wiki_context.as_str() };
         let sys_memory: &str = if cache_prefix { "" } else { memory_context.as_str() };
@@ -1008,20 +1031,45 @@ impl AgentCore {
         // model can't recall it. This keeps the prompt in the reliable-recall zone
         // AND turns compaction on for the overflow. Cloud providers left unset keep
         // the legacy fixed-turn window. See effective-vs-advertised-context.md.
-        let effective_ctx = if acfg.context_length_tokens > 0 {
-            acfg.context_length_tokens
-        } else if crate::gateway::builder::provider_is_local(
-            &self.config.primary_provider, &self.config)
-        {
-            acfg.local_effective_context_tokens
+        let effective_ctx = self.effective_context_tokens();
+        // Tool-schema tokens the request will ALSO carry (not part of `messages`).
+        // Budgeting that ignores them silently overshoots the window by the tool
+        // block — on a small local window (8K) the ~120-tool "all" set alone can
+        // exceed it, overflowing the model and degrading it to garbage output.
+        // Reserve an upper bound so history is trimmed instead of the window blown.
+        // Whether the toolset is NARROWED this turn (→ reserve the small
+        // core/adaptive set, not all ~108 tools). True when adaptive selection runs
+        // (no cache) OR the b#3 cacheable-core path applies (cache + find_tools
+        // exposed → ship the stable core set + find_tools). Only cache WITHOUT
+        // find_tools ships the full set. Must mirror the adaptive-selection gate
+        // below, or the reserve mis-prices the tools and the est/budget drift
+        // (the full set over-reserves; the narrowed set under-reserves).
+        let adaptive_narrows = acfg.tool_selection.mode == "adaptive"
+            && !context.tools_flow_restricted
+            && (!cache_prefix || acfg.tool_selection.expose_find_tools);
+        let tool_reserve = if effective_ctx > 0 && self.tool_mode != ToolMode::Disabled {
+            crate::agent::tool_loop::estimate_tool_reserve_tokens(
+                &self.tools, &acfg.tool_selection, context.allowed_tool_names.as_deref(), adaptive_narrows)
         } else {
             0
         };
+        // Loud, actionable warning when the toolset alone dominates the window —
+        // the real fix is adaptive/JIT tool selection, not a bigger window. Fires
+        // whenever the full set ships (mode!=adaptive, OR adaptive bypassed by cache).
+        if effective_ctx > 0 && tool_reserve * 2 >= effective_ctx && !adaptive_narrows {
+            warn!(
+                "context: tool schemas (~{tool_reserve} tok) are large vs the effective window \
+                 ({effective_ctx} tok); history will be minimal this turn and the prompt may still \
+                 overflow. Enable adaptive tool selection (agent.tool_selection.mode=\"adaptive\", \
+                 and note prompt_cache_enabled=true BYPASSES it) or raise the context window."
+            );
+        }
         let mut skip = if effective_ctx > 0 {
             // Cap the output reservation so a small window can't underflow the
-            // budget to zero.
+            // budget to zero. Fold the tool-schema reserve in alongside it.
             let reservation = (acfg.max_response_tokens as usize)
-                .min(effective_ctx / 4);
+                .min(effective_ctx / 4)
+                + tool_reserve;
             let budget = crate::agent::context_budget::context_budget(
                 effective_ctx, reservation, acfg.context_safety_margin_tokens);
             // Already-committed cost: system prompt + this turn's user input.
@@ -1123,7 +1171,10 @@ impl AgentCore {
         // which windowing mode ran. Paired with the real `usage` after the tool
         // loop, this lets `bench context` + logs validate the estimator and
         // measure the gain on live turns.
-        let est_input_tokens = crate::agent::tokens::estimate_messages(&messages);
+        // Honest estimate = messages + the tool-schema block the request ALSO
+        // carries (not part of `messages`). Excluding tools made this log undercount
+        // the real prompt by 10x+ on tool turns (F15) and hid where the tokens go.
+        let est_input_tokens = crate::agent::tokens::estimate_messages(&messages) + tool_reserve;
         let window_mode = if self.config.agent.context_length_tokens > 0 { "budget" } else { "fixed" };
         debug!(
             "AgentCore: session='{}' mode={} history_msgs={}/{} est_input_tokens={} messages={}",
@@ -1162,12 +1213,27 @@ impl AgentCore {
         // therefore keep the FULL tool set stable: turn 1 pays the tool tokens
         // once (cache write), every later turn reads them back at ~10% cost,
         // which beats JIT's per-turn savings on a multi-turn conversation.
-        if cache_prefix && ts_cfg.mode == "adaptive" && !context.tools_flow_restricted {
-            debug!("prompt_cache on → skipping adaptive tool selection to keep the cacheable prefix stable");
-        }
+        // Tool set for the turn. Three cases under `mode=adaptive`:
+        //  - no cache: run per-turn semantic selection (core ∪ topK ∪ sticky).
+        //  - cache + find_tools exposed (b#3): DON'T send all ~100 tools (wasteful)
+        //    and DON'T run per-turn selection (it would change the tool block every
+        //    turn and defeat the cache). Instead ship the STABLE `core_tools` set
+        //    (deterministic → byte-stable → cacheable) + `find_tools`, so the model
+        //    pulls in anything else on demand. Best of both: small, cached, recoverable.
+        //  - cache without find_tools: can't narrow safely (no recovery) → full set.
         let adaptive_allowed: Option<Vec<String>> =
-            if ts_cfg.mode == "adaptive" && !context.tools_flow_restricted && !cache_prefix {
-                self.select_adaptive_tools(input, &messages, &ts_cfg, &pool).await
+            if ts_cfg.mode == "adaptive" && !context.tools_flow_restricted {
+                if cache_prefix {
+                    if ts_cfg.expose_find_tools {
+                        let core = crate::agent::tool_select::core_tools_only(&pool, &ts_cfg);
+                        debug!("prompt_cache on → cacheable core toolset ({} of {}) + find_tools", core.len(), pool.len());
+                        Some(core)
+                    } else {
+                        None // no find_tools recovery → keep the full (cacheable) set
+                    }
+                } else {
+                    self.select_adaptive_tools(input, &messages, &ts_cfg, &pool).await
+                }
             } else {
                 None
             };
@@ -1206,6 +1272,20 @@ impl AgentCore {
             }
         }
 
+        // Normalize to a SINGLE leading system message before the request leaves
+        // MIRA. The assembly above can produce several system messages (base
+        // prompt + compaction summary + JIT-tools hint); many local chat templates
+        // accept only one (or only a leading one) and 400 otherwise, and a broken
+        // template also leaks tool-call markup into the visible reply. One place,
+        // covering every provider the tool loop then calls.
+        messages = ChatMessage::coalesce_system(&messages);
+
+        // F13: cap a single tool RESULT fed back mid-loop to ~a quarter of the
+        // window (bytes ≈ tokens × 4, so `effective_ctx` bytes ≈ effective_ctx/4
+        // tokens). The budget above is computed before the loop and can't see a
+        // large result that arrives during it; on a small local window one big
+        // result overflows the model. 0 (unbudgeted cloud/legacy) = no clamp.
+        let tool_result_cap_bytes = effective_ctx;
         let (response_text, usage) = tool_loop::run_tool_loop_with_context(
             provider,
             &self.tools,
@@ -1219,6 +1299,7 @@ impl AgentCore {
             event_ctx,
             expander,
             expand_pool,
+            tool_result_cap_bytes,
         ).await?;
 
         // ── 4. Emit Done ──────────────────────────────────────────────────────
@@ -1465,6 +1546,48 @@ fn synthesize_tool_confirmation(events: &[StreamEvent]) -> Option<String> {
 }
 
 // Join phrases as "a", "a and b", or "a, b, and c".
+/// The window fraction the injected RAG (memory + wiki) may occupy. ~1/6 leaves
+/// the rest for the system prompt, tool block, history, and the response.
+const RAG_WINDOW_DIVISOR: usize = 6;
+
+/// Truncate `s` to at most `cap` bytes on a UTF-8 char boundary.
+fn truncate_on_boundary(s: &str, cap: usize) -> &str {
+    if s.len() <= cap { return s; }
+    let mut end = cap;
+    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+    &s[..end]
+}
+
+/// Cap the combined injected RAG (wiki + memory) to ~`window/RAG_WINDOW_DIVISOR`
+/// tokens (≈4 bytes/token), so retrieval can't dominate the prompt (b#4). Curated
+/// `wiki` keeps priority over auto-extracted `memory`: wiki is filled first, then
+/// memory gets the remainder. A trimmed block gets a short notice. `window == 0`
+/// (legacy fixed-turn window) → no cap.
+fn cap_rag_context(wiki: String, memory: String, window_tokens: usize) -> (String, String) {
+    if window_tokens == 0 {
+        return (wiki, memory);
+    }
+    let cap_bytes = (window_tokens / RAG_WINDOW_DIVISOR).saturating_mul(4);
+    if wiki.len() + memory.len() <= cap_bytes {
+        return (wiki, memory);
+    }
+    // Wiki first (curated), up to the whole budget; memory takes what's left.
+    let wiki_cut = truncate_on_boundary(&wiki, cap_bytes);
+    let wiki_out = if wiki_cut.len() < wiki.len() {
+        format!("{wiki_cut}\n[…wiki context trimmed to fit the context budget…]")
+    } else {
+        wiki
+    };
+    let remaining = cap_bytes.saturating_sub(wiki_out.len());
+    let mem_cut = truncate_on_boundary(&memory, remaining);
+    let mem_out = if mem_cut.len() < memory.len() {
+        format!("{mem_cut}\n[…older/less-relevant memories trimmed to fit the context budget…]")
+    } else {
+        memory
+    };
+    (wiki_out, mem_out)
+}
+
 fn human_join(parts: &[String]) -> String {
     match parts.len() {
         0 => String::new(),
@@ -1594,6 +1717,24 @@ mod tests {
         StreamEvent::ToolResult {
             name: name.into(), output: "{}".into(), success: true, call_id: "c".into(),
         }
+    }
+
+    #[test]
+    fn cap_rag_context_bounds_combined_and_prioritizes_wiki() {
+        // window 0 → no cap (legacy fixed-turn window).
+        let (w, m) = cap_rag_context("w".repeat(1000), "m".repeat(1000), 0);
+        assert_eq!(w.len() + m.len(), 2000);
+        // Under budget → untouched. window 600 → cap = (600/6)*4 = 400 bytes.
+        let (w, m) = cap_rag_context("w".repeat(80), "m".repeat(80), 600);
+        assert_eq!((w.len(), m.len()), (80, 80));
+        // Over budget → trimmed to ~cap (+ small notice slack), wiki filled first.
+        let (w, m) = cap_rag_context("w".repeat(4000), "m".repeat(4000), 600);
+        assert!(w.len() + m.len() <= 400 + 200, "combined {} should be near cap 400", w.len() + m.len());
+        assert!(w.contains("trimmed"), "wiki was filled then trimmed");
+        // Small wiki + huge memory → wiki kept intact, memory trimmed.
+        let (w, m) = cap_rag_context("wiki".to_string(), "m".repeat(5000), 600);
+        assert_eq!(w, "wiki", "wiki under budget stays intact");
+        assert!(m.contains("trimmed") && m.len() < 5000, "memory trimmed to the remainder");
     }
 
     #[test]

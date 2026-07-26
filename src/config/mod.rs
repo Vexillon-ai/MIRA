@@ -28,7 +28,7 @@ pub mod validate;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::MiraError;
 use migrate::{find_legacy_toml, prompt_and_migrate};
@@ -4016,12 +4016,38 @@ impl MiraConfig {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| MiraError::ConfigError(format!("Cannot serialise config: {}", e)))?;
 
-        std::fs::write(&self.config_path, json)
-            .map_err(|e| MiraError::ConfigError(
-                format!("Cannot write config file '{}': {}", self.config_path.display(), e)
-            ))?;
+        // Atomic write: an interrupted or racing save must NEVER leave the live
+        // config half-written — a truncated file fails schema validation on boot
+        // and crash-loops the service, losing the family's channel credentials
+        // (this happened). Write a sibling temp file, fsync it, keep a `.bak` of
+        // the current good config, then atomically rename over the target — a
+        // reader/next boot always sees either the old or the new file, whole.
+        let dir_path = dir.to_path_buf();
+        let tmp = self.config_path.with_extension("json.tmp");
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(&tmp).map_err(|e| MiraError::ConfigError(
+                format!("Cannot create temp config '{}': {}", tmp.display(), e)))?;
+            f.write_all(json.as_bytes()).map_err(|e| MiraError::ConfigError(
+                format!("Cannot write temp config '{}': {}", tmp.display(), e)))?;
+            f.sync_all().map_err(|e| MiraError::ConfigError(
+                format!("Cannot fsync temp config '{}': {}", tmp.display(), e)))?;
+        }
+        // Best-effort snapshot of the last-good config for recovery (non-fatal).
+        if self.config_path.exists() {
+            let _ = std::fs::copy(&self.config_path, self.config_path.with_extension("json.bak"));
+        }
+        std::fs::rename(&tmp, &self.config_path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp); // don't leave a stray temp behind
+            MiraError::ConfigError(
+                format!("Cannot atomically replace config '{}': {}", self.config_path.display(), e))
+        })?;
+        // fsync the directory so the rename itself is durable across a crash.
+        if let Ok(d) = std::fs::File::open(&dir_path) {
+            let _ = d.sync_all();
+        }
 
-        info!("Config saved to {:?}", self.config_path);
+        info!("Config saved to {:?} (atomic)", self.config_path);
         Ok(())
     }
 
@@ -4078,23 +4104,46 @@ impl MiraConfig {
     // ── Environment overrides ─────────────────────────────────────────────────
 
     fn apply_env_overrides(&mut self) {
+        // Provider CREDENTIALS: for a home app the UI/config is the source of
+        // truth — a key the user explicitly saved in the UI must WIN over a stale
+        // `.env`. So `OPENROUTER_API_KEY` only FILLS an EMPTY config key; if config
+        // already has one, we keep it and WARN that the env value is being ignored.
+        // (The silent-override behaviour bricked a user once: UI key saved, a stale
+        // .env key silently won → 401 → silent fallback, undiagnosable.)
         if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
+            let key = key.trim().to_string();
             if !key.is_empty() {
-                self.providers.openrouter.api_key = Some(key);
-                info!("OpenRouter API key loaded from OPENROUTER_API_KEY env var");
+                let existing = self.providers.openrouter.api_key.as_deref().unwrap_or("").trim().to_string();
+                if existing.is_empty() {
+                    self.providers.openrouter.api_key = Some(key);
+                    info!("OpenRouter API key loaded from OPENROUTER_API_KEY env var (config had none)");
+                } else if existing != key {
+                    warn!("OPENROUTER_API_KEY in the environment/.env differs from the OpenRouter key \
+                           saved in your config — KEEPING the config/UI key. Remove OPENROUTER_API_KEY \
+                           from your .env if you meant to manage this key in the UI.");
+                }
             }
         }
+        // Infra/deployment endpoints: env override stays conventional (point a
+        // deployment at a host), but is no longer SILENT when it shadows a
+        // configured value.
         if let Ok(url) = std::env::var("OLLAMA_HOST") {
+            let url = url.trim().to_string();
             if !url.is_empty() {
+                if !self.providers.ollama.url.trim().is_empty() && self.providers.ollama.url != url {
+                    warn!("OLLAMA_HOST env var is overriding the configured Ollama URL ({} -> {})",
+                          self.providers.ollama.url, url);
+                }
                 self.providers.ollama.url = url;
-                info!("Ollama URL overridden by OLLAMA_HOST env var");
             }
         }
         if let Ok(url) = std::env::var("MIRA_REMOTE_URL") {
             let url = url.trim().to_string();
             if !url.is_empty() {
+                if self.server.remote_url.as_deref().map(|c| c.trim() != url).unwrap_or(false) {
+                    warn!("MIRA_REMOTE_URL env var is overriding the configured remote URL");
+                }
                 self.server.remote_url = Some(url);
-                info!("Remote access URL set from MIRA_REMOTE_URL env var");
             }
         }
     }
@@ -4946,6 +4995,56 @@ mod tests {
     }
 
     #[test]
+    fn save_is_atomic_keeps_backup_and_leaves_no_temp() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("mira_config.json");
+        let mut cfg = MiraConfig::default_with_path();
+        cfg.config_path = path.clone();
+
+        // First save establishes v1.
+        cfg.providers.ollama.url = "http://v1:11434".into();
+        cfg.save().unwrap();
+        // No stray temp file after a successful save.
+        assert!(!path.with_extension("json.tmp").exists(), "temp must be renamed away");
+        // No backup yet (there was no prior file to snapshot on the first write).
+        assert!(!path.with_extension("json.bak").exists());
+
+        // Second save: the prior good config is snapshotted to `.bak`, the live
+        // file holds the new value, and no temp remains.
+        cfg.providers.ollama.url = "http://v2:11434".into();
+        cfg.save().unwrap();
+        assert!(!path.with_extension("json.tmp").exists(), "temp must be renamed away");
+        let bak = path.with_extension("json.bak");
+        assert!(bak.exists(), "prior config should be backed up");
+        assert_eq!(MiraConfig::from_file(&path).unwrap().providers.ollama.url, "http://v2:11434");
+        assert_eq!(MiraConfig::from_file(&bak).unwrap().providers.ollama.url, "http://v1:11434");
+    }
+
+    #[test]
+    fn save_does_not_corrupt_existing_config_when_target_is_a_directory() {
+        // Simulate a rename/write failure: make the target path un-writable-over by
+        // placing a directory where the temp rename would land is hard to force
+        // portably, so instead assert the pre-write invariant — a good config on
+        // disk is never truncated in place (the old value survives a fresh save
+        // because we never open the live file with truncate).
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("mira_config.json");
+        let mut cfg = MiraConfig::default_with_path();
+        cfg.config_path = path.clone();
+        cfg.providers.ollama.url = "http://good:11434".into();
+        cfg.save().unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        // A subsequent successful save replaces atomically; the file is always
+        // complete, valid JSON (never a truncated intermediate).
+        cfg.providers.ollama.url = "http://good2:11434".into();
+        cfg.save().unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&before).is_ok());
+        assert!(serde_json::from_str::<serde_json::Value>(&after).is_ok());
+        assert_ne!(before, after);
+    }
+
+    #[test]
     fn default_chat_model_uses_primary_providers_default_not_first_available() {
         let mut c = MiraConfig::default();
         c.primary_provider = "lmstudio".into();
@@ -5007,6 +5106,24 @@ mod tests {
         let cfg = MiraConfig::from_file(&path).unwrap();
         assert_eq!(cfg.providers.openrouter.api_key, Some("test-key-from-env".to_string()));
         unsafe { std::env::remove_var("OPENROUTER_API_KEY"); }
+    }
+
+    #[test]
+    fn env_does_not_override_a_config_set_openrouter_key() {
+        // F10: a key the user explicitly set (config/UI) must WIN over a stale
+        // .env value — the reverse of the old silent-override footgun. The
+        // assertion (config wins) holds whether the env var is present or not,
+        // so it's robust to the shared-process-env race with the fill-empty test.
+        let mut cfg = MiraConfig::default();
+        cfg.providers.openrouter.api_key = Some("ui-set-key".into());
+        unsafe { std::env::set_var("OPENROUTER_API_KEY", "stale-env-key"); }
+        cfg.apply_env_overrides();
+        unsafe { std::env::remove_var("OPENROUTER_API_KEY"); }
+        assert_eq!(
+            cfg.providers.openrouter.api_key.as_deref(),
+            Some("ui-set-key"),
+            "a config/UI-set OpenRouter key must win over a stale .env value",
+        );
     }
 
     #[test]

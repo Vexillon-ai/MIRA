@@ -296,6 +296,37 @@ impl LmStudioProvider {
         Ok(parsed.data.into_iter().map(|r| crate::providers::catalog::ModelEntry::id_only(r.id)).collect())
     }
 
+    /// Best-effort: the ACTUALLY-loaded context length (`n_ctx`) of `model`, from
+    /// LM Studio's NATIVE API (`/api/v0/models`, which reports
+    /// `loaded_context_length` — the OpenAI `/v1/models` does not). Returns `None`
+    /// on any error or if the model isn't loaded, so the caller degrades quietly.
+    /// Feeds the startup guardrail that warns when MIRA's context budget exceeds
+    /// what the model can hold (→ overfill → mid-conversation truncation).
+    pub async fn fetch_loaded_context(&self, model: &str) -> Option<usize> {
+        // The native API lives at the server root, not under `/v1`.
+        let base = self.base_url.trim_end_matches('/');
+        let root = base.strip_suffix("/v1").unwrap_or(base);
+        let url = format!("{root}/api/v0/models");
+        #[derive(serde::Deserialize)]
+        struct Resp { data: Vec<Row> }
+        #[derive(serde::Deserialize)]
+        struct Row {
+            id: String,
+            #[serde(default)] state: String,
+            #[serde(default)] loaded_context_length: Option<usize>,
+        }
+        let resp = self.client.get(&url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let parsed: Resp = resp.json().await.ok()?;
+        parsed
+            .data
+            .into_iter()
+            .find(|r| r.id == model && r.state == "loaded")
+            .and_then(|r| r.loaded_context_length)
+    }
+
     fn api_url(&self) -> String {
         format!("{}/chat/completions", self.base_url)
     }

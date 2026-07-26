@@ -74,6 +74,37 @@ pub enum AttachmentKind {
 }
 
 impl ChatMessage {
+    /// Merge every `System` message into a SINGLE leading system message
+    /// (contents joined by a blank line), preserving the order of all non-system
+    /// messages. No-op when there are 0 or 1 system messages.
+    ///
+    /// MIRA can legitimately assemble several system messages in one turn — the
+    /// base prompt, the Phase-2 compaction summary, and the JIT-tools hint — but
+    /// many local chat templates accept only ONE system message (or only a
+    /// *leading* one) and return HTTP 400 otherwise. This normalizes to the shape
+    /// every template accepts, right before the request goes out. Empty/whitespace
+    /// system contents are dropped from the merge (and if they were the only
+    /// system messages, no system message is emitted).
+    pub fn coalesce_system(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
+        let sys_count = msgs.iter().filter(|m| m.role == MessageRole::System).count();
+        if sys_count <= 1 {
+            return msgs.to_vec();
+        }
+        let merged = msgs
+            .iter()
+            .filter(|m| m.role == MessageRole::System)
+            .map(|m| m.content.trim())
+            .filter(|c| !c.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut out = Vec::with_capacity(msgs.len() - sys_count + 1);
+        if !merged.is_empty() {
+            out.push(ChatMessage::system(merged));
+        }
+        out.extend(msgs.iter().filter(|m| m.role != MessageRole::System).cloned());
+        out
+    }
+
     /// Create a new system message
     pub fn system(content: impl Into<String>) -> Self {
         Self {
@@ -171,6 +202,80 @@ impl ConversationContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn roles(msgs: &[ChatMessage]) -> Vec<MessageRole> {
+        msgs.iter().map(|m| m.role.clone()).collect()
+    }
+    fn shape(msgs: &[ChatMessage]) -> Vec<(MessageRole, String)> {
+        msgs.iter().map(|m| (m.role.clone(), m.content.clone())).collect()
+    }
+
+    #[test]
+    fn coalesce_merges_multiple_leading_system_messages_into_one() {
+        // The real assembly: base + compaction + jit-hint, then history + user.
+        let msgs = vec![
+            ChatMessage::system("BASE"),
+            ChatMessage::system("COMPACTION"),
+            ChatMessage::system("HINT"),
+            ChatMessage::user("hi"),
+            ChatMessage::assistant("hello"),
+            ChatMessage::user("again"),
+        ];
+        let out = ChatMessage::coalesce_system(&msgs);
+        // Exactly one system message, and it's leading.
+        assert_eq!(out.iter().filter(|m| m.role == MessageRole::System).count(), 1);
+        assert_eq!(out[0].role, MessageRole::System);
+        assert_eq!(out[0].content, "BASE\n\nCOMPACTION\n\nHINT");
+        // Non-system messages keep their order and identity.
+        assert_eq!(roles(&out[1..]), vec![MessageRole::User, MessageRole::Assistant, MessageRole::User]);
+        assert_eq!(out[1].content, "hi");
+        assert_eq!(out[3].content, "again");
+    }
+
+    #[test]
+    fn coalesce_is_noop_for_zero_or_one_system() {
+        let one = vec![ChatMessage::system("S"), ChatMessage::user("u")];
+        assert_eq!(shape(&ChatMessage::coalesce_system(&one)), shape(&one));
+        let none = vec![ChatMessage::user("u"), ChatMessage::assistant("a")];
+        assert_eq!(shape(&ChatMessage::coalesce_system(&none)), shape(&none));
+        assert!(ChatMessage::coalesce_system(&[]).is_empty());
+    }
+
+    #[test]
+    fn coalesce_collapses_a_non_leading_system_into_the_leading_one() {
+        // Defensive: even a stray mid-conversation system message is folded to the front.
+        let msgs = vec![
+            ChatMessage::system("A"),
+            ChatMessage::user("u"),
+            ChatMessage::system("B"),
+        ];
+        let out = ChatMessage::coalesce_system(&msgs);
+        assert_eq!(out.iter().filter(|m| m.role == MessageRole::System).count(), 1);
+        assert_eq!(out[0].content, "A\n\nB");
+        assert_eq!(roles(&out), vec![MessageRole::System, MessageRole::User]);
+    }
+
+    #[test]
+    fn coalesce_drops_empty_system_contents_and_emits_none_if_all_empty() {
+        // Whitespace-only system parts are dropped from the merge.
+        let mixed = vec![
+            ChatMessage::system("  "),
+            ChatMessage::system("REAL"),
+            ChatMessage::user("u"),
+        ];
+        let out = ChatMessage::coalesce_system(&mixed);
+        assert_eq!(out[0].content, "REAL");
+        assert_eq!(out.iter().filter(|m| m.role == MessageRole::System).count(), 1);
+        // All-empty systems → no system message at all.
+        let all_empty = vec![
+            ChatMessage::system(""),
+            ChatMessage::system("   "),
+            ChatMessage::user("u"),
+        ];
+        let out2 = ChatMessage::coalesce_system(&all_empty);
+        assert_eq!(out2.iter().filter(|m| m.role == MessageRole::System).count(), 0);
+        assert_eq!(roles(&out2), vec![MessageRole::User]);
+    }
 
     #[test]
     fn test_chat_message_constructors() {

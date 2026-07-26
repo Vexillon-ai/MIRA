@@ -99,7 +99,7 @@ pub async fn run_tool_loop(
 ) -> Result<(String, TokenUsage), MiraError> {
     run_tool_loop_with_context(
         provider, tools, messages, options, mode, max_rounds, tx,
-        None, &serde_json::Map::new(), ToolEventCtx::NONE, None, None,
+        None, &serde_json::Map::new(), ToolEventCtx::NONE, None, None, 0,
     ).await
 }
 
@@ -126,6 +126,12 @@ pub async fn run_tool_loop_with_context(
     // Candidate pool `find_tools` may draw from (the user's security
     // allow-list). `None` → the whole registry. Ignored unless `expander` is set.
     expand_pool:        Option<&[String]>,
+    // Max bytes of a single tool RESULT fed back to the model (0 = no clamp).
+    // The context budget is computed before this loop and can't see a large
+    // result that arrives mid-loop; on a small local window one big result
+    // overflows the model. The UI still receives the full result — only the copy
+    // returned to the model is clamped. See `clamp_tool_result`.
+    tool_result_cap_bytes: usize,
 ) -> Result<(String, TokenUsage), MiraError> {
 
     if *mode == ToolMode::Disabled || tools.is_empty() {
@@ -287,7 +293,7 @@ pub async fn run_tool_loop_with_context(
                     let _ = tx.send(StreamEvent::ToolResult {
                         name: tc.name.clone(), output: output.clone(), success: true, call_id: tc.call_id.clone(),
                     }).await;
-                    messages.push(ChatMessage::tool(output, tc.call_id.clone()));
+                    messages.push(ChatMessage::tool(clamp_tool_result(output, tool_result_cap_bytes), tc.call_id.clone()));
                     continue;
                 }
                 let merged = merge_injected_args(tc.arguments.clone(), inject_args);
@@ -310,16 +316,17 @@ pub async fn run_tool_loop_with_context(
                     call_id: tc.call_id.clone(),
                 }).await;
 
-                messages.push(ChatMessage::tool(output, tc.call_id.clone()));
+                messages.push(ChatMessage::tool(clamp_tool_result(output, tool_result_cap_bytes), tc.call_id.clone()));
             }
             continue; // next round
         }
 
-        // ── Try Hermes / Qwen-style `<tool_call>` XML in content ──────────
-        // Models like Qwen2.5/3 and Hermes-2-Pro emit function calls as
+        // ── Try Qwen-style `<tool_call>` XML in content ───────────────────
+        // Some local models (Qwen2.5/3 and similar) emit function calls as
         // text tokens rather than native structured output. Parse the
         // blocks, execute each, and append the result in the format these
-        // models were trained to read back.
+        // models were trained to read back. (The dormant HERMES adapter was
+        // removed in 0.31x; this is the general text-`<tool_call>` path.)
         //
         // Two choices here that matter:
         //
@@ -665,6 +672,80 @@ fn build_tool_specs(
             ))
         })
         .collect()
+}
+
+/// Estimated input tokens the tool-definition block will cost on the wire for a
+/// given `allowed` set — the SAME `ToolSpec`s the request carries, serialized and
+/// token-estimated. Used by context budgeting: tool schemas are NOT part of the
+/// `messages` array, so a budget that only measures messages silently overshoots
+/// the model's window by the (often ~8K-token) tool block, which on a small local
+/// window overflows the context and degrades the model. Zero when no tools.
+pub fn estimate_tool_spec_tokens(tools: &ToolRegistry, allowed: Option<&[String]>) -> usize {
+    build_tool_specs(tools, allowed)
+        .iter()
+        .map(|s| crate::agent::tokens::estimate_text(
+            &serde_json::to_string(s).unwrap_or_default()))
+        .sum()
+}
+
+/// Clamp a tool RESULT before it is fed back to the model. The context budget is
+/// computed once BEFORE the tool loop, so it can't see a large result that arrives
+/// mid-loop (a big API/list response, a file read) — on a small local window a
+/// single such result overflows the model and degrades it (observed live: est
+/// 1.8K vs actual 32K after a 24 KB tool result). `cap_bytes == 0` disables
+/// clamping (cloud/large windows keep full results). Truncates on a char boundary
+/// with a clear notice so the model knows to make a narrower call.
+pub fn clamp_tool_result(output: String, cap_bytes: usize) -> String {
+    if cap_bytes == 0 || output.len() <= cap_bytes {
+        return output;
+    }
+    let mut end = cap_bytes;
+    while end > 0 && !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    let full = output.len();
+    let mut clamped = output[..end].to_string();
+    clamped.push_str(&format!(
+        "\n\n[tool result truncated: {end} of {full} bytes — it exceeded this turn's context \
+         budget. Ask for a narrower result (a specific item/id or a filter) if you need the rest.]"
+    ));
+    clamped
+}
+
+/// A conservative UPPER-BOUND estimate of the tool tokens THIS turn will send,
+/// aware of whether adaptive selection will ACTUALLY narrow the set (budgeting
+/// runs before selection). `adaptive_active` must reflect the real gate —
+/// `mode==adaptive` AND not bypassed by prompt-cache / flow-restriction — because
+/// those bypasses ship the FULL toolset regardless of `mode`.
+/// - adaptive active: core tools (exact) + up to `top_k` more at the average
+///   per-tool size + a `find_tools` allowance.
+/// - otherwise: every security-allowed tool (the full block that actually ships).
+/// Over-estimating is safe (it only trims history); under-estimating risks the
+/// overflow we're preventing, so we round up.
+pub fn estimate_tool_reserve_tokens(
+    tools: &ToolRegistry,
+    ts_cfg: &crate::config::ToolSelectionConfig,
+    security_allowed: Option<&[String]>,
+    adaptive_active: bool,
+) -> usize {
+    if adaptive_active {
+        let core = estimate_tool_spec_tokens(tools, Some(&ts_cfg.core_tools));
+        // Average per-tool size across the security-allowed set, to price the
+        // up-to-top_k discovered tools without knowing which ones.
+        let specs = build_tool_specs(tools, security_allowed);
+        let per_tool_avg = if specs.is_empty() {
+            0
+        } else {
+            let total: usize = specs.iter()
+                .map(|s| crate::agent::tokens::estimate_text(&serde_json::to_string(s).unwrap_or_default()))
+                .sum();
+            total / specs.len()
+        };
+        // +1 tool's worth as the `find_tools` meta-tool allowance.
+        core + (ts_cfg.top_k + 1) * per_tool_avg
+    } else {
+        estimate_tool_spec_tokens(tools, security_allowed)
+    }
 }
 
 fn tool_allowed(name: &str, allowed: Option<&[String]>) -> bool {
@@ -1454,6 +1535,68 @@ Nice to meet you!
         r
     }
 
+    #[test]
+    fn clamp_tool_result_bounds_large_results_and_passes_small_ones() {
+        // No cap (cloud/legacy) → passthrough.
+        assert_eq!(clamp_tool_result("x".repeat(100_000), 0).len(), 100_000);
+        // Under cap → untouched.
+        let small = "small result".to_string();
+        assert_eq!(clamp_tool_result(small.clone(), 8192), small);
+        // Over cap → truncated to <= cap + a notice, and the notice names the sizes.
+        let big = "a".repeat(50_000);
+        let out = clamp_tool_result(big, 8192);
+        assert!(out.len() < 50_000, "must be clamped");
+        assert!(out.starts_with(&"a".repeat(8192)), "keeps the first cap_bytes of content");
+        assert!(out.contains("tool result truncated"));
+        assert!(out.contains("50000 bytes"), "notice should report the original size");
+        // Char-boundary safety: a multibyte char straddling the cap isn't split.
+        let mut s = "a".repeat(8191);
+        s.push('é'); // 2 bytes, starts at byte 8191
+        s.push_str(&"b".repeat(100));
+        let out = clamp_tool_result(s, 8192);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok(), "must stay valid UTF-8");
+        assert!(out.contains("tool result truncated"));
+    }
+
+    #[test]
+    fn tool_reserve_is_nonzero_scales_with_set_and_is_mode_aware() {
+        let mut r = ToolRegistry::new();
+        for i in 0..10 {
+            r.register(StubTool {
+                name:  Box::leak(format!("tool_{i}").into_boxed_str()),
+                reply: ToolResult::success(""),
+            });
+        }
+        // Whole-set estimate > 0 and strictly larger than a 2-tool subset.
+        let all = estimate_tool_spec_tokens(&r, None);
+        assert!(all > 0, "a non-empty toolset must cost tokens");
+        let two: Vec<String> = vec!["tool_0".into(), "tool_1".into()];
+        let subset = estimate_tool_spec_tokens(&r, Some(&two));
+        assert!(subset > 0 && subset < all, "subset {subset} should be < all {all}");
+        // Empty registry / empty allow-list → zero (no phantom reserve).
+        assert_eq!(estimate_tool_spec_tokens(&ToolRegistry::new(), None), 0);
+        assert_eq!(estimate_tool_spec_tokens(&r, Some(&[])), 0);
+
+        // Not-narrowing (mode "all", OR adaptive bypassed) → reserve the whole set.
+        let mut cfg = crate::config::ToolSelectionConfig::default();
+        cfg.mode = "all".into();
+        assert_eq!(estimate_tool_reserve_tokens(&r, &cfg, None, false), all);
+
+        // Adaptive ACTIVE → bounded to core + top_k, well below the full set.
+        cfg.mode = "adaptive".into();
+        cfg.core_tools = two.clone();
+        cfg.top_k = 3;
+        let adaptive = estimate_tool_reserve_tokens(&r, &cfg, None, true);
+        assert!(adaptive < all, "adaptive reserve {adaptive} must be < full set {all}");
+        assert!(adaptive >= subset, "adaptive reserve must at least cover its core tools");
+
+        // Adaptive mode but BYPASSED (prompt_cache / flow-restricted) → full set,
+        // NOT the narrowed estimate. This is the F15 fix: the budget must price the
+        // tools that actually ship.
+        assert_eq!(estimate_tool_reserve_tokens(&r, &cfg, None, false), all,
+            "adaptive config but bypassed must reserve the FULL toolset");
+    }
+
     #[tokio::test]
     async fn dispatch_success_passes_output_through() {
         let tools = registry_with(StubTool {
@@ -1646,7 +1789,7 @@ Nice to meet you!
         let res = run_tool_loop_with_context(
             &provider, &tools, &mut messages, &opts, &ToolMode::Auto, 4, &tx,
             Some(&allowed), &serde_json::Map::new(), ToolEventCtx::NONE,
-            Some(&expander as &dyn crate::agent::tool_select::ToolExpander), Some(&pool),
+            Some(&expander as &dyn crate::agent::tool_select::ToolExpander), Some(&pool), 0,
         ).await;
         drop(tx);
         let _ = drain.await;
