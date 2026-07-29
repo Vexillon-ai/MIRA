@@ -889,10 +889,16 @@ pub fn build_router(
                    .delete(crate::server::handlers::policy::delete_rule))
             // Skills (A4 list + A5 per-user toggle + A6 admin install + A7 trust-store)
             .route("/api/skills", get(crate::server::handlers::skills::list_skills))
+            // Bundle uploads: raise the 2 MB axum default so the handler's own
+            // 10 MB `MAX_BUNDLE_BYTES` cap is actually reachable (16 MB leaves
+            // room for multipart boundary overhead). Without this a >2 MB skill
+            // bundle 413s before the handler ever runs.
             .route("/api/skills/preview",
-                   post(crate::server::handlers::skills::preview_skill))
+                   post(crate::server::handlers::skills::preview_skill)
+                       .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
             .route("/api/skills/install",
-                   post(crate::server::handlers::skills::install_skill))
+                   post(crate::server::handlers::skills::install_skill)
+                       .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
             .route("/api/skills/trust-store",
                    get(crate::server::handlers::skills::list_trust_store)
                    .post(crate::server::handlers::skills::add_trust_entry))
@@ -905,11 +911,13 @@ pub fn build_router(
             // Plugin packages: preview/verify, install, list, uninstall.
             // Admin-gated in-handler; reuses the skills trust store + MCP host.
             .route("/api/admin/packages/preview",
-                   post(crate::server::handlers::packages::preview_package))
+                   post(crate::server::handlers::packages::preview_package)
+                       .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
             .route("/api/admin/packages",
                    get(crate::server::handlers::packages::list_installed))
             .route("/api/admin/packages/install",
-                   post(crate::server::handlers::packages::install_package))
+                   post(crate::server::handlers::packages::install_package)
+                       .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
             .route("/api/admin/packages/{id}",
                    delete(crate::server::handlers::packages::uninstall_package))
             .route("/api/admin/packages/{id}/disable",
@@ -932,7 +940,8 @@ pub fn build_router(
             // cpp_provider install wizard: begin → step → cancel, with
             // a resumable session GET. Guided + verified channel-bridge install.
             .route("/api/admin/packages/cpp/install",
-                   post(crate::server::handlers::packages::cpp_install_begin))
+                   post(crate::server::handlers::packages::cpp_install_begin)
+                       .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
             .route("/api/admin/packages/cpp/update",
                    post(crate::server::handlers::packages::cpp_update_begin))
             .route("/api/admin/packages/cpp/{id}/session",
@@ -1092,7 +1101,10 @@ pub fn build_router(
                    get(crate::server::handlers::backup::download_backup)
                   .post(crate::server::handlers::backup::download_backup_encrypted))
             .route("/api/admin/restore",
-                   post(crate::server::handlers::backup::upload_restore))
+                   post(crate::server::handlers::backup::upload_restore)
+                       // Raise above the 2 MB default so the handler's 100 MB
+                       // backup cap is reachable (128 MB covers overhead).
+                       .layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024)))
             // Listing + on-demand snapshot to the scheduled-backup dir
             // + restore from one of those local files (no upload needed).
             .route("/api/admin/backups",
@@ -1162,7 +1174,10 @@ pub fn build_router(
             // STT — multipart-upload transcription + status probe.
             // Channel-side ingest (Signal/Telegram voice notes) calls
             // SttService directly from the webhook, bypassing AuthLayer.
-            .route("/api/stt/transcribe",   post(stt_transcribe))
+            .route("/api/stt/transcribe",   post(stt_transcribe)
+                       // Raise above the 2 MB default so the handler's 32 MB audio
+                       // cap is reachable (48 MB covers multipart overhead).
+                       .layer(axum::extract::DefaultBodyLimit::max(48 * 1024 * 1024)))
             .route("/api/stt/status",       get(stt_status))
             // Channels — registry of channel descriptors used by the per-
             // channel voice prefs UI. Plugins can register new descriptors

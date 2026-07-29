@@ -85,6 +85,35 @@ impl<'a> Activation<'a> {
     pub fn depth(&self) -> u32 { self.chain_ids.len() as u32 }
 }
 
+/// chain-depth + cycle guard for a dispatched activation. Returns
+/// `Some(reason)` when the activation must be REFUSED — it's already at/over
+/// `max_chain_depth` ancestors, or `source_id` is already in the chain (a
+/// cycle) — else `None`. Pulled out as a pure function so it's directly
+/// unit-tested: the guard was previously unreachable (every entry point seeds
+/// `chain_ids: &[]`, and no built-in action re-emits an event to grow a chain),
+/// so it was effectively dead code. It's now verified + armed — when an
+/// event-emitting action is added, thread the parent chain into `chain_ids` and
+/// this guard goes live end-to-end. `max_chain_depth == 0` disables the depth
+/// check (cycle detection still applies).
+pub(crate) fn chain_guard_violation(
+    chain_ids:       &[String],
+    source_id:       &str,
+    max_chain_depth: u32,
+) -> Option<String> {
+    if max_chain_depth > 0 && chain_ids.len() as u32 >= max_chain_depth {
+        return Some(format!(
+            "chain depth {} exceeds max {} (chain={:?})",
+            chain_ids.len(), max_chain_depth, chain_ids,
+        ));
+    }
+    if chain_ids.iter().any(|id| id == source_id) {
+        return Some(format!(
+            "cycle detected: {source_id} already in chain {chain_ids:?}",
+        ));
+    }
+    None
+}
+
 pub struct DispatchOutcome {
     pub outcome:        RunOutcome,
     pub output_snippet: Option<String>,
@@ -161,38 +190,15 @@ impl Dispatcher {
     pub async fn dispatch(&self, act: Activation<'_>) -> DispatchOutcome {
         let started_at = Utc::now().timestamp();
 
-        // ── chain-depth + cycle gate ────────────────────────────
-        if self.max_chain_depth > 0 && act.depth() >= self.max_chain_depth {
-            let err = format!(
-                "chain depth {} exceeds max {} (chain={:?})",
-                act.depth(), self.max_chain_depth, act.chain_ids,
-            );
+        // ── chain-depth + cycle gate (pure + unit-tested) ────
+        if let Some(err) = chain_guard_violation(act.chain_ids, act.source_id, self.max_chain_depth) {
             warn!("automations: refusing activation: {err}");
             if let Err(e) = self.store.record_run(
                 act.source_kind, act.source_id, act.user_id,
                 started_at, Some(started_at),
                 RunOutcome::Failure, None, Some(&err), None,
             ) {
-                error!("automations: record_run(chain-depth) failed: {e}");
-            }
-            return DispatchOutcome {
-                outcome: RunOutcome::Failure,
-                output_snippet: None,
-                error: Some(err),
-            };
-        }
-        if act.chain_ids.iter().any(|id| id == act.source_id) {
-            let err = format!(
-                "cycle detected: {} already in chain {:?}",
-                act.source_id, act.chain_ids,
-            );
-            warn!("automations: refusing activation: {err}");
-            if let Err(e) = self.store.record_run(
-                act.source_kind, act.source_id, act.user_id,
-                started_at, Some(started_at),
-                RunOutcome::Failure, None, Some(&err), None,
-            ) {
-                error!("automations: record_run(cycle) failed: {e}");
+                error!("automations: record_run(chain-guard) failed: {e}");
             }
             return DispatchOutcome {
                 outcome: RunOutcome::Failure,
@@ -228,28 +234,44 @@ impl Dispatcher {
             action_tag, act.source_kind, act.source_id, act.user_id,
         );
 
-        let result = match act.action {
-            Action::Internal { task, args } => {
-                self.run_internal(task, args).await
+        // cap every action's wall-clock. `run_once` awaits dispatches
+        // sequentially, so one hung action (a stalled LLM in run_prompt, a slow
+        // tool, an unresponsive HttpPost host) would otherwise block the whole
+        // tick loop and back the event bus up into Lagged drops. On timeout the
+        // action is aborted and recorded as a failure like any other.
+        const MAX_ACTION_SECS: u64 = 300;
+        let action_fut = async {
+            match act.action {
+                Action::Internal { task, args } => {
+                    self.run_internal(task, args).await
+                }
+                Action::Prompt(p) => {
+                    self.run_prompt(act.user_id, p).await
+                }
+                Action::ToolCall { tool, args } => {
+                    self.run_tool_call(act.user_id, tool, args).await
+                }
+                Action::HttpPost { url, headers, body_template, timeout_secs, secret, max_retries } => {
+                    self.run_http_post(
+                        url, headers, body_template, *timeout_secs,
+                        secret.as_deref(), *max_retries, &tpl_ctx,
+                    ).await
+                }
+                Action::ChannelMessage { channel, to, conversation_id, text_template } => {
+                    self.run_channel_message(
+                        act.user_id, channel, to.as_deref(),
+                        conversation_id.as_deref(), text_template, &tpl_ctx,
+                    ).await
+                }
             }
-            Action::Prompt(p) => {
-                self.run_prompt(act.user_id, p).await
-            }
-            Action::ToolCall { tool, args } => {
-                self.run_tool_call(act.user_id, tool, args).await
-            }
-            Action::HttpPost { url, headers, body_template, timeout_secs, secret, max_retries } => {
-                self.run_http_post(
-                    url, headers, body_template, *timeout_secs,
-                    secret.as_deref(), *max_retries, &tpl_ctx,
-                ).await
-            }
-            Action::ChannelMessage { channel, to, conversation_id, text_template } => {
-                self.run_channel_message(
-                    act.user_id, channel, to.as_deref(),
-                    conversation_id.as_deref(), text_template, &tpl_ctx,
-                ).await
-            }
+        };
+        let result = match tokio::time::timeout(
+            Duration::from_secs(MAX_ACTION_SECS), action_fut,
+        ).await {
+            Ok(r)  => r,
+            Err(_) => Err(MiraError::ToolError(format!(
+                "automation action exceeded {MAX_ACTION_SECS}s wall-clock and was aborted"
+            ))),
         };
 
         let finished_at = Utc::now().timestamp();
@@ -1173,6 +1195,24 @@ impl Dispatcher {
             "tool_call action requires AgentCore (not wired in this build)".into()
         ))?;
 
+        // enforce the automation owner's RBAC capability allowlist, so a
+        // capability-restricted user can't schedule an `Action::ToolCall` for a
+        // tool their profile forbids (incl. `code_run`) and have it run
+        // unrestricted at fire time. When auth is wired we honor the profile; a lookup
+        // error falls back to unrestricted (matches the chat path — a transient
+        // DB error must not silently disable every automation).
+        if let Some(auth) = self.auth.as_ref() {
+            let role = auth.get_user(user_id).ok().flatten()
+                .map(|u| u.role)
+                .unwrap_or(crate::auth::Role::User);
+            let caps = auth.effective_capabilities(user_id, &role).unwrap_or_default();
+            if !caps.allows_tool(tool) {
+                return Err(MiraError::ToolError(format!(
+                    "automation owner '{user_id}' is not permitted to use tool '{tool}'"
+                )));
+            }
+        }
+
         // Inject `_user_id` so the tool's audit row records the right
         // actor (the chat path does this; we mirror it here).
         let mut merged = match args {
@@ -1218,8 +1258,15 @@ impl Dispatcher {
         tpl_ctx:       &serde_json::Value,
     ) -> Result<String, MiraError> {
         let body = template::render(body_template, tpl_ctx);
+        // SSRF guard — an automation's HttpPost target is user-supplied.
+        // Refuse loopback / link-local / cloud-metadata (a LAN webhook receiver
+        // on a private IP stays allowed); pair with no-redirect so a 30x can't
+        // bounce past the check.
+        crate::tools::http_policy::guard_public_url(url).await
+            .map_err(|e| MiraError::ConfigError(format!("blocked HttpPost target: {e}")))?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_secs.max(1)))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| MiraError::ConfigError(format!("reqwest build: {e}")))?;
 
@@ -1527,5 +1574,43 @@ fn snippet(s: &str) -> String {
         let mut t: String = s.chars().take(LIMIT).collect();
         t.push('…');
         t
+    }
+}
+
+#[cfg(test)]
+mod chain_guard_tests {
+    use super::chain_guard_violation;
+
+    fn chain(n: usize) -> Vec<String> { (0..n).map(|i| format!("s{i}")).collect() }
+
+    #[test]
+    fn allows_shallow_acyclic_chain() {
+        assert!(chain_guard_violation(&[], "a", 5).is_none());
+        assert!(chain_guard_violation(&["a".into(), "b".into()], "c", 5).is_none());
+    }
+
+    #[test]
+    fn refuses_at_or_over_max_depth() {
+        // depth 5 with max 5 → refused (>= max).
+        let v = chain_guard_violation(&chain(5), "s5", 5);
+        assert!(v.is_some());
+        assert!(v.unwrap().contains("chain depth"));
+        // depth 4 with max 5 → allowed.
+        assert!(chain_guard_violation(&chain(4), "s4", 5).is_none());
+    }
+
+    #[test]
+    fn refuses_cycle() {
+        let v = chain_guard_violation(&["a".into(), "b".into()], "a", 5);
+        assert!(v.is_some());
+        assert!(v.unwrap().contains("cycle"));
+    }
+
+    #[test]
+    fn depth_zero_disables_depth_check_but_not_cycle() {
+        // max 0 → depth check off (a very deep acyclic chain is allowed)…
+        assert!(chain_guard_violation(&chain(100), "new", 0).is_none());
+        // …but a cycle is still refused.
+        assert!(chain_guard_violation(&chain(3), "s1", 0).is_some());
     }
 }

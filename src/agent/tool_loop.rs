@@ -1591,7 +1591,7 @@ Nice to meet you!
         assert!(adaptive >= subset, "adaptive reserve must at least cover its core tools");
 
         // Adaptive mode but BYPASSED (prompt_cache / flow-restricted) → full set,
-        // NOT the narrowed estimate. This is the F15 fix: the budget must price the
+        // NOT the narrowed estimate. This is the fix: the budget must price the
         // tools that actually ship.
         assert_eq!(estimate_tool_reserve_tokens(&r, &cfg, None, false), all,
             "adaptive config but bypassed must reserve the FULL toolset");

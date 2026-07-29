@@ -2769,7 +2769,8 @@
                   "scopes": { "description": "Requested scopes. Defaults to ['openid','email','profile'] when empty.", "type": "array", "items": { "type": "string" } },
                   "auto_provision": { "description": "Create a MIRA account on first login for a user with no existing match. Off by default (link-to-existing-email only); scope it with allowed_domains before enabling.", "type": "boolean" },
                   "allowed_domains": { "description": "When auto-provisioning, only allow these email domains (lowercase, no '@'). Empty = any domain.", "type": "array", "items": { "type": "string" } },
-                  "default_role": { "description": "Role granted to auto-provisioned users: 'user' (default) or 'admin'.", "type": "string" }
+                  "default_role": { "description": "Role granted to auto-provisioned users: 'user' (default) or 'admin'.", "type": "string" },
+                  "trust_unverified_email": { "description": "Trust the IdP's email claim even without email_verified=true. Off by default (an unverified email must never link/provision an account — spoofable emails enable account takeover). Enable ONLY for a known-safe internal IdP that omits the claim.", "type": "boolean" }
                 }
               }
             }

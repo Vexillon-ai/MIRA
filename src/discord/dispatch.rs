@@ -261,6 +261,8 @@ pub async fn process_discord_message(
         turn_ctx.conversation_id = Some(conv.id.clone());
     }
 
+    // reset the companion missed-check-in counter on genuine inbound.
+    deps.agent_core.mark_user_active(&resolved_user_id);
     let rx = match deps.agent_core
         .process_with_context(
             &session_id,

@@ -336,7 +336,7 @@ pub async fn tick_once(
                 "companion scheduler: firing daily briefing for '{user_id}' — {briefing_reason}"
             );
             match dispatcher.send_briefing(&user_id).await {
-                Ok(DispatchOutcome::Sent { conversation_id, channel, chars }) => {
+                Ok(DispatchOutcome::Sent { conversation_id, channel, chars, .. }) => {
                     info!(
                         "companion scheduler: briefing sent for '{user_id}' \
                          on '{channel}' ({chars} chars, conv={conversation_id})"
@@ -445,57 +445,67 @@ pub async fn tick_once(
                     "companion scheduler: firing for '{user_id}' \
                      (reason: {reason}, cadence: {cadence_reason})"
                 );
-                let sent = match dispatcher.send_checkin(&user_id).await {
-                    Ok(DispatchOutcome::Sent { conversation_id, channel, chars }) => {
+                // `sent` = a message went out (advance cadence). `confirmed` =
+                // we can be sure the user actually received it — only then
+                // does an unanswered send count toward the missed-check-in
+                // escalation. For real channels the two are the same; for web,
+                // `confirmed` is false unless the user has a push subscription.
+                let (sent, confirmed) = match dispatcher.send_checkin(&user_id).await {
+                    Ok(DispatchOutcome::Sent { conversation_id, channel, chars, delivery_confirmed }) => {
                         info!(
                             "companion scheduler: sent for '{user_id}' on '{channel}' \
-                             ({chars} chars, conv={conversation_id})"
+                             ({chars} chars, conv={conversation_id}, confirmed={delivery_confirmed})"
                         );
-                        true
+                        (true, delivery_confirmed)
                     }
                     Ok(DispatchOutcome::SkippedNoChannel) => {
                         warn!("companion scheduler: '{user_id}' skipped — no channel resolved");
-                        false
+                        (false, false)
                     }
                     Ok(DispatchOutcome::Failed(msg)) => {
                         warn!("companion scheduler: dispatch failed for '{user_id}': {msg}");
-                        false
+                        (false, false)
                     }
                     Err(e) => {
                         warn!("companion scheduler: dispatch error for '{user_id}': {e}");
-                        false
+                        (false, false)
                     }
                 };
 
-                // track unanswered consecutive check-ins.
-                // The chat handler resets this counter on any user
-                // message; we increment on every successful send.
-                // When the count crosses the threshold and we have a
-                // safety floor wired, soft-escalate.
+                // Cadence advances on any send (so an unconfirmed web check-in
+                // doesn't re-fire every tick — no spam).
                 if sent {
-                    // Real per-day counter for the `max_per_day` cap (rolls
-                    // over at local midnight via the stamped day).
                     if let Err(e) = store.bump_checkins_today(&user_id, &today_local) {
                         warn!("companion scheduler: bump_checkins_today failed for '{user_id}': {e}");
                     }
+                }
+
+                // Missed-check-in tracking + escalation only on CONFIRMED
+                // delivery. The chat handler / mark_user_active reset this
+                // counter on any inbound user message.
+                if sent && confirmed {
                     let count = store
                         .increment_missed_checkins(&user_id)
                         .unwrap_or_else(|e| {
                             warn!("companion scheduler: increment_missed failed for '{user_id}': {e}");
                             0
                         });
-                    if count >= MISSED_CHECKIN_THRESHOLD {
+                    // escalate at min(threshold, unanswered-cap). The cap
+                    // stops *sending* once count reaches it, so the counter can
+                    // never climb past the cap — with a fixed threshold of 3 and
+                    // a cap of 1 or 2, escalation would be silently unreachable.
+                    // Escalating at the cap means "the moment we give up pinging
+                    // is the moment we alert the contact". A cap of 0 (disabled)
+                    // keeps the plain threshold.
+                    let cap = adjusted_limits.max_unanswered_checkins;
+                    let escalate_at = if cap > 0 { MISSED_CHECKIN_THRESHOLD.min(cap) } else { MISSED_CHECKIN_THRESHOLD };
+                    // `>=` not `==`, and `handle_missed_checkins` dedups
+                    // internally (re-escalate window) — so a FAILED escalation at
+                    // the boundary retries on the next tick instead of being
+                    // skipped forever, and a delivered one doesn't spam.
+                    if count >= escalate_at {
                         if let Some(floor) = safety {
-                            // Only escalate ONCE per threshold-crossing
-                            // if count is already past threshold
-                            // when we reach this point, that means an
-                            // earlier tick already escalated. We
-                            // dedupe by checking equality with the
-                            // threshold, not >=, so a count of 3, 4,
-                            // 5 all trigger at the 3 boundary only.
-                            if count == MISSED_CHECKIN_THRESHOLD {
-                                let _ = floor.handle_missed_checkins(&user_id, count).await;
-                            }
+                            let _ = floor.handle_missed_checkins(&user_id, count).await;
                         } else {
                             debug!(
                                 "companion scheduler: missed-checkin count {count} \

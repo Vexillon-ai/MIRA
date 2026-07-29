@@ -99,8 +99,16 @@ fn spawn_delivery(
     body:     Arc<String>,
 ) {
     tokio::spawn(async move {
+        // SSRF guard on the (admin-configured) target — refuse loopback /
+        // cloud-metadata (a LAN webhook receiver on a private IP is still fine).
+        if let Err(e) = crate::tools::http_policy::guard_public_url(&hook.url).await {
+            let _ = store.record_webhook_fire(&hook.id, None, Some(&format!("blocked target: {e}")));
+            return;
+        }
         let client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(8))
+            // Don't follow redirects past the guard above.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
         {
             Ok(c)  => c,

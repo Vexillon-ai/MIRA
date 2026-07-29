@@ -29,6 +29,25 @@ use tracing::{debug, warn};
 use crate::providers::ModelProvider;
 use crate::types::{ChatMessage, GenerationOptions};
 
+/// Detect an explicit "don't record this" consent request in a user's message, so
+/// the post-turn extractors SKIP it — honouring the family-privacy invariant that
+/// a member can tell MIRA not to remember something. Deliberately
+/// broad: a false positive only loses one auto-memory (harmless), whereas a false
+/// negative violates stated consent, so we bias toward honouring the request.
+/// Gates memory extraction, the knowledge graph, and wiki extraction.
+pub fn is_no_store_request(text: &str) -> bool {
+    let t = text.to_lowercase();
+    const PATTERNS: &[&str] = &[
+        "don't record", "dont record", "do not record",
+        "don't save this", "dont save this", "do not save this",
+        "don't remember this", "dont remember this", "do not remember this",
+        "don't store this", "dont store this", "do not store this",
+        "off the record", "don't keep this", "dont keep this",
+        "forget what i just", "forget that i just", "don't log this",
+    ];
+    PATTERNS.iter().any(|p| t.contains(p))
+}
+
 /// A candidate memory extracted from text before being stored
 #[derive(Debug, Clone)]
 pub struct MemoryCandidate {
@@ -501,6 +520,30 @@ fn truncate_for_log(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod structured_extractor_tests {
     use super::*;
+
+    #[test]
+    fn no_store_request_detection() {
+        // Honoured phrasings.
+        for s in [
+            "Don't record this, but my PIN is 1234",
+            "do not save this: I'm feeling low today",
+            "off the record — I applied for another job",
+            "please don't remember this",
+            "dont store this password",
+            "forget what I just told you",
+        ] {
+            assert!(is_no_store_request(s), "should honour: {s:?}");
+        }
+        // Normal messages are NOT flagged (no over-triggering).
+        for s in [
+            "What's the weather today?",
+            "Remember to buy milk tomorrow",
+            "Record a note that the meeting moved to 3pm",
+            "Save this recipe to my collection",
+        ] {
+            assert!(!is_no_store_request(s), "should NOT flag: {s:?}");
+        }
+    }
 
     #[test]
     fn parse_well_formed_json() {

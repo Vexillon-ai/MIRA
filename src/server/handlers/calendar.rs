@@ -498,6 +498,13 @@ pub async fn caldav_connect(
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return (StatusCode::BAD_REQUEST, "url must start with http:// or https://").into_response();
     }
+    // SSRF guard — a user supplies this URL, so refuse one that resolves to
+    // the MIRA host's own loopback services or cloud metadata (a home NAS/LAN
+    // CalDAV server on a private IP is still allowed). CalDavSync must not follow
+    // a cross-host redirect past this check — see its client's redirect policy.
+    if let Err(e) = crate::tools::http_policy::guard_public_url(&url).await {
+        return (StatusCode::BAD_REQUEST, format!("Refusing to connect to that URL: {e}")).into_response();
+    }
     // Validate against the live server before storing anything.
     let sync = CalDavSync::new(url.clone(), username.clone(), body.password.clone());
     match sync.sync_user(&user.id, &store).await {

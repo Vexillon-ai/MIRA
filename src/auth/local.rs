@@ -485,12 +485,15 @@ impl LocalAuthService {
         self.db.list_pending_users()
     }
 
-    // Admin "sign out everywhere" — revoke all of a user's refresh tokens.
-    // Returns how many live sessions were revoked. Access tokens are short
-    // (15 min) JWTs, so the user is fully locked out within that window.
+    // Admin "sign out everywhere" — revoke all of a user's refresh tokens AND
+    // invalidate every outstanding access token immediately. Returns how
+    // many live sessions were revoked. Previously, access tokens (15-min JWTs)
+    // survived this call until their `exp`; bumping `token_version` now revokes
+    // them at once, so "sign out everywhere" is effective the instant it runs.
     pub fn revoke_all_sessions(&self, user_id: &str) -> Result<i64, MiraError> {
         let n = self.db.count_active_sessions(user_id)?;
         self.db.revoke_all_for_user(user_id)?;
+        self.db.bump_token_version(user_id)?;
         Ok(n)
     }
     pub fn count_active_sessions(&self, user_id: &str) -> Result<i64, MiraError> {

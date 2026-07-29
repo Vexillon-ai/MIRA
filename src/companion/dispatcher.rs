@@ -76,7 +76,7 @@ const CHECKIN_CONV_TITLE: &str = "Companion check-ins";
 // stamp `last_checkin_at` only on success.
 #[derive(Debug)]
 pub enum DispatchOutcome {
-    Sent { conversation_id: String, channel: String, chars: usize },
+    Sent { conversation_id: String, channel: String, chars: usize, delivery_confirmed: bool },
     SkippedNoChannel,
     Failed(String),
 }
@@ -143,6 +143,12 @@ pub struct CompanionDispatcher {
     // from here. `None` → status updates fall back to having no activity to
     // mention (so the message-type selector won't pick StatusUpdate).
     agent_audit: Option<Arc<AuditStore>>,
+    // per-user push subscriptions. A web check-in is only "delivery
+    // confirmed" if the user has a push subscription (SSE-tab liveness isn't
+    // trackable on the global broadcast bus), so we don't count an unconfirmed
+    // web send toward the missed-check-in counter and falsely escalate. `None`
+    // → web sends stay confirmed (prior behaviour) when push isn't wired.
+    web_push: Option<Arc<crate::notifications::web_push::WebPushService>>,
 }
 
 impl CompanionDispatcher {
@@ -166,12 +172,20 @@ impl CompanionDispatcher {
             live_config: None,
             tts: None,
             agent_audit: None,
+            web_push: None,
         }
     }
 
     // Wire the agent activity log so status-update check-ins can mention what
     // MIRA's autonomous agents recently did on the user's behalf. `None` keeps
     // the dispatcher from ever surfacing a status update (nothing to report).
+    // wire per-user push subscriptions so a web check-in without one is
+    // treated as delivery-unconfirmed (doesn't count toward the missed counter).
+    pub fn with_web_push(mut self, wp: Option<Arc<crate::notifications::web_push::WebPushService>>) -> Self {
+        self.web_push = wp;
+        self
+    }
+
     pub fn with_agent_audit(mut self, audit: Option<Arc<AuditStore>>) -> Self {
         self.agent_audit = audit;
         self
@@ -524,6 +538,18 @@ impl CompanionDispatcher {
         // actually worked — otherwise the policy gates (min-gap,
         // missed-checkin counter, etc) treat the broken delivery as a
         // successful contact and stop firing.
+        //
+        // (by-design): this stamp lands AFTER the network delivery above, so
+        // a crash in the narrow window between "message sent" and this write
+        // leaves `last_checkin_at` stale → the slot re-fires on restart and the
+        // user may get ONE duplicate check-in. This is a deliberate at-least-once
+        // choice: for a proactive check-in a rare duplicate is far better than a
+        // silently-lost one (stamping BEFORE delivery would drop a check-in on any
+        // transient send failure). True exactly-once is impossible for an external
+        // send without two-phase commit. The related counter desync
+        // (`bump_checkins_today` runs in the scheduler just after this) is bounded
+        // to off-by-one and self-corrects — the daily counter rolls at local
+        // midnight and the missed counter resets on the next inbound message.
         if delivery_error.is_none() {
             if let Err(e) = self.store.mark_checkin(user_id, Utc::now()) {
                 warn!("companion dispatch: mark_checkin failed for '{user_id}': {e}");
@@ -544,15 +570,33 @@ impl CompanionDispatcher {
             return Ok(DispatchOutcome::Failed(err));
         }
 
+        // a real messaging channel that returned no error genuinely
+        // delivered. Web is the exception — the message only landed in history +
+        // a fire-and-forget bus event; we can only *confirm* it reached the user
+        // if they have a push subscription (SSE-tab liveness isn't trackable on
+        // the global broadcast bus). An unconfirmed web send still advances
+        // cadence (`mark_checkin` above ran) but must NOT count toward the
+        // missed-check-in counter — otherwise a web-only user with no tab and no
+        // push falsely escalates for messages they never received.
+        let delivery_confirmed = if channel == "web" {
+            match self.web_push.as_ref() {
+                Some(wp) => wp.list_for_user(user_id).map(|v| !v.is_empty()).unwrap_or(true),
+                None     => true, // push not wired → preserve prior behaviour
+            }
+        } else {
+            true
+        };
+
         info!(
             "companion dispatch: sent check-in for '{user_id}' on '{channel}' \
-             ({} chars, conv={conv_id})",
+             ({} chars, conv={conv_id}, delivery_confirmed={delivery_confirmed})",
             assistant_text.chars().count(),
         );
         Ok(DispatchOutcome::Sent {
             conversation_id: conv_id,
             channel,
             chars: assistant_text.chars().count(),
+            delivery_confirmed,
         })
     }
 
@@ -746,6 +790,9 @@ impl CompanionDispatcher {
             conversation_id: conv_id,
             channel,
             chars: assistant_text.chars().count(),
+            // Briefings don't feed the missed-check-in counter, so confirmation
+            // is moot here — report true.
+            delivery_confirmed: true,
         })
     }
 

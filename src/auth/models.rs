@@ -15,7 +15,7 @@ use crate::MiraError;
 // ── SELECT column list — keep in sync with row_to_user below. ────────────────
 pub(crate) const USER_COLS: &str = "id, username, display_name, email, role, is_active, \
                          created_at, updated_at, last_login, phone, preferred_contact, \
-                         avatar, voice_prefs";
+                         avatar, voice_prefs, token_version";
 
 // ── Role ──────────────────────────────────────────────────────────────────────
 
@@ -74,6 +74,14 @@ pub struct User {
     /// register new keys without a schema migration. `None` or an empty
     /// object means "inherit server defaults for every channel."
     pub voice_prefs:       Option<String>,
+    /// Access-token generation counter. Every issued access token embeds
+    /// the value current at issue time (`Claims.tv`); the auth middleware
+    /// rejects any token whose `tv` differs from this. Bumping it (see
+    /// `AuthDb::bump_token_version`, wired into `revoke_all_sessions`)
+    /// invalidates every outstanding access token for the user at once —
+    /// closing the gap where a stateless access token stayed valid until its
+    /// `exp` even after the account's sessions were revoked. Starts at 0.
+    pub token_version:     i64,
 }
 
 // ── NewUser ───────────────────────────────────────────────────────────────────
@@ -334,6 +342,11 @@ impl AuthDb {
             // (default, so every existing + admin-created user stays usable);
             // open-signup accounts awaiting admin approval are 0.
             "ALTER TABLE users ADD COLUMN approved INTEGER NOT NULL DEFAULT 1",
+            // access-token generation counter. Bumping it invalidates
+            // every outstanding access token for the user (see
+            // `Claims.tv` / `bump_token_version`). DEFAULT 0 so existing
+            // users + tokens (which carry tv=0) keep matching until a bump.
+            "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0",
             // Drop the now-superseded global override columns. SQLite 3.35+
             // supports DROP COLUMN; on older builds the statements simply
             // fail and we leave the columns hanging — they're harmless dead
@@ -404,6 +417,7 @@ impl AuthDb {
             preferred_contact: None,
             avatar:            None,
             voice_prefs:       None,
+            token_version:     0,
         })
     }
 
@@ -696,6 +710,21 @@ impl AuthDb {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE refresh_tokens SET revoked=1 WHERE user_id=?1",
+            params![user_id],
+        )
+        .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Bump a user's access-token generation counter, invalidating every
+    /// access token issued before this call (they carry the old `tv` in their
+    /// claims and no longer match). Idempotent per-call in effect: monotonic
+    /// increment. Wired into `revoke_all_sessions` so "sign out everywhere"
+    /// kills stateless access tokens too, not just refresh tokens.
+    pub fn bump_token_version(&self, user_id: &str) -> Result<(), MiraError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE users SET token_version = token_version + 1 WHERE id = ?1",
             params![user_id],
         )
         .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
@@ -1140,6 +1169,41 @@ mod profile_tests {
         assert!(p.onboarded_at.is_some());
     }
 
+    // bumping token_version invalidates every access token issued before
+    // the bump, while a freshly issued one matches again. Exercises the exact
+    // comparison the auth middleware makes (`claims.tv == user.token_version`).
+    #[test]
+    fn bump_token_version_invalidates_prior_access_tokens() {
+        use crate::auth::tokens::{issue_token_pair, verify_access_token};
+        let (_dir, db) = open_db_with_user("u1");
+        let secret = "test-secret";
+
+        // Fresh user starts at generation 0; a token issued now carries tv=0.
+        let user0 = db.find_by_id("u1").unwrap().unwrap();
+        assert_eq!(user0.token_version, 0);
+        let pair = issue_token_pair(&user0, secret).unwrap();
+        let claims = verify_access_token(&pair.access_token, secret).unwrap();
+        assert_eq!(claims.tv, 0);
+        // Middleware would ACCEPT: tv matches the user's current generation.
+        assert_eq!(claims.tv, user0.token_version);
+
+        // "Sign out everywhere" bumps the generation.
+        db.bump_token_version("u1").unwrap();
+        let user1 = db.find_by_id("u1").unwrap().unwrap();
+        assert_eq!(user1.token_version, 1);
+
+        // The old token is still cryptographically valid (verify_access_token
+        // succeeds) but now fails the generation check — middleware REJECTS it.
+        assert_ne!(claims.tv, user1.token_version);
+
+        // A token issued after the bump matches the new generation again.
+        let claims2 = verify_access_token(
+            &issue_token_pair(&user1, secret).unwrap().access_token,
+            secret,
+        ).unwrap();
+        assert_eq!(claims2.tv, user1.token_version);
+    }
+
     #[test]
     fn progress_blob_round_trips() {
         let (_dir, db) = open_db_with_user("u1");
@@ -1251,5 +1315,8 @@ pub(super) fn row_to_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
         preferred_contact: row.get(10)?,
         avatar:            row.get(11)?,
         voice_prefs:       row.get(12)?,
+        // Defaults to 0 on a DB predating the migration (should not happen —
+        // the column is NOT NULL DEFAULT 0 — but stay defensive at the parse).
+        token_version:     row.get::<_, i64>(13).unwrap_or(0),
     })
 }

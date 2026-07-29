@@ -624,6 +624,7 @@ mod tests {
             preferred_contact: None,
             avatar:            None,
             voice_prefs:       None,
+            token_version:     0,
         }
     }
 

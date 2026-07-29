@@ -625,9 +625,7 @@ fn tail_chars(s: &str, n: usize) -> String {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::time::timeout;
+    use std::sync::Arc;    use tokio::time::timeout;
 
     use crate::agent::instance::{Agent, AgentRegistry};
     use crate::agent::supervisor::{Supervisor, WorkerOutcome};

@@ -47,6 +47,10 @@ impl CalDavSync {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent(format!("MIRA/{}", env!("CARGO_PKG_VERSION")))
+            // never follow a redirect — the connect handler SSRF-checks the
+            // user-supplied URL up front (guard_public_url), and a followed
+            // cross-host redirect could bounce past that check to loopback/metadata.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client");
         Self { url, username, password, client }

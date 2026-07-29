@@ -104,10 +104,11 @@ pub struct RuntimeInstallReq { pub dep: String }
 
 /// `POST /api/mcp/runtime/install` — install a managed MCP runtime (Node or uv)
 /// after the user consents to the dependency prompt, then reconnect servers.
-/// Available to any authenticated user (it's part of the per-user MCP add flow;
-/// the download is pinned + checksum-verified into `~/.mira/deps`).
+/// admin-only — it performs a host-level dependency install into
+/// `~/.mira/deps` (pinned + checksum-verified), so it belongs with the rest of
+/// the admin-gated deps surface (`/api/admin/deps/*`), not the per-user flow.
 pub async fn install_runtime(
-    AuthUser(caller):    AuthUser,
+    AdminUser(caller):   AdminUser,
     Extension(registry): Extension<Arc<McpServerRegistry>>,
     Json(req):           Json<RuntimeInstallReq>,
 ) -> impl IntoResponse {

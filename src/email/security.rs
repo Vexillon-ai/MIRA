@@ -129,6 +129,25 @@ pub fn evaluate(
         return Verdict::Quarantine { reason: "unknown_sender".into() };
     }
 
+    // allowlist trust requires an authenticated origin. `From:` is
+    // spoofable, so an allowlist match on it proves nothing on its own; only
+    // the receiving MTA's SPF/DKIM/DMARC result (parsed into
+    // `headers.auth_pass`) does. When an allowlisted message has no positive
+    // pass, either quarantine it (operator opted into strict allowlists) or
+    // accept-but-warn so the residual risk is auditable. (An explicit
+    // `=fail` was already quarantined above, before this point.)
+    if on_allowlist && !headers.auth_pass {
+        if settings.require_authenticated_allowlist {
+            return Verdict::Quarantine { reason: "allowlist_unverified".into() };
+        }
+        tracing::warn!(
+            "email account '{account_id}': allowlisted sender '{}' accepted WITHOUT a \
+             positive SPF/DKIM/DMARC pass — the From address is spoofable. Enable \
+             `require_authenticated_allowlist` to quarantine unauthenticated allowlist mail.",
+            parsed.sender_address,
+        );
+    }
+
     // ── Rate limits ───────────────────────────────────────────────
     // Per-sender first (cheaper, scoped). Both gates use Drop
     // rather than Quarantine — quarantining a flood would just
@@ -143,7 +162,13 @@ pub fn evaluate(
     }
 
     Verdict::Accept {
-        reason: if on_allowlist { "allowlist".into() } else { "unknown_accepted".into() }
+        reason: if on_allowlist {
+            // Distinguish an authenticated allowlist hit from one we let
+            // through unverified so the audit trail records which.
+            if headers.auth_pass { "allowlist".into() } else { "allowlist_unverified".into() }
+        } else {
+            "unknown_accepted".into()
+        }
     }
 }
 
@@ -158,6 +183,14 @@ pub struct InboundHeaders {
     /// `spf=fail`, `dkim=fail`, or `dmarc=fail`. Conservative — any
     /// fail is treated as the whole result failing.
     pub auth_fail:         bool,
+    /// `true` when `Authentication-Results:` carried a positive
+    /// `dmarc=pass`, `dkim=pass`, or `spf=pass`. Distinct from
+    /// `!auth_fail`: a message with **no** Authentication-Results
+    /// header, or one reporting `=none`/`=neutral`, has neither
+    /// `auth_fail` nor `auth_pass`. Used to gate allowlist trust —
+    /// the `From:` header alone is spoofable, so an allowlisted sender is
+    /// only trustworthy when the receiving MTA actually authenticated it.
+    pub auth_pass:         bool,
 }
 
 impl InboundHeaders {
@@ -191,7 +224,17 @@ impl InboundHeaders {
             })
             .unwrap_or(false);
 
-        Self { is_auto_submitted, is_bulk_or_list, auth_fail }
+        let auth_pass = msg.header("Authentication-Results")
+            .and_then(|h| h.as_text())
+            .map(|v| {
+                let lc = v.to_ascii_lowercase();
+                lc.contains("dmarc=pass")
+                    || lc.contains("dkim=pass")
+                    || lc.contains("spf=pass")
+            })
+            .unwrap_or(false);
+
+        Self { is_auto_submitted, is_bulk_or_list, auth_fail, auth_pass }
     }
 }
 
@@ -252,6 +295,55 @@ mod tests {
             1024, 0, 0, "acct", &rl(),
         );
         assert!(matches!(v, Verdict::Accept { .. }));
+    }
+
+    fn headers_with_auth(pass: bool) -> InboundHeaders {
+        InboundHeaders { auth_pass: pass, ..InboundHeaders::default() }
+    }
+
+    // an allowlisted sender that the receiving MTA actually authenticated
+    // (positive SPF/DKIM/DMARC) is accepted with the clean "allowlist" reason.
+    #[test]
+    fn allowlisted_authenticated_sender_accepted_clean() {
+        let v = evaluate(
+            &parsed("alice@example.com"),
+            500, &headers_with_auth(true),
+            &security_with(&["alice@example.com"], &[], false),
+            1024, 0, 0, "acct", &rl(),
+        );
+        assert!(matches!(v, Verdict::Accept { reason } if reason == "allowlist"));
+    }
+
+    // a forged `From:` matching an allowlisted address, carrying NO
+    // positive authentication, is quarantined when the operator requires
+    // authenticated allowlists — closing the spoof-to-impersonate-a-member gap.
+    #[test]
+    fn allowlisted_unauthenticated_quarantined_when_strict() {
+        let settings = EmailSecurity {
+            require_authenticated_allowlist: true,
+            ..security_with(&["alice@example.com"], &[], false)
+        };
+        let v = evaluate(
+            &parsed("alice@example.com"),
+            500, &headers_with_auth(false),
+            &settings,
+            1024, 0, 0, "acct", &rl(),
+        );
+        assert!(matches!(v, Verdict::Quarantine { reason } if reason == "allowlist_unverified"));
+    }
+
+    // default (toggle off) preserves behavior — still accepted for relays
+    // that don't stamp Authentication-Results — but the audit reason records
+    // that the allowlist hit was unverified, and the caller logs a warning.
+    #[test]
+    fn allowlisted_unauthenticated_accepted_but_flagged_by_default() {
+        let v = evaluate(
+            &parsed("alice@example.com"),
+            500, &headers_with_auth(false),
+            &security_with(&["alice@example.com"], &[], false),
+            1024, 0, 0, "acct", &rl(),
+        );
+        assert!(matches!(v, Verdict::Accept { reason } if reason == "allowlist_unverified"));
     }
 
     #[test]

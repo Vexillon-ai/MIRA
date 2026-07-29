@@ -460,6 +460,9 @@ pub async fn process_message_for_account(
         turn_ctx.conversation_id = Some(conv.id.clone());
     }
 
+    // genuine inbound message → user is active; reset the companion
+    // missed-check-in counter so a non-web user doesn't falsely escalate.
+    state.agent_core.mark_user_active(&resolved_user_id);
     let rx = match state.agent_core
         .process_with_context(
             &session_id, &resolved_user_id, "telegram", &effective_text,

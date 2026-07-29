@@ -12,7 +12,7 @@ use axum::{Extension, extract::Query, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentCore;
-use crate::auth::AuthUser;
+use crate::auth::{AdminUser, AuthUser};
 use crate::providers::openrouter::{Catalog, OpenRouterProvider};
 use crate::server::handlers::onboarding::DataDir;
 use crate::web::LiveConfig;
@@ -493,6 +493,12 @@ pub struct EmbeddingModelsResponse {
 }
 
 pub async fn list_embedding_models(
+    // admin-only. This is an `/api/admin/` route that fetches an operator-
+    // supplied provider URL; without this extractor any authenticated non-admin
+    // reached it (the blanket auth layer only proves *a* login) and could use it
+    // as an SSRF probe. Provider URLs legitimately target loopback/LAN (a local
+    // Ollama/LM Studio), so we gate on admin rather than SSRF-blocking the fetch.
+    _admin:              AdminUser,
     Extension(live_cfg): Extension<Arc<LiveConfig>>,
     Query(q):            Query<EmbeddingModelsQuery>,
 ) -> impl IntoResponse {
@@ -530,6 +536,9 @@ pub async fn list_embedding_models(
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
+        // don't follow redirects — a malicious provider URL could otherwise
+        // 30x-bounce the admin's request (with its Bearer key) to an internal host.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
 

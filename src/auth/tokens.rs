@@ -25,6 +25,14 @@ pub struct Claims {
     pub exp:  i64,
     /// Issued-at (Unix seconds).
     pub iat:  i64,
+    /// Token generation counter. Set from `User.token_version` at issue
+    /// time; the auth middleware rejects any token whose `tv` differs from the
+    /// user's current value, so bumping `token_version` invalidates every
+    /// outstanding access token at once. `#[serde(default)]` so tokens issued
+    /// before this field existed decode as `tv = 0` and still match users at
+    /// `token_version = 0` (i.e. everyone who has never had sessions revoked).
+    #[serde(default)]
+    pub tv:   i64,
 }
 
 // ── TokenPair ─────────────────────────────────────────────────────────────────
@@ -49,6 +57,7 @@ pub fn issue_token_pair(user: &User, secret: &str) -> Result<TokenPair, MiraErro
         role: user.role.as_str().to_owned(),
         exp,
         iat: now,
+        tv:  user.token_version,
     };
 
     let access_token = encode(
@@ -82,6 +91,7 @@ pub fn issue_long_lived_access_token(
         role: user.role.as_str().to_owned(),
         exp:  now + ttl_secs,
         iat:  now,
+        tv:   user.token_version,
     };
     encode(
         &Header::new(Algorithm::HS256),

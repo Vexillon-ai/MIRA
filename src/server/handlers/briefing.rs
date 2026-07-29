@@ -124,7 +124,7 @@ pub async fn send_briefing_now(
          the history store failed at boot; check server logs)",
     ))?;
     match dispatcher.send_briefing(&me.id).await {
-        Ok(DispatchOutcome::Sent { conversation_id, channel, chars }) => Ok(Json(json!({
+        Ok(DispatchOutcome::Sent { conversation_id, channel, chars, .. }) => Ok(Json(json!({
             "status":          "sent",
             "channel":         channel,
             "chars":           chars,

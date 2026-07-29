@@ -174,6 +174,12 @@ pub struct AgentCore {
     history:           OnceLock<Arc<HistoryStore>>,
     // Live config handle for hot-reloadable per-turn settings (tool_selection).
     live_config:       OnceLock<Arc<crate::web::LiveConfig>>,
+    // Installed by the Gateway (which owns the tracker). Lets the
+    // AgentCore-built SafetyFloor + engagement classifier surface a health
+    // degradation when a safety delivery fails or the distress classifier is
+    // down — the gateway-built SafetyFloor already has it, this
+    // gives the in-core path the same visibility. Absent in unit tests.
+    degradations:      OnceLock<Arc<crate::health::degradation::DegradationTracker>>,
 }
 
 // Progressive disclosure for Just-in-Time Tools: lets the tool loop pull more
@@ -235,6 +241,7 @@ impl AgentCore {
             max_tool_rounds: max_rounds,
             max_context_turns: max_turns,
             auth: OnceLock::new(),
+            degradations: OnceLock::new(),
             event_bus: OnceLock::new(),
             wiki: OnceLock::new(),
             companion: OnceLock::new(),
@@ -340,6 +347,12 @@ impl AgentCore {
     // Lets the memory hook resolve group memberships for scoped retrieval.
     pub fn set_auth(&self, auth: Arc<LocalAuthService>) {
         let _ = self.auth.set(auth);
+    }
+
+    // Install the health degradation tracker so the in-core
+    // SafetyFloor + engagement classifier can surface safety-path failures.
+    pub fn set_degradations(&self, deg: Arc<crate::health::degradation::DegradationTracker>) {
+        let _ = self.degradations.set(deg);
     }
 
     // Install the persisted-history store so turns can rehydrate their
@@ -565,6 +578,20 @@ impl AgentCore {
     }
 
     // ── Public API ───────────────────────────────────────────────────────────
+
+    // note that a genuine INBOUND user message arrived, resetting the
+    // companion missed-check-in counter. Every channel's inbound handler must
+    // call this (the web chat handler does its own reset) so a user who receives
+    // and answers check-ins on Telegram/Signal/etc. doesn't wrongly climb toward
+    // a false "went silent" escalation and get their check-ins suppressed. It is
+    // deliberately NOT called from `process_with_context` because proactive
+    // check-ins and internal turns also route through there — only real inbound
+    // messages reset the counter. No-op when companion isn't installed.
+    pub fn mark_user_active(&self, user_id: &str) {
+        if let Some(sys) = self.companion() {
+            let _ = sys.store().reset_missed_checkins(user_id);
+        }
+    }
 
     // Process one user turn and return a live event stream.
     //     // The returned receiver begins receiving [`StreamEvent`]s immediately.
@@ -1173,7 +1200,7 @@ impl AgentCore {
         // measure the gain on live turns.
         // Honest estimate = messages + the tool-schema block the request ALSO
         // carries (not part of `messages`). Excluding tools made this log undercount
-        // the real prompt by 10x+ on tool turns (F15) and hid where the tokens go.
+        // the real prompt by 10x+ on tool turns and hid where the tokens go.
         let est_input_tokens = crate::agent::tokens::estimate_messages(&messages) + tool_reserve;
         let window_mode = if self.config.agent.context_length_tokens > 0 { "budget" } else { "fixed" };
         debug!(
@@ -1280,7 +1307,7 @@ impl AgentCore {
         // covering every provider the tool loop then calls.
         messages = ChatMessage::coalesce_system(&messages);
 
-        // F13: cap a single tool RESULT fed back mid-loop to ~a quarter of the
+        // cap a single tool RESULT fed back mid-loop to ~a quarter of the
         // window (bytes ≈ tokens × 4, so `effective_ctx` bytes ≈ effective_ctx/4
         // tokens). The budget above is computed before the loop and can't see a
         // large result that arrives during it; on a small local window one big
@@ -1346,7 +1373,16 @@ impl AgentCore {
         // the per-turn model the user picked), so for "web" we don't double-
         // extract here — core drives only web's heuristic and the full dispatch
         // for every other channel.
-        if !context.skip_memory_hooks {
+        // honour an explicit "don't record this" — skip ALL post-turn
+        // extraction (memory store, knowledge graph, AND wiki) for this turn. The
+        // turn still stays in the working conversation history; it just isn't
+        // mined into long-term memory. (Web's own post-stream extractor honours
+        // the same signal in the chat handler.)
+        let no_store = crate::memory::auto_extract::is_no_store_request(input);
+        if no_store {
+            info!("consent: user asked not to record this turn — skipping memory + wiki extraction");
+        }
+        if !context.skip_memory_hooks && !no_store {
             use crate::config::ExtractorKind;
             let ax     = &self.config.memory.auto_extract;
             let is_web = channel.eq_ignore_ascii_case("web");
@@ -1416,11 +1452,13 @@ impl AgentCore {
                         auth: self.auth.get().map(Arc::clone),
                         notifications: companion.notifications_arc(),
                         groups: Some(companion.groups_arc()),
+                        degradations: self.degradations.get().map(Arc::clone),
                     };
                     let assessor = crate::companion::engagement::EngagementAssessor {
                         provider: Arc::clone(provider),
                         log: companion.engagement_arc(),
                         safety: Some(safety),
+                        degradations: self.degradations.get().map(Arc::clone),
                     };
                     crate::companion::engagement::spawn_post_hook(
                         assessor,
@@ -1443,6 +1481,7 @@ impl AgentCore {
         // skips entirely. Skipped when the caller set skip_wiki_hooks
         // (onboarding, ephemeral chats).
         if !context.skip_wiki_hooks
+            && !no_store  // honour "don't record this"
             && self.config.wiki.enabled
             && !self.config.wiki.auto_extract.mode.eq_ignore_ascii_case("off")
         {

@@ -67,7 +67,7 @@ fn dispatcher(
 fn outcome_json(o: &crate::companion::dispatcher::DispatchOutcome) -> serde_json::Value {
     use crate::companion::dispatcher::DispatchOutcome::*;
     match o {
-        Sent { conversation_id, channel, chars } => serde_json::json!({
+        Sent { conversation_id, channel, chars, .. } => serde_json::json!({
             "ok": true, "status": "sent",
             "channel": channel, "chars": chars, "conversation_id": conversation_id,
         }),

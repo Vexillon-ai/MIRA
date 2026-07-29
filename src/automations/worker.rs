@@ -193,12 +193,21 @@ impl Worker {
         let next = if expire_now {
             None
         } else {
-            match next_run_at(&sched.trigger, &sched.timezone, now) {
-                Ok(n)  => n,
-                Err(e) => {
-                    warn!("automations: next_run_at({}) failed: {e}", sched.id);
-                    None
+            match &sched.trigger {
+                // anchor intervals to the CREATION time so repeated fires
+                // land on a fixed grid instead of drifting forward by the tick
+                // granularity + processing delay each period (which `now + every`
+                // accumulates). Cron is already grid-aligned; one-offs expire.
+                super::types::TriggerSpec::Interval { every_secs } if *every_secs > 0 => {
+                    super::next_run_at::interval_next_grid(sched.created_at, *every_secs, now)
                 }
+                _ => match next_run_at(&sched.trigger, &sched.timezone, now) {
+                    Ok(n)  => n,
+                    Err(e) => {
+                        warn!("automations: next_run_at({}) failed: {e}", sched.id);
+                        None
+                    }
+                },
             }
         };
 

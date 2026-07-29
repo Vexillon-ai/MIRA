@@ -490,6 +490,10 @@ pub async fn chat_handler(
                                 }
                             } else if auto_extract_cfg.effective_extractor("web")
                                 == crate::config::ExtractorKind::Llm
+                                // honour an explicit "don't record this" — the
+                                // web handler owns web's LLM extraction, so it must
+                                // check consent here too (the core post-hook can't).
+                                && !crate::memory::auto_extract::is_no_store_request(&message)
                             {
                                 // LLM auto-extract runs only outside onboarding
                                 // mode, post-stream, as fire-and-forget. The

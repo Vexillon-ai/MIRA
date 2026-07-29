@@ -71,14 +71,26 @@ async fn handle_event(
     let now = chrono::Utc::now().timestamp();
 
     for sub in subs {
-        // Authorization gate. The event's `user_id` (if any) must equal the
-        // subscription's owning user, OR the subscription is system-owned
-        // (system rules see every user's events). Without this filter, a
-        // subscription could match events emitted on another user's behalf.
-        if let Some(ev_user) = ev.user_id.as_deref() {
-            let owned = sub.user_id == ev_user
-                || matches!(sub.owner_kind, crate::automations::OwnerKind::System);
-            if !owned { continue; }
+        // Authorization gate. Without this filter, a subscription could match
+        // events emitted on another user's behalf.
+        match ev.user_id.as_deref() {
+            // User-attributed event: only the owner's subs (or system rules,
+            // which see every user's events).
+            Some(ev_user) => {
+                let owned = sub.user_id == ev_user
+                    || matches!(sub.owner_kind, crate::automations::OwnerKind::System);
+                if !owned { continue; }
+            }
+            // a broadcast / system event carries no user attribution.
+            // Only SYSTEM-owned subscriptions may act on it — otherwise a
+            // single broadcast fans out to EVERY user's subscriptions (each
+            // running as its own owner), which is both a scope leak and an
+            // amplifier for a user-attached action on a frequent system event.
+            None => {
+                if !matches!(sub.owner_kind, crate::automations::OwnerKind::System) {
+                    continue;
+                }
+            }
         }
         // Expired? Skip and don't bother dispatching.
         if let Some(exp) = sub.expires_at { if exp <= now { continue; } }

@@ -115,6 +115,20 @@ pub fn next_n_runs(
     Ok(out)
 }
 
+/// the next Interval fire on a FIXED grid anchored at the schedule's
+/// `created_at`, so repeated fires don't drift forward by the tick granularity +
+/// processing delay each period (which the plain `now + every` in
+/// [`next_run_at`] accumulates). Returns the first `created_at + k*every`
+/// strictly after `now`; a post-downtime backlog collapses to that single next
+/// grid point (no catch-up storm). `None` when `every_secs == 0`.
+pub fn interval_next_grid(created_at: i64, every_secs: u64, now: i64) -> Option<i64> {
+    if every_secs == 0 { return None; }
+    let every = every_secs as i64;
+    let elapsed = now.saturating_sub(created_at).max(0);
+    let periods = elapsed / every + 1;
+    Some(created_at.saturating_add(periods.saturating_mul(every)))
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -175,6 +189,20 @@ mod tests {
     fn interval_advances_by_period() {
         let spec = TriggerSpec::Interval { every_secs: 60 };
         assert_eq!(next_run_at(&spec, "UTC", 1_000).unwrap(), Some(1_060));
+    }
+
+    // interval fires stay on a fixed grid — no forward drift.
+    #[test]
+    fn interval_grid_is_drift_free() {
+        // Anchored at created_at=1000, every=60 → grid 1060, 1120, 1180, …
+        assert_eq!(interval_next_grid(1000, 60, 1000), Some(1060)); // first fire
+        // A tick that arrives 15s LATE (at 1075, past the 1060 grid point) still
+        // schedules the next grid point (1120), NOT 1075+60=1135 — no drift.
+        assert_eq!(interval_next_grid(1000, 60, 1075), Some(1120));
+        // Way behind after downtime → collapses to the next single grid point.
+        assert_eq!(interval_next_grid(1000, 60, 5000), Some(5020));
+        // every_secs == 0 → None (the worker falls back to the error path).
+        assert_eq!(interval_next_grid(1000, 0, 5000), None);
     }
 
     #[test]

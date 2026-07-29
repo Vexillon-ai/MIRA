@@ -284,12 +284,14 @@ impl GatewayBuilder {
                     info!("Auth service initialised ({})", auth_db_path.display());
                     match svc.ensure_admin_exists() {
                         Ok(Some(pw)) => {
-                            tracing::warn!("┌─────────────────────────────────────────────────┐");
-                            tracing::warn!("│  MIRA first run — default admin credentials:    │");
-                            tracing::warn!("│  username : admin                               │");
-                            tracing::warn!("│  password : {:<37}│", pw);
-                            tracing::warn!("│  Change this password immediately!              │");
-                            tracing::warn!("└─────────────────────────────────────────────────┘");
+                            // the one-time password goes to STDOUT ONLY, never the
+                            // tracing log — which writes to the persistent, sentinel-
+                            // shared, backup-swept app log file where a plaintext admin
+                            // credential must not live. For a service, stdout → journald
+                            // (access-controlled), not the app log.
+                            let (banner, log_line) = first_run_credential_messages(&pw);
+                            println!("{banner}");
+                            warn!("{log_line}");
                         }
                         Ok(None) => {}
                         Err(e)   => warn!("ensure_admin_exists (non-fatal): {}", e),
@@ -919,6 +921,9 @@ impl GatewayBuilder {
         if let Some(ref a) = auth_service {
             agent_core.set_auth(Arc::clone(a));
         }
+        // Hand the degradation tracker to AgentCore so the in-core SafetyFloor +
+        // engagement classifier can surface safety-path failures.
+        agent_core.set_degradations(Arc::clone(&degradation_tracker));
 
         // Install the history store so a turn can rehydrate its in-memory
         // session from persisted conversation messages on a cache miss (after a
@@ -1283,6 +1288,34 @@ impl GatewayBuilder {
             });
         }
 
+        // FCM transport (opt-in, mobile app). Misconfiguration while enabled
+        // is non-fatal: log and fall back to web-push-only rather than block
+        // boot. `None` when disabled. (Built here — before the companion
+        // scheduler — so the check-in dispatcher can query push subscriptions.)
+        let fcm = match crate::notifications::fcm::FcmService::open(&config.notifications.fcm) {
+            Ok(Some(svc)) => { info!("FCM transport initialised (project {})", config.notifications.fcm.project_id.as_deref().unwrap_or("from-service-account")); Some(svc) }
+            Ok(None)      => None,
+            Err(e)        => { warn!("FCM transport failed to open (non-fatal — web push still active): {e}"); None }
+        };
+        let web_push: Option<Arc<crate::notifications::web_push::WebPushService>> =
+            match crate::notifications::web_push::WebPushService::open(
+                &data_dir,
+                &crate::notifications::web_push::service_path(&data_dir),
+                fcm,
+            ) {
+                Ok(svc) => {
+                    info!("Web Push service initialised (VAPID at {})", data_dir.display());
+                    crate::notifications::web_push::spawn_bus_forwarder(
+                        Arc::clone(&notification_bus), svc.clone(),
+                    );
+                    Some(Arc::new(svc))
+                }
+                Err(e) => {
+                    warn!("Web Push service failed to open (non-fatal): {e}");
+                    None
+                }
+            };
+
         // ── Companion proactive check-in scheduler ────────────────
         // Spawned after AgentCore + history are ready (the scheduler
         // needs both to dispatch a check-in). Only wired when the
@@ -1337,6 +1370,8 @@ impl GatewayBuilder {
                     // narrate MIRA's recent autonomous work for the user.
                     // Same store the supervisor records into (with_audit_store).
                     .with_agent_audit(agent_audit.clone())
+                    // per-user push subscriptions to confirm web delivery.
+                    .with_web_push(web_push.clone())
                     // TTS so proactive check-ins/briefings honour the
                     // owner's per-channel "voice: always" preference and
                     // go out as voice notes, matching normal replies.
@@ -1357,6 +1392,7 @@ impl GatewayBuilder {
                         auth:          auth_service.as_ref().map(Arc::clone),
                         notifications: Some(Arc::clone(&notification_bus)),
                         groups:        Some(sys.groups_arc()),
+                        degradations:  Some(Arc::clone(&degradation_tracker)),
                     };
                     let scheduler = crate::companion::scheduler::CompanionScheduler::spawn(
                         sys.store_arc(),
@@ -1464,9 +1500,9 @@ impl GatewayBuilder {
                     // a death before completion leaves it stuck NULL → the job
                     // goes dormant (this is why the hourly system_audit had been
                     // silent for days). Recompute next_run_at for those rows.
-                    match store.requeue_orphaned_system_schedules(chrono::Utc::now().timestamp()) {
+                    match store.requeue_orphaned_schedules(chrono::Utc::now().timestamp()) {
                         Ok(0) => {}
-                        Ok(n) => info!("recovered {n} orphaned system schedule(s) (NULL next_run_at)"),
+                        Ok(n) => info!("recovered {n} orphaned schedule(s) (NULL next_run_at, all owners)"),
                         Err(e) => warn!("orphaned-schedule recovery failed: {e}"),
                     }
 
@@ -1571,32 +1607,9 @@ impl GatewayBuilder {
         // messages reach registered browsers/phones. `None` on failure —
         // the HTTP endpoints will 503 but the rest of the server is
         // unaffected.
-        // FCM transport (opt-in, mobile app). Misconfiguration while enabled
-        // is non-fatal: log and fall back to web-push-only rather than block
-        // boot. `None` when disabled.
-        let fcm = match crate::notifications::fcm::FcmService::open(&config.notifications.fcm) {
-            Ok(Some(svc)) => { info!("FCM transport initialised (project {})", config.notifications.fcm.project_id.as_deref().unwrap_or("from-service-account")); Some(svc) }
-            Ok(None)      => None,
-            Err(e)        => { warn!("FCM transport failed to open (non-fatal — web push still active): {e}"); None }
-        };
-        let web_push: Option<Arc<crate::notifications::web_push::WebPushService>> =
-            match crate::notifications::web_push::WebPushService::open(
-                &data_dir,
-                &crate::notifications::web_push::service_path(&data_dir),
-                fcm,
-            ) {
-                Ok(svc) => {
-                    info!("Web Push service initialised (VAPID at {})", data_dir.display());
-                    crate::notifications::web_push::spawn_bus_forwarder(
-                        Arc::clone(&notification_bus), svc.clone(),
-                    );
-                    Some(Arc::new(svc))
-                }
-                Err(e) => {
-                    warn!("Web Push service failed to open (non-fatal): {e}");
-                    None
-                }
-            };
+        // FCM + Web Push are initialised earlier (moved above the companion
+        // scheduler block) so the check-in dispatcher can query per-user push
+        // subscriptions to confirm web delivery.
 
         // ── Central Server ───────────────────────────────────────────
         // Built after  so the telegram account lookup can be injected,
@@ -2056,6 +2069,26 @@ pub async fn warn_on_context_window_over_model(config: &MiraConfig) {
             "context guardrail: couldn't read {provider} loaded context for '{model}' \
              (model not loaded / API unavailable) — skipping."),
     }
+}
+
+/// Split the first-run admin credential into (console banner, log line). The
+/// generated password appears ONLY in the console banner (printed to stdout);
+/// the log line — which lands in the persistent, sentinel-shared, backup-swept
+/// app log — carries NO secret, only that an admin was created and where to look
+/// Kept pure so a test can assert the log line never contains the pw.
+fn first_run_credential_messages(pw: &str) -> (String, String) {
+    let banner = format!(
+        "┌─────────────────────────────────────────────────┐\n\
+         │  MIRA first run — default admin credentials:    │\n\
+         │  username : admin                               │\n\
+         │  password : {pw:<37}│\n\
+         │  Change this password immediately after login!  │\n\
+         └─────────────────────────────────────────────────┘"
+    );
+    let log_line =
+        "First-run admin user 'admin' created; its one-time password was printed to the \
+         console/stdout (NOT the log). Change it immediately after first login.".to_string();
+    (banner, log_line)
 }
 
 /// Pure verdict for the context guardrail (testable without a live backend):
@@ -3237,6 +3270,17 @@ mod failover_policy_tests {
     }
 
     #[test]
+    fn first_run_password_is_never_in_the_log_line() {
+        use super::first_run_credential_messages;
+        let (banner, log) = first_run_credential_messages("SUPER-SECRET-PW-123");
+        // The operator sees the password on the console banner (stdout).
+        assert!(banner.contains("SUPER-SECRET-PW-123"), "console banner must show the pw");
+        // But the LOG line — which persists in the app log — must never contain it.
+        assert!(!log.contains("SUPER-SECRET-PW-123"), "password must not reach the log");
+        assert!(log.contains("admin"), "log records that an admin was created");
+    }
+
+    #[test]
     fn context_window_guardrail_flags_only_over_budget() {
         use super::{window_fit, WindowFit};
         // Equal or under the model's loaded context → fits (the live case: 100K ≤ 128K).
@@ -3252,7 +3296,7 @@ mod failover_policy_tests {
 
     #[test]
     fn single_provider_override_is_wrapped_in_the_degeneracy_guard() {
-        // F4: the per-turn model-override path must apply the degeneracy guard
+        // the per-turn model-override path must apply the degeneracy guard
         // (like build_provider_chain), so a wedged model picked for one message is
         // still caught. `guard()` reports "guarded" via name() only when it wraps.
         let mut c = cfg();

@@ -458,9 +458,7 @@ impl ResearchFetcher for StubFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-    use tokio::time::timeout;
+    use std::sync::{Arc, Mutex};    use tokio::time::timeout;
 
     use crate::agent::instance::{Agent, AgentRegistry};
     use crate::agent::supervisor::{Supervisor, WorkerOutcome};

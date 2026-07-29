@@ -641,6 +641,48 @@ fn is_ip_hard_blocked(ip: IpAddr) -> bool {
     is_ip_blocked(ip) && !is_ip_lan_relaxable(ip)
 }
 
+/// Standalone SSRF guard for call sites that must issue their own HTTP request
+/// (not through [`HttpPolicy`]) — e.g. the CalDAV connector and the health
+/// webhook firer. Resolves `url`'s host and returns `Err` unless at least one
+/// resolved address is safe. "Safe" here = **not** loopback, link-local,
+/// cloud-metadata (169.254.169.254), unspecified or multicast; **private LAN
+/// ranges (RFC1918 / CGNAT / IPv6 ULA) ARE allowed**, so a user's self-hosted
+/// service (a home NAS CalDAV server, a LAN webhook receiver) stays reachable
+/// while the MIRA host's own loopback services and cloud metadata do not.
+///
+/// This defeats DNS-rebinding only in combination with either a pinned-IP
+/// client or `reqwest::redirect::Policy::none()` on the caller's client — a
+/// pre-flight check alone can be bypassed by a redirect, so callers MUST also
+/// disable redirects (or re-check each hop).
+pub async fn guard_public_url(url: &str) -> Result<(), PolicyError> {
+    let parsed = Url::parse(url).map_err(|e| PolicyError::BlockedHost {
+        reason: format!("invalid url: {e}"),
+        host:   url.to_string(),
+    })?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(PolicyError::BlockedScheme { scheme: other.to_owned() }),
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| PolicyError::BlockedHost { reason: "no host in url".into(), host: url.to_string() })?
+        .to_string();
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let addrs: Vec<SocketAddr> = lookup_host(format!("{host}:{port}"))
+        .await
+        .map_err(|e| PolicyError::DnsResolution { host: host.clone(), detail: e.to_string() })?
+        .collect();
+    // Reject when EVERY resolved address is hard-blocked (loopback / link-local
+    // / metadata / unspecified / multicast). Private LAN is permitted.
+    if addrs.is_empty() || addrs.iter().all(|a| is_ip_hard_blocked(a.ip())) {
+        return Err(PolicyError::BlockedHost {
+            reason: "resolves only to loopback/link-local/metadata (SSRF-blocked)".into(),
+            host,
+        });
+    }
+    Ok(())
+}
+
 fn is_ipv4_blocked(ip: Ipv4Addr) -> bool {
     if ip.is_loopback()       { return true; }  // 127.0.0.0/8
     if ip.is_private()        { return true; }  // 10/8, 172.16/12, 192.168/16
@@ -990,6 +1032,33 @@ mod tests {
             resolve_redirect(base, "https://other.com/x").unwrap(),
             "https://other.com/x"
         );
+    }
+
+    // ── Standalone SSRF guard (self-fetch call sites) ────────────
+
+    #[tokio::test]
+    async fn guard_public_url_blocks_loopback_metadata_and_bad_scheme() {
+        // Loopback (the MIRA host's own services) + cloud-metadata are blocked.
+        assert!(guard_public_url("http://127.0.0.1/").await.is_err());
+        assert!(guard_public_url("http://[::1]/").await.is_err());
+        assert!(guard_public_url("http://169.254.169.254/latest/meta-data/").await.is_err());
+        // Non-http(s) schemes rejected outright; garbage URL errors.
+        assert!(matches!(
+            guard_public_url("file:///etc/passwd").await,
+            Err(PolicyError::BlockedScheme { .. })
+        ));
+        assert!(guard_public_url("not-a-url").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn guard_public_url_allows_public_and_self_hosted_lan() {
+        // IP literals → no network DNS in the test. A public host is fine.
+        assert!(guard_public_url("http://8.8.8.8/").await.is_ok());
+        // A self-hosted service on the LAN (home NAS CalDAV, LAN webhook
+        // receiver) stays reachable — private ranges are permitted, unlike
+        // loopback/metadata. This is the property that keeps self-hosted LAN targets usable.
+        assert!(guard_public_url("http://192.168.1.10/dav/").await.is_ok());
+        assert!(guard_public_url("http://10.0.0.1:5232/").await.is_ok());
     }
 
     // ── Live request against a throw-away local server ──────────────────────

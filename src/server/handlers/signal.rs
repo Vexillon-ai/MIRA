@@ -121,6 +121,8 @@ pub async fn signal_handler(
         }
     }
 
+    // reset the companion missed-check-in counter on genuine inbound.
+    state.agent_core.mark_user_active(&resolved_user_id);
     let rx = match state.agent_core
         .process_with_context(
             &session_id, &resolved_user_id, "signal", &msg.content,

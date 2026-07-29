@@ -73,6 +73,16 @@ fn extract_auth_user(parts: &mut Parts) -> Result<AuthUser, Response> {
         return Err(AuthError(StatusCode::UNAUTHORIZED, "Account disabled").into_response());
     }
 
+    // per-user token revocation. A stateless access token stays
+    // cryptographically valid until its `exp`; without this check, revoking a
+    // user's sessions (or "sign out everywhere") wouldn't stop an already-issued
+    // access token. The token embeds the `token_version` current at issue time
+    // (`claims.tv`); bumping the user's `token_version` makes every prior token
+    // fail this comparison immediately.
+    if claims.tv != user.token_version {
+        return Err(AuthError(StatusCode::UNAUTHORIZED, "Session revoked").into_response());
+    }
+
     Ok(AuthUser(user))
 }
 

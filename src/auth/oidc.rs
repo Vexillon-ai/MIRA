@@ -298,9 +298,29 @@ pub fn decide_provision(
     matched_by_email: bool,
 ) -> ProvisionDecision {
     if matched_by_identity {
+        // A previously-bound (issuer, sub) identity — the IdP already
+        // authenticated this exact subject. Email verification is irrelevant
+        // here; nothing is being linked or created by email.
         return ProvisionDecision::UseExisting;
     }
+
+    // from here every decision keys off the IdP-supplied `email`. That
+    // claim is only trustworthy when the IdP asserts `email_verified == true`
+    // (or the operator has explicitly opted to trust this provider's emails).
+    // Without it, an attacker who can set an arbitrary email at the IdP could
+    // match a victim's address and take over their MIRA account — so we refuse
+    // to link OR auto-provision on an unverified email.
+    let email_is_trusted =
+        claims.email_verified == Some(true) || provider.trust_unverified_email;
+
     if matched_by_email {
+        if !email_is_trusted {
+            return ProvisionDecision::Reject(
+                "This identity provider did not assert a verified email, so it can't be \
+                 linked to an existing MIRA account. Ask an administrator to link it."
+                    .into(),
+            );
+        }
         return ProvisionDecision::LinkExisting;
     }
     if !provider.auto_provision {
@@ -311,6 +331,12 @@ pub fn decide_provision(
     let email = claims.email.as_deref().unwrap_or("").trim().to_lowercase();
     if email.is_empty() {
         return ProvisionDecision::Reject("The identity provider returned no email; cannot auto-provision.".into());
+    }
+    if !email_is_trusted {
+        return ProvisionDecision::Reject(
+            "The identity provider did not assert a verified email; cannot auto-provision an account."
+                .into(),
+        );
     }
     if !domain_allowed(&email, &provider.allowed_domains) {
         return ProvisionDecision::Reject(format!("Email domain not permitted for auto-provisioning ({email})."));
@@ -378,14 +404,20 @@ mod tests {
             auto_provision: auto,
             allowed_domains: domains.iter().map(|s| s.to_string()).collect(),
             default_role: role.into(),
+            trust_unverified_email: false,
         }
     }
 
     fn claims(email: Option<&str>) -> OidcClaims {
+        claims_ev(email, Some(true))
+    }
+
+    // Build claims with an explicit `email_verified` value (tests).
+    fn claims_ev(email: Option<&str>, email_verified: Option<bool>) -> OidcClaims {
         OidcClaims {
             sub: "sub-1".into(),
             email: email.map(str::to_string),
-            email_verified: Some(true),
+            email_verified,
             name: Some("A B".into()),
             preferred_username: None,
             issuer: "https://idp.example".into(),
@@ -429,6 +461,53 @@ mod tests {
         assert!(matches!(d, ProvisionDecision::Reject(_)));
     }
 
+    // an email match with an UNVERIFIED email must NOT link — otherwise an
+    // attacker who sets their IdP email to a victim's takes over that account.
+    #[test]
+    fn email_match_with_unverified_email_is_rejected() {
+        let p = provider(false, &[], "user");
+        // email_verified missing (None) and explicitly false both refuse.
+        assert!(matches!(
+            decide_provision(&p, &claims_ev(Some("admin@x.com"), None), false, true),
+            ProvisionDecision::Reject(_)
+        ));
+        assert!(matches!(
+            decide_provision(&p, &claims_ev(Some("admin@x.com"), Some(false)), false, true),
+            ProvisionDecision::Reject(_)
+        ));
+    }
+
+    // auto-provision also requires a verified email.
+    #[test]
+    fn autoprovision_with_unverified_email_is_rejected() {
+        let d = decide_provision(&provider(true, &[], "user"), &claims_ev(Some("a@x.com"), None), false, false);
+        assert!(matches!(d, ProvisionDecision::Reject(_)));
+    }
+
+    // opt-in: a provider flagged `trust_unverified_email` links/provisions
+    // on an unverified email (for a known-safe internal IdP that omits the claim).
+    #[test]
+    fn trust_unverified_email_opt_in_allows_link_and_create() {
+        let mut p = provider(true, &[], "user");
+        p.trust_unverified_email = true;
+        assert_eq!(
+            decide_provision(&p, &claims_ev(Some("a@x.com"), None), false, true),
+            ProvisionDecision::LinkExisting
+        );
+        assert!(matches!(
+            decide_provision(&p, &claims_ev(Some("a@x.com"), None), false, false),
+            ProvisionDecision::Create { .. }
+        ));
+    }
+
+    // Identity-match still works regardless of email_verified (nothing is
+    // linked/created by email on that path).
+    #[test]
+    fn identity_match_ignores_email_verified() {
+        let d = decide_provision(&provider(false, &[], "user"), &claims_ev(Some("a@x.com"), None), true, false);
+        assert_eq!(d, ProvisionDecision::UseExisting);
+    }
+
     #[test]
     fn sanitize_and_seed() {
         assert_eq!(sanitize_username("Alice Smith!"), "alice.smith");
@@ -464,6 +543,7 @@ mod tests {
                 auto_provision: false,
                 allowed_domains: vec![],
                 default_role: "user".into(),
+                trust_unverified_email: false,
             }],
         };
         let svc = OidcService::new(&cfg, 8082);

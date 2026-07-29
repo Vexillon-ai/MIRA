@@ -4850,6 +4850,15 @@ pub struct OidcProvider {
     // Role granted to auto-provisioned users. "user" (default) or "admin".
     #[serde(default)]
     pub default_role: String,
+
+    // trust the IdP's `email` claim even when it does NOT assert
+    // `email_verified == true`. OFF by default — an unverified email must
+    // never link to (or auto-provision) an account, or an attacker who can
+    // set an arbitrary email at the IdP could take over a MIRA account by
+    // matching a victim's address. Turn this on ONLY for a known-safe
+    // internal IdP that vouches for every email but omits the claim.
+    #[serde(default)]
+    pub trust_unverified_email: bool,
 }
 
 impl OidcProvider {
@@ -5110,7 +5119,7 @@ mod tests {
 
     #[test]
     fn env_does_not_override_a_config_set_openrouter_key() {
-        // F10: a key the user explicitly set (config/UI) must WIN over a stale
+        // a key the user explicitly set (config/UI) must WIN over a stale
         // .env value — the reverse of the old silent-override footgun. The
         // assertion (config wins) holds whether the env var is present or not,
         // so it's robust to the shared-process-env race with the fill-empty test.

@@ -87,6 +87,7 @@ fn parse_postmark(body: &[u8], accept_html: bool)
     let mut auto_submitted = false;
     let mut bulk_or_list   = false;
     let mut auth_fail      = false;
+    let mut auth_pass      = false;
     for h in &p.headers {
         let name_lc = h.name.to_ascii_lowercase();
         match name_lc.as_str() {
@@ -106,6 +107,9 @@ fn parse_postmark(body: &[u8], accept_html: bool)
                 if lc.contains("spf=fail") || lc.contains("dkim=fail") || lc.contains("dmarc=fail") {
                     auth_fail = true;
                 }
+                if lc.contains("spf=pass") || lc.contains("dkim=pass") || lc.contains("dmarc=pass") {
+                    auth_pass = true;
+                }
             }
             _ => {}
         }
@@ -117,7 +121,7 @@ fn parse_postmark(body: &[u8], accept_html: bool)
         in_reply_to, references,
         p.text_body, p.html_body, accept_html,
     );
-    Ok((parsed, InboundHeaders { is_auto_submitted: auto_submitted, is_bulk_or_list: bulk_or_list, auth_fail }))
+    Ok((parsed, InboundHeaders { is_auto_submitted: auto_submitted, is_bulk_or_list: bulk_or_list, auth_fail, auth_pass }))
 }
 
 // ── Resend ──────────────────────────────────────────────────────────────────
@@ -173,13 +177,20 @@ fn parse_resend(body: &[u8], accept_html: bool)
             lc.contains("spf=fail") || lc.contains("dkim=fail") || lc.contains("dmarc=fail")
         })
         .unwrap_or(false);
+    let auth_pass = header("Authentication-Results")
+        .or(header("authentication-results"))
+        .map(|v| {
+            let lc = v.to_ascii_lowercase();
+            lc.contains("spf=pass") || lc.contains("dkim=pass") || lc.contains("dmarc=pass")
+        })
+        .unwrap_or(false);
 
     let parsed = ParsedEmail::from_fields(
         sender_address, sender_display,
         d.subject, message_id, in_reply_to, references,
         d.text, d.html, accept_html,
     );
-    Ok((parsed, InboundHeaders { is_auto_submitted, is_bulk_or_list, auth_fail }))
+    Ok((parsed, InboundHeaders { is_auto_submitted, is_bulk_or_list, auth_fail, auth_pass }))
 }
 
 // ── Mailgun ─────────────────────────────────────────────────────────────────
@@ -230,13 +241,19 @@ fn parse_mailgun(body: &[u8], content_type: Option<&str>, accept_html: bool)
             lc.contains("spf=fail") || lc.contains("dkim=fail") || lc.contains("dmarc=fail")
         })
         .unwrap_or(false);
+    let auth_pass = form.get("Authentication-Results")
+        .map(|v| {
+            let lc = v.to_ascii_lowercase();
+            lc.contains("spf=pass") || lc.contains("dkim=pass") || lc.contains("dmarc=pass")
+        })
+        .unwrap_or(false);
 
     let parsed = ParsedEmail::from_fields(
         sender_address, sender_display,
         subject, message_id, in_reply_to, references,
         text_body, html_body, accept_html,
     );
-    Ok((parsed, InboundHeaders { is_auto_submitted, is_bulk_or_list, auth_fail }))
+    Ok((parsed, InboundHeaders { is_auto_submitted, is_bulk_or_list, auth_fail, auth_pass }))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

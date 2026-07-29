@@ -146,6 +146,18 @@ pub struct EmailSecurity {
     #[serde(default)]
     pub accept_from_unknown_senders: bool,
 
+    // when true, a sender on `allowed_senders` is only granted
+    // allowlist trust if the message carries a positive SPF/DKIM/DMARC
+    // pass (`Authentication-Results`). The `From:` header is trivially
+    // spoofable, so without this an attacker can forge `From:` to match
+    // an allowlisted address and be attributed to that member. Default
+    // false to preserve behavior for relays that don't stamp
+    // Authentication-Results; recommended on for a public-MX mailbox
+    // (Gmail/Outlook/Fastmail all stamp it). Unauthenticated allowlist
+    // mail is quarantined when this is on, accept-but-logged when off.
+    #[serde(default)]
+    pub require_authenticated_allowlist: bool,
+
     // Per-account overrides; when None the system-wide default
     // applies. Resolution lives in chunk 3's security pipeline.
     #[serde(default)]
@@ -174,6 +186,7 @@ impl Default for EmailSecurity {
             allowed_senders: Vec::new(),
             denied_senders:  Vec::new(),
             accept_from_unknown_senders: false,
+            require_authenticated_allowlist: false,
             accept_html:             None,
             accept_inline_images:    None,
             accept_attachments:      None,

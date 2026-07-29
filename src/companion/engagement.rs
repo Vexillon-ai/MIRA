@@ -34,6 +34,20 @@ const ENGAGEMENT_TIMEOUT: Duration = Duration::from_secs(20);
 // which is fine.
 const MIN_TURN_CHARS_FOR_LABEL: usize = 6;
 
+// a tiny high-precision pre-screen so a SHORT distress message bypasses the
+// length gate and is always classified. Deliberately narrow — a false positive
+// only triggers one (cheap) classification; a false negative could drop a real
+// cry for help. Substring match, ASCII-lowercased.
+fn contains_distress_keyword(s: &str) -> bool {
+    let l = s.to_ascii_lowercase();
+    const KW: &[&str] = &[
+        "help", "die", "kill", "hurt", "suicide", "suicidal", "overdose",
+        "hopeless", "worthless", "can't go on", "cant go on", "end it",
+        "self harm", "self-harm", "give up", "no reason",
+    ];
+    KW.iter().any(|k| l.contains(k))
+}
+
 // Bind together everything the post-hook needs. Passed by `Arc`
 // from the gateway so the spawn cost is just a clone.
 #[derive(Clone)]
@@ -46,6 +60,11 @@ pub struct EngagementAssessor {
     // wired — the label still lands in the engagement log, just
     // without escalation.
     pub safety: Option<SafetyFloor>,
+    // health-degradation tracker. Raised when the distress classifier
+    // errors/times out (the turn went un-screened for distress), so a
+    // persistently-down classifier surfaces on the health page. `None` in
+    // tests / builds without the tracker wired.
+    pub degradations: Option<Arc<crate::health::degradation::DegradationTracker>>,
 }
 
 // Fire the assessor in the background. Returns immediately; the
@@ -63,15 +82,23 @@ pub fn spawn_post_hook(
     assistant_msg: String,
     user_tz: Option<String>,
 ) {
-    if user_msg.trim().chars().count() < MIN_TURN_CHARS_FOR_LABEL
-        || assistant_msg.trim().chars().count() < MIN_TURN_CHARS_FOR_LABEL
+    // a short turn is normally skipped (little signal, LLM cost isn't
+    // worth it) — but a SHORT cry for help ("help", "die", "kill myself") is
+    // exactly the distress case we must never drop. Only skip when the USER
+    // message is both short AND shows no distress keyword. The assistant reply's
+    // length is irrelevant to whether the *user* expressed distress, so it no
+    // longer gates the skip (a terse "I'm here for you" reply must not suppress
+    // classification of "I want to die").
+    let user_trim = user_msg.trim();
+    if user_trim.chars().count() < MIN_TURN_CHARS_FOR_LABEL
+        && !contains_distress_keyword(user_trim)
     {
         debug!("companion engagement: turn too short to label, skipping");
         return;
     }
 
     tokio::spawn(async move {
-        let (label, severity) = match classify(&assessor.provider, &user_msg, &assistant_msg).await {
+        let (label, severity) = match classify(&assessor.provider, &user_msg, &assistant_msg, assessor.degradations.as_ref()).await {
             Some(c) => c,
             None => {
                 debug!("companion engagement: classifier produced no label for '{user_id}'");
@@ -112,9 +139,18 @@ pub fn spawn_post_hook(
                 let sev = severity.unwrap_or_default();
                 let _ = floor.handle_distress(&user_id, &summary, sev).await;
             } else {
+                // distress detected but no SafetyFloor / care-net contact is
+                // configured, so there's no one to escalate to. Do NOT fail
+                // silently — log it loudly and actionably. (The Distressed label is
+                // preserved in the engagement log above, so the event isn't lost;
+                // a family relying on wellbeing escalation must be told it isn't set
+                // up.) Follow-up: also raise a health degradation + a dedicated
+                // safety-audit entry so it surfaces on the operator's health page.
                 warn!(
-                    "companion engagement: distressed signal for '{user_id}' \
-                     but safety floor not wired"
+                    "companion SAFETY: a DISTRESS signal for '{user_id}' could NOT be escalated — \
+                     no care-net contact / safety floor is configured, so no one was alerted. \
+                     Set up a contact under Settings → Companion to enable wellbeing escalation. \
+                     (The signal is recorded in the engagement log.)"
                 );
             }
         }
@@ -140,6 +176,7 @@ async fn classify(
     provider: &Arc<dyn ModelProvider>,
     user_msg: &str,
     assistant_msg: &str,
+    degradations: Option<&Arc<crate::health::degradation::DegradationTracker>>,
 ) -> Option<(EngagementLabel, Option<ConcernSeverity>)> {
     let messages = vec![
         ChatMessage::system(SYSTEM_PROMPT.to_string()),
@@ -156,8 +193,40 @@ async fn classify(
         provider.generate(&messages, &opts),
     ).await {
         Ok(Ok(r))  => r.content,
-        Ok(Err(e)) => { warn!("engagement classifier: provider failed: {e}"); return None; }
-        Err(_)     => { warn!("engagement classifier: timed out"); return None; }
+        // the engagement classifier is also the DISTRESS detector — a
+        // failure here means this turn was NOT screened for distress. Flag the
+        // safety impact explicitly (was a bland "classifier failed") so a
+        // persistently-down classifier is greppable/alertable. Follow-up: raise
+        // a health degradation (needs a DegradationTracker threaded into the
+        // EngagementAssessor + SafetyFloor — shared).
+        Ok(Err(e)) => {
+            warn!("engagement/DISTRESS classifier: provider failed — turn NOT screened for distress: {e}");
+            if let Some(deg) = degradations {
+                deg.record(
+                    "companion_distress_classifier",
+                    "Distress classifier",
+                    "screening every companion turn",
+                    "FAILING — turns not screened for distress",
+                    &crate::health::degradation::DegradationTracker::short(&e.to_string()),
+                    false,
+                );
+            }
+            return None;
+        }
+        Err(_) => {
+            warn!("engagement/DISTRESS classifier: timed out — turn NOT screened for distress");
+            if let Some(deg) = degradations {
+                deg.record(
+                    "companion_distress_classifier",
+                    "Distress classifier",
+                    "screening every companion turn",
+                    "TIMING OUT — turns not screened for distress",
+                    "classifier exceeded its timeout",
+                    false,
+                );
+            }
+            return None;
+        }
     };
 
     let label = parse_label(&response)?;
@@ -247,6 +316,18 @@ mod tests {
         assert_eq!(parse_label("declined"), Some(EngagementLabel::Declined));
         assert_eq!(parse_label("distressed"), Some(EngagementLabel::Distressed));
         assert_eq!(parse_label("distressed:acute"), Some(EngagementLabel::Distressed));
+    }
+
+    // short cries for help must bypass the length gate.
+    #[test]
+    fn distress_keywords_catch_short_cries() {
+        for s in ["help", "die", "kill", "i want to die", "hurt", "suicide", "hopeless"] {
+            assert!(contains_distress_keyword(s), "'{s}' should be a distress keyword");
+        }
+        // Ordinary short turns are NOT flagged (still filtered as noise).
+        for s in ["ok", "yes", "hi", "thanks", "cool", "lol"] {
+            assert!(!contains_distress_keyword(s), "'{s}' should not be flagged");
+        }
     }
 
     #[test]

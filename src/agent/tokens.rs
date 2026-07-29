@@ -16,7 +16,7 @@
 //!     `estimate_tool_spec_tokens` (raw-JSON `chars/4`) is ~1% accurate.
 //! The regression test `estimate_stays_within_the_calibrated_band` locks this in.
 //! (The earlier "10×+ undercount" was NOT the ratio — it was the tool block being
-//! excluded from the per-turn log; fixed in F15.) A real per-provider tokenizer
+//! excluded from the per-turn log; fixed.) A real per-provider tokenizer
 //! could still replace [`estimate_text`] behind this API, but the measured
 //! accuracy says it isn't worth the dependency yet.
 

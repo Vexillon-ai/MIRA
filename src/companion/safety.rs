@@ -32,7 +32,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::auth::LocalAuthService;
 use crate::companion::groups::{CompanionGroupStore, SignalKind};
@@ -52,6 +52,13 @@ use crate::notifications::{Notification, NotificationBus, NotificationKind};
 // recorded as `Suppressed` rather than re-notifying. Conservative
 // default — better to under-spam the contact than to flood them.
 const DISTRESS_DEDUP_SECS: i64 = 10 * 60;
+// minimum gap between missed-checkin escalations for the SAME ongoing
+// silence. The scheduler now escalates on `count >= threshold` (not exact `==`),
+// so this window both prevents spamming the contact every tick AND re-alerts a
+// persistently-silent user at most once per window (fixing "escalates only
+// once, ever"). A FAILED/no-contact escalation isn't "delivered", so it doesn't
+// start this window — the next tick retries.
+const MISSED_CHECKIN_REESCALATE_SECS: i64 = 12 * 60 * 60;
 
 // Threshold for "missed check-in" escalation. After this many
 // consecutive unanswered check-ins, send a soft notice to the
@@ -150,6 +157,24 @@ pub enum ConcernSeverity {
     Acute,
 }
 
+impl ConcernSeverity {
+    // Lowercase wire form, stored in the safety log's `severity` column.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConcernSeverity::Concerning => "concerning",
+            ConcernSeverity::Acute      => "acute",
+        }
+    }
+    // Dedup rank: higher = more urgent. An incoming signal is suppressed
+    // only by a delivered signal of equal-or-higher rank.
+    pub fn rank(self) -> i64 {
+        match self {
+            ConcernSeverity::Concerning => 1,
+            ConcernSeverity::Acute      => 2,
+        }
+    }
+}
+
 // Wires the safety floor's dependencies. Held by `AgentCore` via the
 // `CompanionSystem` facade; the scheduler also holds an `Arc` to call
 // `handle_missed_checkins`.
@@ -165,6 +190,11 @@ pub struct SafetyFloor {
     // groups in addition to the single safety_contact. `None`
     // keeps the Slice-4 single-contact behaviour.
     pub groups: Option<Arc<CompanionGroupStore>>,
+    // health-degradation tracker. When a distress escalation fails to
+    // deliver, we raise a (transient) degradation so it surfaces on the health
+    // page + toasts an operator, not just an audit row. `None` in tests /
+    // builds without the tracker wired.
+    pub degradations: Option<Arc<crate::health::degradation::DegradationTracker>>,
 }
 
 impl SafetyFloor {
@@ -190,23 +220,33 @@ impl SafetyFloor {
                     contact_user_id: None,
                     summary: clip(summary),
                     note: Some("no safety contact configured".into()),
+                    severity: Some(severity.as_str().into()),
                 });
                 warn!("companion safety: distress for '{user_id}' but no safety contact configured");
                 return EscalationOutcome::NoContact;
             }
         };
 
-        // Dedup — already escalated within the window?
-        if self.log.has_recent_delivered_distress(user_id, DISTRESS_DEDUP_SECS).unwrap_or(false) {
+        // Dedup — already escalated within the window? Severity-aware —
+        // an incoming signal is suppressed only when a delivered signal of
+        // EQUAL-OR-HIGHER severity is already in the window. So an Acute is
+        // never debounced away by a milder prior Concerning alert; only a
+        // recent delivered Acute suppresses a new Acute.
+        if self
+            .log
+            .has_recent_delivered_distress_at_or_above(user_id, severity.rank(), DISTRESS_DEDUP_SECS)
+            .unwrap_or(false)
+        {
             let _ = self.log.record(&NewSafetyEvent {
                 user_id: user_id.into(),
                 kind: SafetyEventKind::Distress,
                 outcome: EscalationOutcome::Suppressed,
                 contact_user_id: Some(contact.clone()),
                 summary: clip(summary),
-                note: Some("within distress dedup window".into()),
+                note: Some("within distress dedup window (same-or-lower severity)".into()),
+                severity: Some(severity.as_str().into()),
             });
-            debug!("companion safety: distress for '{user_id}' suppressed (recent delivery)");
+            debug!("companion safety: distress for '{user_id}' suppressed (recent delivery ≥ severity)");
             return EscalationOutcome::Suppressed;
         }
 
@@ -236,7 +276,7 @@ impl SafetyFloor {
             ),
         };
 
-        let outcome = self.deliver(&contact, &notice).await;
+        let (outcome, deliver_err) = self.deliver(&contact, &notice).await;
         let outcome_str = outcome.as_str().to_string();
 
         let _ = self.log.record(&NewSafetyEvent {
@@ -245,15 +285,40 @@ impl SafetyFloor {
             outcome,
             contact_user_id: Some(contact.clone()),
             summary: clip(summary),
-            note: Some(format!("severity={}", match severity {
-                ConcernSeverity::Acute => "acute", ConcernSeverity::Concerning => "concerning",
-            })),
+            // on failure the audit row carries the ACTUAL delivery error
+            // (was only in a warn! log), not just the severity — which now has
+            // its own column.
+            note: deliver_err.clone(),
+            severity: Some(severity.as_str().into()),
         });
 
-        info!(
-            "companion safety: distress for '{user_id}' → \
-             contact='{contact}', outcome={outcome_str}"
-        );
+        // a failed SAFETY delivery must be loud, not a single unread audit
+        // row — a real distress signal reached NOBODY. Log at error level AND
+        // raise a health degradation so it surfaces on the operator's health page
+        // + toasts, exactly like other subsystem fallbacks.
+        if outcome == EscalationOutcome::DeliveryFailed {
+            let detail = deliver_err.as_deref().unwrap_or("unknown delivery error");
+            error!(
+                "companion SAFETY: {} distress for '{user_id}' FAILED to reach contact \
+                 '{contact}': {detail} — no one was alerted",
+                severity.as_str()
+            );
+            if let Some(deg) = &self.degradations {
+                deg.record(
+                    "companion_safety_delivery",
+                    "Companion safety escalation",
+                    "delivered to safety contact",
+                    "UNDELIVERED — no one alerted",
+                    &crate::health::degradation::DegradationTracker::short(detail),
+                    false, // transient — the next escalation may succeed
+                );
+            }
+        } else {
+            info!(
+                "companion safety: distress for '{user_id}' → \
+                 contact='{contact}', outcome={outcome_str}"
+            );
+        }
 
         // also fan out via companion-enabled groups the
         // user belongs to. The single safety_contact path above is
@@ -283,10 +348,31 @@ impl SafetyFloor {
                     contact_user_id: None,
                     summary: format!("{count} consecutive missed check-ins"),
                     note: Some("no safety contact configured".into()),
+                    severity: None,
                 });
                 return EscalationOutcome::NoContact;
             }
         };
+
+        // dedup an ongoing silence — don't re-alert the contact more than
+        // once per re-escalate window. A delivered escalation starts the window;
+        // a failed/no-contact one does not, so the next qualifying tick retries.
+        if self
+            .log
+            .has_recent_delivered_missed_checkin(user_id, MISSED_CHECKIN_REESCALATE_SECS)
+            .unwrap_or(false)
+        {
+            let _ = self.log.record(&NewSafetyEvent {
+                user_id: user_id.into(),
+                kind: SafetyEventKind::MissedCheckin,
+                outcome: EscalationOutcome::Suppressed,
+                contact_user_id: Some(contact.clone()),
+                summary: format!("{count} consecutive missed check-ins"),
+                note: Some("within missed-checkin re-escalate window".into()),
+                severity: None,
+            });
+            return EscalationOutcome::Suppressed;
+        }
 
         let who = self.display_name(user_id);
         let rel = self.relationship_phrase(user_id);
@@ -299,7 +385,7 @@ impl SafetyFloor {
              different channel?"
         );
 
-        let outcome = self.deliver(&contact, &notice).await;
+        let (outcome, deliver_err) = self.deliver(&contact, &notice).await;
         let outcome_str = outcome.as_str().to_string();
         let _ = self.log.record(&NewSafetyEvent {
             user_id: user_id.into(),
@@ -307,7 +393,8 @@ impl SafetyFloor {
             outcome,
             contact_user_id: Some(contact.clone()),
             summary: format!("{count} consecutive missed check-ins"),
-            note: None,
+            note: deliver_err,
+            severity: None,
         });
         info!(
             "companion safety: missed-checkin for '{user_id}' (n={count}) \
@@ -371,14 +458,15 @@ impl SafetyFloor {
                         let notice = build_group_notice(
                             sender_user_id, signal, &filtered_summary, &group_id,
                         );
-                        let outcome = self.deliver(&target.user_id, &notice).await;
+                        let (outcome, deliver_err) = self.deliver(&target.user_id, &notice).await;
                         let _ = self.log.record(&NewSafetyEvent {
                             user_id: sender_user_id.into(),
                             kind: signal_to_event_kind(signal),
                             outcome,
                             contact_user_id: Some(target.user_id.clone()),
                             summary: clip(&filtered_summary),
-                            note: Some(format!("group={group_id}")),
+                            note: deliver_err.or(Some(format!("group={group_id}"))),
+                            severity: None,
                         });
                     }
                     RoutingDecision::Skip { user_id, reason } => {
@@ -401,6 +489,7 @@ impl SafetyFloor {
                                 contact_user_id: Some(user_id),
                                 summary: clip(&filtered_summary),
                                 note: Some(format!("group={group_id}; reason={reason:?}")),
+                                severity: None,
                             });
                         }
                     }
@@ -462,16 +551,18 @@ impl SafetyFloor {
     // Telegram outbound for safety notices is a follow-up — the web
     // audit + the in-history thread are enough for v1 because every
     // MIRA user has a web account.
-    async fn deliver(&self, contact_user_id: &str, body: &str) -> EscalationOutcome {
+    // Returns the outcome plus, on failure, a short error detail so the caller
+    // can record it in the audit row instead of losing it to a warn! log.
+    async fn deliver(&self, contact_user_id: &str, body: &str) -> (EscalationOutcome, Option<String>) {
         let Some(history) = self.history.as_ref() else {
-            return EscalationOutcome::DeliveryFailed;
+            return (EscalationOutcome::DeliveryFailed, Some("no history store wired".into()));
         };
 
         let conv_id = match find_or_create_safety_thread(history, contact_user_id) {
             Ok(id) => id,
             Err(e) => {
                 warn!("companion safety: conv resolution failed for '{contact_user_id}': {e}");
-                return EscalationOutcome::DeliveryFailed;
+                return (EscalationOutcome::DeliveryFailed, Some(format!("thread resolution failed: {e}")));
             }
         };
 
@@ -489,7 +580,7 @@ impl SafetyFloor {
             }).to_string()),
         }) {
             warn!("companion safety: persist failed for '{contact_user_id}': {e}");
-            return EscalationOutcome::DeliveryFailed;
+            return (EscalationOutcome::DeliveryFailed, Some(format!("persist failed: {e}")));
         }
         let _ = history.touch_conversation(&conv_id);
 
@@ -505,7 +596,7 @@ impl SafetyFloor {
             });
         }
 
-        EscalationOutcome::Delivered
+        (EscalationOutcome::Delivered, None)
     }
 }
 
@@ -615,6 +706,7 @@ mod tests {
             auth: None,
             notifications: None,
             groups: None,
+            degradations: None,
         };
         (dir, floor, history)
     }
@@ -637,6 +729,7 @@ mod tests {
             auth: None,
             notifications: None,
             groups: Some(Arc::clone(&groups)),
+            degradations: None,
         };
         (dir, floor, history, groups)
     }

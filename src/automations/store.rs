@@ -157,16 +157,20 @@ impl AutomationsStore {
         Ok(())
     }
 
-    // Recover system schedules orphaned by a crash/restart *mid-run*.
+    // Recover schedules orphaned by a crash/restart *mid-run* — for ALL
+    // owners, not just `system`.
     //     // [`claim_due`] sets `next_run_at = NULL` when it claims a row so a
     // concurrent tick can't double-fire it; the run's completion then writes
     // the next cron time back. If the process dies between those two steps
-    // (e.g. a restart while the hourly `system_audit` is running) the row is
-    // left stuck at NULL — `claim_due` only matches `next_run_at IS NOT NULL`,
-    // so it's never reclaimed and the job goes silently dormant.
-    //     // Call this at startup: for every active `system` schedule missing a
+    // the row is left stuck at NULL — `claim_due` only matches
+    // `next_run_at IS NOT NULL`, so it's never reclaimed and the job goes
+    // silently dormant. This previously filtered `owner_kind='system'`, so a
+    // **user**-owned automation orphaned by a crash stayed dead forever (no
+    // health sweep covers user rows). Now every active orphaned schedule is
+    // requeued regardless of owner.
+    //     // Call this at startup: for every active schedule missing a
     // `next_run_at`, recompute it from the trigger. Returns the count fixed.
-    pub fn requeue_orphaned_system_schedules(&self, now: i64) -> Result<usize, MiraError> {
+    pub fn requeue_orphaned_schedules(&self, now: i64) -> Result<usize, MiraError> {
         let orphans: Vec<Schedule> = {
             let conn = self.lock()?;
             let mut stmt = conn.prepare(
@@ -177,7 +181,7 @@ impl AutomationsStore {
                         last_run_at, next_run_at,
                         run_count, failure_count, max_failures, last_error
                    FROM schedules
-                  WHERE owner_kind = 'system' AND status = 'active'
+                  WHERE status = 'active'
                     AND next_run_at IS NULL",
             ).map_err(|e| MiraError::DatabaseError(format!("orphan prep: {e}")))?;
             stmt.query_map([], row_to_schedule)
