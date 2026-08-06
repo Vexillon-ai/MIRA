@@ -3,7 +3,7 @@
 //! Skill manifest types and TOML parsing.
 //!
 //! The on-disk format is `skill.toml` at the root of each Skill directory.
-//! Schema is documented in `design-docs/skills-and-agents.md` §"Manifest format".
+//! The skill-manifest schema types.
 //! Keep that doc and this module in sync.
 
 use std::collections::HashMap;

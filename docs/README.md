@@ -53,4 +53,4 @@ the required frontmatter, and the house style so the site build stays a clean
 pass-through.
 
 > Looking for *engineering* design docs (architecture, phase plans)? Those are
-> internal and live in `design-docs/`, not here.
+> kept internally and are not part of this site.

@@ -10,7 +10,7 @@
 //! + last check-in time + the user's timezone, then asks `evaluate`
 //! for a decision.
 //!
-//! Per the locked design (proposal §11.5): learned + rule-based +
+//! The policy model: learned + rule-based +
 //! deliberately variant. v1 has the rule-based half; the learning
 //! half lands in  when the engagement assessor is in place.
 //! Variance comes from the `jitter` and "windows shouldn't be on the
@@ -97,7 +97,7 @@ pub struct PolicyInputs {
     pub due_now: bool,
 }
 
-// Configurable bounds. Defaults match `design-docs/companion/design-proposal.md`.
+// Configurable bounds. Defaults match.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     // Minimum minutes between consecutive check-ins. Hard floor.

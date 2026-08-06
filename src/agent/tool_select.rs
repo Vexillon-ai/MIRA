@@ -8,7 +8,7 @@
 //! a configurable **core** set, the **semantic top-K** for the user's
 //! message, and (slice 2) conversation-**sticky** tools. A `find_tools`
 //! meta-tool (slice 3) lets the model pull in anything else on demand, so
-//! nothing is ever permanently hidden. See design-docs/just-in-time-tools.md.
+//! nothing is ever permanently hidden.
 
 use std::collections::{HashMap, HashSet};
 
@@ -63,7 +63,7 @@ pub fn find_tools_spec() -> ToolSpec {
 /// nothing more to load (`total <= loaded`) — with the full set present there's
 /// nothing to discover, so the hint would be false. Only injected on turns
 /// where adaptive selection actually narrowed the toolset AND `find_tools` is
-/// exposed. See `design-docs/just-in-time-tools.md` §3.
+/// exposed.
 pub fn find_tools_hint(loaded: usize, total: usize) -> Option<String> {
     let more = total.checked_sub(loaded).filter(|m| *m > 0)?;
     Some(format!(

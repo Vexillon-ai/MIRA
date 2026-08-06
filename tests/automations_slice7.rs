@@ -3,7 +3,7 @@
 // tests/automations_slice7.rs
 //! Slice 7 integration tests — outbound webhook hardening + chain hardening.
 //!
-//! "Done when" from `design-docs/phase10-automations.md`:
+//! "Done when":
 //!   an HttpPost action retries cleanly; chain loops are caught;
 //!   failures notify.
 

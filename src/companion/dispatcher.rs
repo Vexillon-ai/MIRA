@@ -83,7 +83,7 @@ pub enum DispatchOutcome {
 
 // Outcome of delivering a message to a user's last-used messaging channel.
 // Lets the Guardian distinguish "operator is web-only" from "their channel is
-// down" (isolation, §4.5).
+// down" (isolation).
 #[derive(Debug, Clone)]
 pub enum DeliveryOutcome {
     // Delivered to this channel.
@@ -1057,7 +1057,7 @@ impl CompanionDispatcher {
     // text reply within 24h of the user's last inbound message; a check-in
     // fired outside that window will be rejected (logged as a 131047
     // error). Template messages (the supported way to re-engage) are not
-    // yet implemented; see design-docs/whatsapp-channel.md.
+ // yet implemented.
     async fn deliver_whatsapp(&self, user_id: &str, text: &str) -> std::result::Result<(), MiraError> {
         if let Some(cfg) = &self.live_config {
             if !cfg.get().await.channels.whatsapp.enabled {
@@ -1289,7 +1289,7 @@ impl CompanionDispatcher {
     // skipping web/cli/tui. Used by the MIRA-Guardian watch loop. Web is covered
     // separately by the NotificationBus. The 3-way outcome lets the Guardian
     // distinguish "no channel" (web-only operator) from "channel failed"
-    // (isolation) — see §4.5.
+    // (isolation).
     pub async fn deliver_to_user(&self, user_id: &str, text: &str) -> DeliveryOutcome {
         let Some(channel) = self.last_messaging_channel(user_id) else {
             return DeliveryOutcome::NoChannel;

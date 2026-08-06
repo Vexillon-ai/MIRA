@@ -2,7 +2,7 @@
 
 // src/bench/context.rs
 //! `mira bench context` — measurement-only baseline for the context-compaction
-//! work (see design-docs/context-compaction.md §3). Generates synthetic
+//! work. Generates synthetic
 //! multi-turn conversations, applies MIRA's CURRENT windowing
 //! (`agent.max_context_turns`), and reports how many tokens the window actually
 //! sends, how much of the model's context window that uses, and how many turns

@@ -132,7 +132,7 @@ pub struct MiraConfig {
 
     // 0.115.0 — per-user wiki (markdown knowledge base) settings.
     // Companion to memory: stores narrative pages on disk that the
-    // agent reads into context. See `design-docs/wiki-feature.md`.
+ // agent reads into context.
     #[serde(default)]
     pub wiki: WikiConfig,
 
@@ -148,8 +148,8 @@ pub struct MiraConfig {
     // apps (one-time setup at each provider's developer console);
     // MIRA only needs the public `client_id`s and a publicly-
     // reachable callback URL. PKCE-only flow — no client secrets
-    // stored or expected. See design-docs/email-channel.md for the
-    // step-by-step provider-side setup.
+    // stored or expected.
+    // Provider-side setup is step-by-step.
     #[serde(default)]
     pub email_oauth: EmailOAuthConfig,
 
@@ -1390,8 +1390,8 @@ fn default_checkin_min_gap_minutes() -> i64 { 90 }
 
 // MIRA-Guardian — the built-in, code-defined system watchdog agent. Its
 // identity (prompt + tools) is immutable and lives in the binary; this config
-// only controls whether it runs and at what authority. See
-// `design-docs/guardian-agent.md`.
+// only controls whether it runs and at what authority. The
+// identity is fixed at build time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuardianConfig {
     // `"off"` — disabled (default; opt-in). `"monitor"` — observe + alert
@@ -1406,7 +1406,7 @@ pub struct GuardianConfig {
     #[serde(default = "default_guardian_watch_interval")]
     pub watch_interval_secs: u64,
 
-    // Isolation autonomy (§4.5) dry-run. When `true` (default) the Guardian,
+ // Isolation autonomy dry-run. When `true` (default) the Guardian,
     // on detecting it cannot reach you (a configured channel's delivery
     // failed) and that a bounded fix is warranted, only **logs + audits what
     // it would do** — it does not execute. Flip to `false` to permit real
@@ -1438,7 +1438,7 @@ pub struct GuardianConfig {
     #[serde(default = "default_guardian_provision_model")]
     pub provision_model: String,
 
-    // ── Tiered model (design-docs/guardian-scope.md §6) ──────────────────────
+ // ── Tiered model ──────────────────────
     // The Guardian runs a *tiered* local model: a light always-on model for
     // routine ticks (low-severity notes), escalating to a stronger model only
     // for real triage (a Red detector). Each tier is (provider, model); when a
@@ -1461,7 +1461,7 @@ pub struct GuardianConfig {
     #[serde(default)]
     pub triage_model: Option<String>,
 
-    // ── Separate-process independence (design-docs/guardian-separate-process.md) ─
+ // ── Separate-process independence ─
     // The out-of-process liveness sentinel (`mira guardian-watch`): a sibling
     // process that watches whether MIRA itself is alive and raises a DIRECT
     // alarm if MIRA goes down — the one failure the co-resident watch can't
@@ -1561,7 +1561,7 @@ impl Default for GuardianProcessConfig {
 fn default_sentinel_probe_interval() -> u64 { 30 }
 fn default_sentinel_down_after() -> u32 { 3 }
 
-// Temporal knowledge-graph memory (see `design-docs/graph-memory.md`). Additive and
+// Temporal knowledge-graph memory. Additive and
 // **off by default**: when enabled, the post-turn extractor also writes typed,
 // timestamped triples to `kg_entities`/`kg_edges` so aggregation/counting
 // questions resolve against exact set membership instead of fuzzy top-k.
@@ -1578,7 +1578,7 @@ impl Default for GraphConfig {
     }
 }
 
-// Sleep-like consolidation (see `design-docs/memory-research-2026.md` §5). Phased
+// Sleep-like consolidation. Phased
 // nightly passes over the graph that clean up duplicates, resolve
 // contradictions, and score importance — all deterministic, all MIRA-side
 // (no LLM-as-policy). Each phase is independently togglable so a phase that
@@ -1945,7 +1945,7 @@ pub struct AgentConfig {
     #[serde(default = "default_max_context_turns")]
     pub max_context_turns: usize,
 
-    // Phase-1 token-aware context budgeting (design-docs/context-compaction.md).
+ // Phase-1 token-aware context budgeting.
     // The model's context window in tokens. `0` (default) keeps the legacy
     // fixed `max_context_turns` window (no behaviour change). When set (e.g.
     // 128000), MIRA fills the window by token budget instead — carrying far
@@ -1964,8 +1964,8 @@ pub struct AgentConfig {
     // LOCAL and `context_length_tokens` is unset (0). Local quantized models on
     // consumer runtimes reliably attend to only a few thousand tokens even though
     // they advertise 128K, so budgeting to the ADVERTISED window packs history
-    // into a region the model can't recall (design-docs/effective-vs-advertised-
-    // context.md). This conservative default turns token budgeting (and therefore
+    // into a region the model can't recall.
+    // This conservative default turns token budgeting (and therefore
     // compaction) ON for local providers with a small window, keeping the prompt
     // inside the reliable-recall zone. An explicit `context_length_tokens > 0`
     // overrides this (cloud models with a real large window); `0` here restores
@@ -1989,7 +1989,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub compaction: CompactionConfig,
 
-    // Degenerate-output guard (design-docs/degenerate-output-guard.md). Detects a
+ // Degenerate-output guard. Detects a
     // model stuck emitting pathologically repetitive text (a wedged local model
     // once produced 8k tokens of `/`), aborts that generation, and treats it as a
     // failed turn + provider error so the garbage is neither shown nor fanned into
@@ -2006,7 +2006,7 @@ pub struct AgentConfig {
     // top-K of the message + conversation-sticky tools), plus a `find_tools`
     // meta-tool the model can call to pull in anything else on demand — instead
     // of sending every enabled tool's schema on every request. Default
-    // `mode="all"` preserves today's behaviour. See design-docs/just-in-time-tools.md.
+ // `mode="all"` preserves today's behaviour.
     #[serde(default)]
     pub tool_selection: ToolSelectionConfig,
 
@@ -2189,7 +2189,6 @@ pub struct ToolsConfig {
 }
 
 // Just-in-Time Tools — adaptive per-turn tool selection.
-// See design-docs/just-in-time-tools.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSelectionConfig {
     /// "all" (default — send every enabled tool, today's behaviour) or
@@ -2246,7 +2245,7 @@ impl Default for ToolToggle {
     fn default() -> Self { Self { enabled: false } }
 }
 
-// `web_fetch` tool — Tier 2 network. See design-docs/phase7-tier2-web-tools.md §3.
+// `web_fetch` tool — Tier 2 network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebFetchConfig {
     #[serde(default = "default_true")]
@@ -2280,7 +2279,7 @@ fn default_web_fetch_text_chars() -> usize { 256 * 1024 }
 fn default_web_fetch_timeout()   -> u64    { 30 }
 fn default_web_fetch_redirects() -> usize  { 5 }
 
-// `url_preview` tool — Tier 2 network. See design-docs/phase7-tier2-web-tools.md §4.
+// `url_preview` tool — Tier 2 network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UrlPreviewConfig {
     #[serde(default = "default_true")]
@@ -2301,7 +2300,7 @@ impl Default for UrlPreviewConfig {
 
 fn default_url_preview_body_bytes() -> u64 { 128 * 1024 }
 
-// `web_search` tool — Tier 2 network. See design-docs/phase7-tier2-web-tools.md §5.
+// `web_search` tool — Tier 2 network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSearchConfig {
     #[serde(default = "default_true")]
@@ -2402,7 +2401,7 @@ impl Default for SecurityPolicyConfig {
     }
 }
 
-// Outbound HTTP policy for Tier 2 tools. See `design-docs/phase7-tier2-web-tools.md` §1.
+// Outbound HTTP policy for Tier 2 tools.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HttpSecurityConfig {
     // Domains (exact or suffix at label boundary) the policy layer refuses to reach.
@@ -2746,7 +2745,7 @@ pub struct PythonRootfsConfig {
 
 // ── TTS ──────────────────────────────────────────────────────────────────────
 
-// Text-to-Speech subsystem. See `design-docs/phase8-tts.md`.
+// Text-to-Speech subsystem.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TtsConfig {
     #[serde(default = "default_true")]
@@ -3668,7 +3667,7 @@ fn default_degen_min_distinct_tokens()-> usize { 2 }
 /// characters, or a repeated word/phrase — past a minimum length. Defaults are
 /// conservative: normal prose, code, JSON, long tables, and base64 blobs never
 /// trip; a wedged model emitting one repeated token aborts within a few hundred
-/// characters. See design-docs/degenerate-output-guard.md.
+/// characters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DegeneracyGuardConfig {
     /// Master switch. Default true. Turn off (or widen the thresholds) for a

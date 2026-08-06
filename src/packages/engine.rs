@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The `setup_guide` wizard engine (, slice 3) — the resumable executor
-//! that drives a `cpp_provider` install (design-docs/plugin-packages.md §"Install &
-//! lifecycle").
+//! The `setup_guide` wizard engine (slice 3) — the resumable executor
+//! that drives a `cpp_provider` install.
+//! It resumes across restarts.
 //!
 //! It walks the manifest's `setup_guide` steps in dependency order, runs the
 //! automated `mira.*` verbs itself, and **pauses** at human steps (the admin

@@ -5,7 +5,7 @@
 //!
 //! Every call that flows through `ToolRegistry::execute` writes one row; this
 //! endpoint surfaces them in reverse-chronological order with filter + pagination.
-//! See `design-docs/phase7-tier2-web-tools.md` §6 for the schema.
+//! The schema matches the `tool_audit` table.
 
 use std::sync::Arc;
 

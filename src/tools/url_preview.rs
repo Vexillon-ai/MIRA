@@ -6,7 +6,7 @@
 //! Cheaper cousin of `web_fetch`: pulls `<title>`, `<meta description>` and
 //! OpenGraph tags from a URL without committing to a full-body fetch. The
 //! body cap is tight (128 KB by default) because OG tags live near the top
-//! of the HTML. See `design-docs/phase7-tier2-web-tools.md` §4.
+//! of the HTML.
 
 use std::sync::Arc;
 

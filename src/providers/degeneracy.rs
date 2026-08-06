@@ -8,7 +8,7 @@
 //! A wedged local model (out of GPU memory) once emitted nothing but `/` for
 //! 8,192 tokens per prompt, and MIRA had no defence at any layer — it ran every
 //! generation to its cap and then fanned the garbage into two more LLM calls
-//! (the memory + wiki extractors). See `design-docs/degenerate-output-guard.md`.
+//! (the memory + wiki extractors).
 //!
 //! [`GuardedProvider`] wraps any [`ModelProvider`] and is installed OUTERMOST in
 //! `build_provider_chain`, so it covers EVERY LLM call — chat turns, extractors,

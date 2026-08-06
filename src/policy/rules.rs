@@ -3,7 +3,7 @@
 //! Built-in rule set — slice D2.
 //!
 //! Hand-coded rules implementing the categories from
-//! `design-docs/skills-and-agents.md` §"Rule evaluation". Each rule is a
+//! Each rule is a
 //! small struct implementing the [`Rule`] trait; the
 //! [`BuiltinRulesEngine`] iterates them in order and returns
 //! `PolicyDecision::Deny` on the first match (first-deny-wins).

@@ -2,8 +2,8 @@
 
 // src/external/types.rs
 //
-// Channel Provider Protocol (CPP) wire types. See
-// design-docs/channel-provider-protocol.md for the full spec. CPP is the
+// Channel Provider Protocol (CPP) wire types.
+// CPP is the
 // "MCP for channels" plugin contract: an external provider process owns
 // the transport to some messaging system and relays messages to/from MIRA
 // over two signed HTTP calls.

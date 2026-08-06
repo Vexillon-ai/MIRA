@@ -2,7 +2,7 @@
 
 //! Manager↔worker message types (slice B2).
 //!
-//! See `design-docs/skills-and-agents.md` §"Manager/worker protocol" for the
+//! The manager/worker protocol for the
 //! authoritative table of which side sends which message.
 //!
 //! Three categories:

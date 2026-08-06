@@ -3,8 +3,7 @@
 // src/onboarding/mod.rs
 //! User onboarding — conversational flow, profile capture, and seed memories.
 //!
-//! This module owns the three-layer storage split described in
-//! `design/onboarding/ONBOARDING_DESIGN.md`:
+//! This module owns a three-layer storage split:
 //!
 //! - Structured facts live in `user_profile` (managed by `auth::AuthDb`).
 //! - Load-bearing preferences live in a per-user `profile.md` (see

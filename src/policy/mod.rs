@@ -4,7 +4,7 @@
 //!
 //! The policy engine is a deterministic, non-LLM module that gates
 //! every interesting action a Skill, agent, or tool takes against
-//! declared rules. Per `design-docs/skills-and-agents.md` Part 3:
+//! declared rules. Part 3.
 //!
 //! > The policy engine is what makes "unverified Skills allowed with
 //! > a toggle" tolerable in practice. It's a deterministic, non-LLM

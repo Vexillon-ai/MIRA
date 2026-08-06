@@ -6,7 +6,7 @@
 //! Each backend (Piper, eSpeak, OpenAI, ElevenLabs, Cartesia, …) implements
 //! [`TtsBackend`] and is owned by `TtsService`. The router picks one per
 //! request based on the per-user pref, the per-channel default, and the
-//! global config — see `design-docs/phase8-tts.md`.
+//! global config.
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;

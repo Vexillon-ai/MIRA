@@ -18,7 +18,7 @@
 //!     `Failed` whose error says "verification failed: …" and
 //!     preserves the inner's artifacts.
 //!
-//! The design-doc motivation (C6 in `design-docs/skills-and-agents.md`):
+//! The design-doc motivation.
 //!
 //! > After an adapter reports `complete`, the worker runs a
 //! > verification check (build, run tests, smoke test) before

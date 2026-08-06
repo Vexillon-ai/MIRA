@@ -60,7 +60,7 @@ pub struct ParseSettings {
 
 impl Default for ParseSettings {
     fn default() -> Self {
-        // Mirrors design-docs/email-channel.md §5 — conservative defaults.
+        // Conservative defaults.
         Self {
             accept_html:          true,   // strip to text after sanitisation
             accept_inline_images: false,

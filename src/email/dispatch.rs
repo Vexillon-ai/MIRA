@@ -30,8 +30,7 @@
 //! rather than RFC-5322 In-Reply-To/References reconstruction. That
 //! matches how Telegram/Signal route inbound (one thread per
 //! contact) and avoids history schema changes in this slice. Proper
-//! email-thread reconstruction is a follow-up — see
-//! design-docs/email-channel.md §7 and §11.
+//! email-thread reconstruction is a follow-up.
 
 use std::sync::Arc;
 
@@ -98,7 +97,7 @@ pub async fn dispatch_inbound(
     .map_err(|e| DispatchError::Conversation(e.to_string()))?;
 
     // ── Build the agent input ──────────────────────────────────────
-    // Prompt-injection wrapping (design-docs/email-channel.md §6.2). The
+ // Prompt-injection wrapping. The
     // model sees the body inside a fenced block with an explicit
     // "from / treat as untrusted" preamble; never as a bare user
     // message that could read as direct instructions.

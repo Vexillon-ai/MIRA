@@ -249,7 +249,7 @@ pub fn check_llm_provider(perms: &Permissions, alias: &str) -> Result<(), Denied
 /// disables network entirely; non-empty allowlist enables network with
 /// no URL-level filtering. URL filtering needs a sidecar HTTP proxy that
 /// reads the allowlist; tracked as a follow-up in
-/// `design-docs/skills-and-agents.md` Phase D / open questions.
+/// Phase D / open questions.
 pub fn build_sandbox_limits(
     perms: &Permissions,
     defaults: ResourceLimits,

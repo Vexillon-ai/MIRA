@@ -191,7 +191,7 @@ pub struct CompanionSettings {
     // Ordered preference list. e.g. `["signal","telegram","web"]`. The
     // scheduler picks the first reachable one.
     pub preferred_channels: Vec<String>,
-    // For v1 this is a single user id; v2 swaps in a group id (§9).
+ // For v1 this is a single user id; v2 swaps in a group id.
     // `None` while waiting for setup.
     pub safety_contact_user_id: Option<String>,
     // Epoch ms when the minimum bootstrap completed. `None` = setup not

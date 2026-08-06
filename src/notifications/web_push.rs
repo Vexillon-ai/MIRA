@@ -58,7 +58,7 @@ const VAPID_CONTACT: &str = "mailto:admin@mira.local";
 /// configured, Firebase Cloud Messaging for the native app. (We kept the
 /// `WebPushService` name rather than introducing a parallel
 /// `NotificationDispatcher` type so the existing Extension wiring and call
-/// sites stay put — see design-docs/mobile-app-support.md.)
+/// sites stay put.)
 #[derive(Clone)]
 pub struct WebPushService {
     keypair: Arc<ES256KeyPair>,
@@ -129,7 +129,7 @@ impl WebPushService {
     /// Part C) — the mechanism-agnostic transport. `endpoint_url` is the
     /// FCM-relay `push_url` (push.vexillon.ai) or a UnifiedPush distributor URL;
     /// `auth_secret`, when present, is sent as `Authorization: Bearer …`. MIRA
-    /// holds no Google credentials — it just POSTs the §4 envelope to this URL.
+ /// holds no Google credentials — it just POSTs the envelope to this URL.
     /// Deduped by endpoint URL (re-registering the same URL refreshes the row).
     pub fn subscribe_http(
         &self,

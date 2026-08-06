@@ -80,7 +80,7 @@ fn init(id: &str, out: Option<&Path>) -> Result<(), Box<dyn Error>> {
 fn starter_manifest(id: &str) -> String {
     format!(
         r#"# Manifest for {id}
-# Format reference: design-docs/skills-and-agents.md §"Manifest format"
+# Format reference.
 
 [skill]
 id            = "{id}"

@@ -20,8 +20,7 @@
 //!   Channels. There is NO shared MIRA-operator bot — every user owns
 //!   their own identity on the channel, matching how Signal/Telegram
 //!   accounts already work. Per-bot rate limits, per-bot DM scope, and
-//!   per-bot token rotation all follow naturally from this. Documented
-//!   in `design-docs/discord-channel.md`.
+//!   per-bot token rotation all follow naturally from this.
 
 pub mod api;
 pub mod dispatch;

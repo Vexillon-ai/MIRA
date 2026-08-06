@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Plugin-package manifest types (see design-docs/plugin-packages.md).
+//! Plugin-package manifest types.
 //!
 //! A package is a signed, multi-component bundle. The manifest is the only
 //! thing MIRA must understand to decide trust, capabilities, and how to

@@ -3,7 +3,7 @@
 // src/automations/heartbeats/oauth_token_refresh.rs
 //! Heartbeat: OAuth token refresh.
 //!
-//! Per design doc §2.3: refresh OAuth tokens before expiry.  ships
+//! Internally: refresh OAuth tokens before expiry. ships
 //! the registered handler; actual refresh requires a per-channel token
 //! store that doesn't yet exist (calendar uses its own provider hook). When
 //! the OAuth subsystem lands, this handler iterates that store and calls

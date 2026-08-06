@@ -6,8 +6,7 @@
 //! Retrieves a URL and returns either readability-extracted body text
 //! (default) or the raw body, capped by the configured character budget.
 //! Every outbound call goes through [`HttpPolicy`], so the SSRF guard,
-//! denylist, rate limits and redirect re-validation all apply here. See
-//! `design-docs/phase7-tier2-web-tools.md` §3.
+//! denylist, rate limits and redirect re-validation all apply here.
 
 use std::sync::Arc;
 

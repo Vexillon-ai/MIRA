@@ -235,8 +235,8 @@ impl MiraServer {
                 let port = self.bind_addr.port();
                 return Err(MiraError::ServerError(format!(
                     "Failed to bind the main port {} — already in use. A stale MIRA instance \
-                     or a leaked child process may be squatting it (see \
-                     design-docs/restart-socket-leak-fix.md). Find + kill the holder, then \
+                     or a leaked child process may be squatting it. \
+                     Find + kill the holder, then \
                      start again:  Windows: `netstat -ano | findstr :{port}` then \
                      `taskkill /PID <pid> /F`;  Linux: `ss -ltnp | grep :{port}`.",
                     self.bind_addr,

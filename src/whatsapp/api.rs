@@ -15,7 +15,7 @@
 // fall outside it — `send_text` surfaces Meta's error (code 131047 /
 // "re-engagement message") so the caller can log it clearly; a future
 // `send_template` covers that case once the operator has approved
-// templates. See design-docs/whatsapp-channel.md.
+// templates.
 
 use serde_json::json;
 use hmac::{Hmac, Mac};

@@ -72,7 +72,7 @@ use async_trait::async_trait;
 
 // Execute untrusted or semi-trusted code in an isolated child process.
 // // Implementations must honour every non-negotiable from
-// `design-docs/phase7-tools-and-sandbox.md §3`: network off by default, read-only
+// Sandbox tier: network off by default, read-only
 // FS except scratch, parent-enforced resource limits, stdin/stdout only,
 // one audit row per call. The trait itself doesn't perform auditing — that
 // lives at the Tier 4 tool layer so it can include the original `actor`

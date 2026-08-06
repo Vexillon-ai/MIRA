@@ -3,7 +3,7 @@
 // tests/automations_slice5.rs
 //! Slice 5 integration tests: webhook ingest end-to-end + event subscriber loop.
 //!
-//! Two "Done when" conditions from `design-docs/phase10-automations.md`:
+//! Two "Done when" conditions:
 //!   1. A POST with valid HMAC signature triggers a prompt (here: an Internal
 //!      action — easier to assert on without standing up the agent stack).
 //!   2. An event subscription to `tool.failed` reliably notifies via the

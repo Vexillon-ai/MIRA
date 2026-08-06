@@ -9,7 +9,7 @@
 //! `System`-visibility (hidden from the normal user tool palette since logs can
 //! contain sensitive detail); the Guardian agent reaches it via its explicit
 //! `allowed_tools` allowlist, which bypasses the palette filter. See
-//! `design-docs/guardian-agent.md` (P1).
+//! (P1).
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};

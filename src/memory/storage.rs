@@ -386,7 +386,7 @@ impl MemoryStorage {
         Ok(())
     }
 
-    // Temporal knowledge-graph tables (see `design-docs/graph-memory.md`). Created
+ // Temporal knowledge-graph tables. Created
     // unconditionally — they're empty and harmless until `memory.graph.enabled`
     // turns extraction on, and creating them up-front keeps the schema in one
     // place and avoids a runtime "table missing" race when the flag flips.
@@ -985,7 +985,7 @@ impl MemoryStorage {
         Ok(out)
     }
 
-    // ── Knowledge-graph storage (design-docs/graph-memory.md) ──────────────────────
+ // ── Knowledge-graph storage ──────────────────────
 
     // Resolve an entity name to an id, creating the row if new. Conservative
     // Phase-1 resolution: exact match on the normalised name (lowercased,
@@ -1066,8 +1066,8 @@ impl MemoryStorage {
         ).map_err(|e| MiraError::MemoryError(format!("graph_edge_count: {}", e)))
     }
 
-    // Phase C of the sleep-like consolidator (see `design-docs/memory-research-2026.md`
-    // §5): resolve contradictions in **single-valued predicates** — predicates
+    // Phase C of the sleep-like consolidator:
+    // resolve contradictions in **single-valued predicates** — predicates
     // where only one current truth is meaningful (`works_at`, `lives_in`,
     // `married_to`, …). For each `(subject, predicate)` group on this list
     // with > 1 live edges, keep the newest by `event_at` (fallback
@@ -1163,8 +1163,8 @@ impl MemoryStorage {
         Ok((groups_resolved, edges_closed))
     }
 
-    // Phase A of the sleep-like consolidator (see `design-docs/memory-research-2026.md`
-    // §5): merge near-duplicate entities **within the same `entity_type`**
+    // Phase A of the sleep-like consolidator:
+    // merge near-duplicate entities **within the same `entity_type`**
     // using a high-precision token-set rule (no LLM — MIRA-side and
     // deterministic per the product principle).
     //     // Two entities of the same type merge iff: the smaller's token set is a

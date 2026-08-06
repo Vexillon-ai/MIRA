@@ -7,7 +7,7 @@
 //! (rationale required, quota, approval mode → pending_approval) plus the
 //! self-cancel safety check and the approve_schedule store helper.
 //!
-//! "Done when" from `design-docs/phase10-automations.md`:
+//! "Done when":
 //!   the agent can self-schedule a follow-up; with approval mode on, it
 //!   lands in pending and respects user accept/reject.
 

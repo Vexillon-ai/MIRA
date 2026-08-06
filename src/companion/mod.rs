@@ -8,7 +8,7 @@
 //! and (in later slices) schedules proactive check-ins with a
 //! safety floor.
 //!
-//! See `design-docs/companion/design-proposal.md` for the full design.
+//! The companion subsystem.
 //!
 //! # What ships in 
 //! - SQL settings store (this DB carries the operational flags; the

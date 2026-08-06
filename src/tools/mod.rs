@@ -56,7 +56,7 @@ use audit::{args_digest, truncate_output, Outcome, ToolAuditStore};
 // Who/what surfaces a tool in the registry.
 // // The registry stores all tools in one place but `list_*` helpers filter by
 // tier so user palettes never expose internal machinery. Matches the three
-// roles described in `design/onboarding/ONBOARDING_DESIGN.md` §4.4.
+// roles.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tier", rename_all = "snake_case")]
 pub enum ToolVisibility {
@@ -81,7 +81,7 @@ impl ToolVisibility {
 
 // What kinds of resources a tool may touch. Declared by each [`Tool`] impl
 // so the registry — and the `/api/tools` surface — can group tools by risk.
-// // See `design-docs/phase7-tools-and-sandbox.md` §1 for the full tier model. This
+// This
 // enum is *orthogonal* to [`ToolVisibility`]: tier is *what the tool does*,
 // visibility is *who is allowed to see it*. A tool can be `User`-visible +
 // `Code`-tier (if sandboxed), or `System`-visible + `Pure`-tier.

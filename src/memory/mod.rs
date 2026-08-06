@@ -647,7 +647,7 @@ impl MemorySystem {
     }
 
     // Extract typed triples from one turn and persist them to the knowledge
-    // graph (`design-docs/graph-memory.md`). Resolves each triple's subject/object to
+    // graph. Resolves each triple's subject/object to
     // `kg_entities` (creating as needed) and inserts a `kg_edges` row.
     //     // Caller-gated by `memory.graph.enabled` — this runs alongside, not
     // instead of, flat extraction during  so the two can be A/B'd.
@@ -737,7 +737,7 @@ impl MemorySystem {
     // Sleep-like consolidator — Phase C: resolve contradictions in single-
     // valued predicates (`works_at`, `lives_in`, …) by closing older edges'
     // `valid_to`. Deterministic, no LLM. Returns `(groups_resolved,
-    // edges_closed)`. See `design-docs/memory-research-2026.md` §5 (Direction 1,
+ // edges_closed)`. (Direction 1,
     // Phase C — newly ordered first per the implementation plan, ahead of
     // Phase A entity dedup).
     pub fn consolidate_contradictions(&self, user_id: &str) -> (usize, usize) {
@@ -750,7 +750,7 @@ impl MemorySystem {
     // Sleep-like consolidator — Phase A: merge near-duplicate entities within
     // the same `entity_type` via strict-token-subset + size-ratio rule (high
     // precision, no LLM). Returns `(entities_merged, edges_repointed)`. See
-    // `design-docs/memory-research-2026.md` §5 (Direction 1, Phase A).
+ // (Direction 1, Phase A).
     pub fn consolidate_entities(&self, user_id: &str, threshold: f64) -> (usize, usize) {
         match self.storage.lock().unwrap().graph_consolidate_entities(user_id, threshold) {
             Ok(pair) => pair,
@@ -762,8 +762,8 @@ impl MemorySystem {
     // live edge using `ln(1 + access_count) × exp(-age_days / half_life)`.
     // The retrieval path already orders by `importance DESC`, so scoring
     // nightly biases context toward frequently-reinforced + recent facts.
-    // Returns the number of edges scored. See `design-docs/memory-research-2026.md`
-    // §5 (Direction 1, Phase D).
+ // Returns the number of edges scored.
+ // (Direction 1, Phase D).
     pub fn consolidate_importance(&self, user_id: &str, half_life_days: f64) -> usize {
         match self.storage.lock().unwrap().graph_consolidate_importance(user_id, half_life_days) {
             Ok(n)    => n,

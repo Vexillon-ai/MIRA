@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // src/memory/graph.rs
-//! Temporal knowledge-graph memory (see `design-docs/graph-memory.md`).
+//! Temporal knowledge-graph memory.
 //!
 //! the data structs, entity-name normalisation, and the LLM **triple
 //! extractor**. Storage (entity resolution + edge insert) lives on

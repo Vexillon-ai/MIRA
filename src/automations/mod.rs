@@ -8,7 +8,7 @@
 //! later slices add webhook ingest, the internal event bus, agent-facing
 //! tools, and outbound HTTP actions.
 //!
-//! See `design-docs/phase10-automations.md` for the full design.
+//! The automations subsystem.
 
 pub mod agent_gate;
 pub mod dispatch;

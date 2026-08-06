@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // src/tts/mod.rs
-//! Text-to-speech subsystem (see `design-docs/phase8-tts.md`).
+//! Text-to-speech subsystem.
 //!
 //! Pluggable backends behind a single [`TtsBackend`] trait, fronted by a
 //! routing service that picks the right one per user / channel / config.

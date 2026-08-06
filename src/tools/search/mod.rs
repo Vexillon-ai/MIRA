@@ -8,8 +8,7 @@
 //! a configured ordered list of backends and returns hits from the first
 //! one that succeeds. Every outbound HTTP call goes through
 //! [`super::http_policy::HttpPolicy`], so SSRF, rate-limit and redirect
-//! guarantees apply regardless of which backend is picked. See
-//! `design-docs/phase7-tier2-web-tools.md` §5.
+//! guarantees apply regardless of which backend is picked.
 
 pub mod ddg;
 pub mod brave;

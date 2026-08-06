@@ -70,7 +70,7 @@ pub struct RollupConfig {
     /// Per-message character clamp before concatenation.
     pub max_chars_per_message: usize,
     /// Phase C — single-valued contradiction resolution on the knowledge
-    /// graph (see `design-docs/memory-research-2026.md` §5). Off by default.
+ /// graph. Off by default.
     /// When on, the rollup tick runs the consolidator pass per active user
     /// AFTER their daily summary, so the graph has a single current truth
     /// for things like job/residence/relationship before tomorrow's chats.

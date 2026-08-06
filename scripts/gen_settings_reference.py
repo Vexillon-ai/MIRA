@@ -48,8 +48,6 @@ def polish(text: str, top_keys: frozenset = frozenset()) -> str:
         t = (r[:1].upper() + r[1:]) if r else r
     # Inline internal jargon (safe, unambiguous codenames).
     t = re.sub(r"\bPhase[-\s]?\d+\s+(?=[a-z(])", "", t)            # inline "Phase 1 the"
-    t = re.sub(r"\s*\(guardian-scope\s*§\s*\d+\)", "", t)
-    t = re.sub(r"guardian-scope\s*§\s*\d+\s*[:,]?\s*", "", t)
     t = re.sub(r"\s*\(§[\d.]+\)", "", t)                      # (§4.5)
     t = re.sub(r"\s*\(P\d+[a-z]?\)", "", t)                        # (P2b)
     t = re.sub(r"\s{2,}", " ", t).strip()

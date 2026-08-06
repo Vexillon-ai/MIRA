@@ -3,7 +3,7 @@
 // src/automations/heartbeats/memory_janitor.rs
 //! Heartbeat: memory janitor.
 //!
-//! Long-term goal (per design doc §2.3): dedup, decay, and promote memories.
+//! Long-term goal: dedup, decay, and promote memories.
 //! ships the registered handler so the dispatcher routes correctly
 //! and the seeded row fires on schedule, with a small but real action: it
 //! ages the on-disk memory DB's WAL so the file doesn't grow unbounded

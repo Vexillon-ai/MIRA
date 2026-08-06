@@ -16,7 +16,7 @@
 //! [`fingerprint`] is a SHA-256 over the canonical definition, logged + audited
 //! at boot so any drift from the shipped spec is visible. (It attests
 //! "definition unchanged", not "binary authentic" — that is the separate
-//! release-signing layer.) See `design-docs/guardian-agent.md`.
+//! release-signing layer.)
 
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -79,7 +79,7 @@ pub fn mode(config: &MiraConfig) -> GuardianMode {
     GuardianMode::from_config(config)
 }
 
-/// Which model tier a Guardian turn runs on (design-docs/guardian-scope.md §6).
+/// Which model tier a Guardian turn runs on.
 /// Routine = the light always-on model + condensed prompt (low-severity ticks);
 /// Triage = the stronger model + full charter, reached only for real triage (a
 /// Red detector). Both resolve to local providers and are fail-closed checked.
@@ -91,8 +91,8 @@ pub enum GuardianTier {
     Triage,
 }
 
-/// The Guardian's **full charter** — its constitution (see
-/// `design-docs/guardian-constitution.md`). Governs triage and escalation (the
+/// The Guardian's **full charter** — its constitution.
+/// Governs triage and escalation (the
 /// consequential turns). Distinct from MIRA's persona: MIRA serves and
 /// converses; the Guardian watches and protects. The cardinal rule — detectors
 /// decide *whether* something is wrong, the model decides *what it means* — is
@@ -208,7 +208,7 @@ pub fn definition() -> AgentDefinition {
         allowed_tools: RING0_TOOLS.iter().map(|s| s.to_string()).collect(),
         // Pinned to the dedicated `guardian` llm-alias (P2). If that alias isn't
         // configured, the resolver falls back to the primary provider — and the
-        // fail-closed `model_check` (§5) refuses to run if whatever resolves
+ // fail-closed `model_check` refuses to run if whatever resolves
         // isn't a local provider. The alias name is fixed; its target is config.
         model_alias:   Some(GUARDIAN_ALIAS.to_string()),
         budget_usd:    None,
@@ -241,7 +241,7 @@ pub fn fingerprint() -> String {
     hex::encode(digest)
 }
 
-// ── Local-only enforcement (§5) ───────────────────────────────────────────────
+// ── Local-only enforcement ───────────────────────────────────────────────
 
 /// Where the Guardian's resolved model lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,7 +350,7 @@ pub fn tier_model(config: &MiraConfig, tier: GuardianTier) -> (String, Option<St
     (provider, model)
 }
 
-/// Fail-closed local-model check (§5) for a specific tier. The Guardian must use
+/// Fail-closed local-model check for a specific tier. The Guardian must use
 /// a *local* model so no conversation/log/health data ever egresses — even
 /// though the co-resident main agent may legitimately use a cloud provider.
 /// Cloud → refused; loopback → ideal; LAN-local → allowed with a warning.
@@ -429,7 +429,7 @@ pub fn allowlist_has_no_network_tool() -> bool {
 const AUTO_COOLDOWN_SECS: i64 = 3600;
 
 /// Whether a proposed action kind is eligible for autonomous (no-approval)
-/// execution under isolation (§4.5) — the clearly-safe, comms-restoring subset.
+/// execution under isolation — the clearly-safe, comms-restoring subset.
 /// Requeue/trim are NOT autonomy-eligible; they wait for approval.
 pub fn is_autonomy_eligible(kind: crate::agent::guardian_actions::GuardianActionKind) -> bool {
     use crate::agent::guardian_actions::GuardianActionKind::*;
@@ -582,7 +582,7 @@ pub fn spawn_watch_loop(
             }
             let uid = notify_user_id.clone().unwrap_or_else(|| "system".to_string());
             let turn_start = chrono::Utc::now().timestamp(); // to find THIS turn's proposals
-            // Tiered model (§6): a Red detector is real triage → escalate to the
+            // Tiered model: a Red detector is real triage → escalate to the
             // stronger model + full charter; a Yellow-only state is routine → the
             // light model + condensed prompt. Both fall back to the guardian
             // alias when their tier isn't separately configured.
@@ -645,7 +645,7 @@ pub fn spawn_watch_loop(
                     } else { None };
 
                     // P4c-1 — isolation autonomy DETECTION (dry-run only this slice).
-                    // Active mode + a *failed* channel delivery = isolation (§4.5).
+ // Active mode + a *failed* channel delivery = isolation.
                     // For each autonomy-eligible proposal made THIS turn, log + HMAC-
                     // record what the Guardian WOULD do. Real execution is P4c-2.
                     if gmode == GuardianMode::Active
@@ -676,7 +676,7 @@ pub fn spawn_watch_loop(
                                         decision: "autonomous_dry_run".into(), detail: Some(detail) });
                                     continue;
                                 }
-                                // Staged opt-in (§4.5): an eligible kind the operator
+                                // Staged opt-in: an eligible kind the operator
                                 // hasn't opted into stays observe-only. `is_autonomy_eligible`
                                 // is the hard code ceiling; this is the per-kind grant on top.
                                 if !config.guardian.isolation_autonomy_kinds.iter().any(|k| k == &kind_s) {

@@ -21,7 +21,7 @@
 //! it under `<data_dir>/deps/pyodide/node_modules/pyodide`, writes the embedded
 //! `pyodide_runner.mjs` alongside it, and (optionally) pre-warms a wheel cache.
 //! Built only under the `sandbox-wasm` feature (it shares the "no Docker, runs
-//! everywhere" goal and the deps layout). See design-docs/code-execution-sandbox.md.
+//! everywhere" goal and the deps layout).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

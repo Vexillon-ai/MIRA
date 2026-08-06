@@ -119,8 +119,7 @@ tags: [companion, learned]
 
 // Family / contact registry. In v1 this is informational — the
 // machine-readable contact lives in companion_settings.safety_contact_user_id.
-// In v2 this page will document the configured groups (§9 of the
-// design proposal).
+// In v2 this page will document the configured groups.
 pub const FAMILY_MD: &str = r#"---
 title: People in my life
 writer: user
@@ -136,7 +135,7 @@ In v1 the **machine-readable** safety contact is configured separately
 (via the `companion_configure` tool or the admin UI); this page is
 informational.
 
-In v2 ([§9 of the companion design](../../../../design-docs/companion/design-proposal.md)),
+In v2,
 groups become the trust network — this page will summarise which
 groups the companion is configured with.
 

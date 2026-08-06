@@ -7,8 +7,8 @@
 //! The generic plugin channel: an external **provider** process owns the
 //! transport to some messaging system (Nextcloud Talk, IRC, …) and relays
 //! messages to/from MIRA over two signed HTTP calls. New channels ship as
-//! separate programs in any language — no MIRA rebuild. See
-//! `design-docs/channel-provider-protocol.md` for the full spec.
+//! separate programs in any language — no MIRA rebuild.
+//! Providers implement the full wire spec.
 //!
 //! This is the symmetric counterpart of the MCP host: MCP plugs in *tools*
 //! the agent calls; CPP plugs in *channels* that reach the user.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Package verification → trust level (see design-docs/plugin-packages.md, "Trust
-//! model" + "Signing").
+//! Package verification → trust level.
+//! Signed, then trust-scored.
 //!
 //! Reuses the skills crypto path verbatim: the same ed25519 + canonical-JSON
 //! `verify_signature_block`, the same `TrustStore` of publisher fingerprints.

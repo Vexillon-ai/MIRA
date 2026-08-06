@@ -904,7 +904,7 @@ impl GatewayBuilder {
                 "MIRA-Guardian: mode={:?} definition=sha256:{}",
                 gmode, guardian::fingerprint(),
             );
-            // Fail-closed local-only verdict (§5) — only meaningful when enabled.
+ // Fail-closed local-only verdict — only meaningful when enabled.
             if gmode != guardian::GuardianMode::Off {
                 let chk = guardian::model_check(&config);
                 if chk.allowed {
@@ -2359,7 +2359,7 @@ fn build_tool_registry(
 
     // ── Tier 1 — pure, always-on tools ────────────────────────────────────────
     // These have no external dependencies (network, code exec, etc.) so they
-    // ship unconditionally. See design-docs/phase7-tools-and-sandbox.md §1.
+ // ship unconditionally.
     registry.register(NowTool::new(auth.cloned()));
     registry.register(DateMathTool::new());
     registry.register(MathEvalTool::new());
@@ -2895,7 +2895,7 @@ fn build_tool_registry(
         let _ = &pyodide_backend;
     }
 
-    // ── Skills (slice A3.5 + A5 from design-docs/skills-and-agents.md) ──────────
+ // ── Skills ──────────
     // Load installed Skills from <data_dir>/skills/ and register each as a
     // SkillTool. Snapshot the registry's *builtins* into a dispatcher
     // BEFORE adding SkillTools — that way each SkillTool's dispatcher only

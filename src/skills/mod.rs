@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The Skills system — Phase A of `design-docs/skills-and-agents.md`.
+//! The Skills system.
 //!
 //! A1 (this slice): manifest schema + loader. Subsequent slices wire
 //! Skills into the agent's tool dispatch (A3), enforce permissions

@@ -25,7 +25,7 @@
 //!   `is_ip_hard_blocked`. Used by the apps framework so an app can reach a
 //!   declared LAN service (e.g. a home Home Assistant box).
 //!
-//! See `design-docs/phase7-tier2-web-tools.md` for the full security model.
+//! The outbound-HTTP security model for Tier 2 tools.
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};

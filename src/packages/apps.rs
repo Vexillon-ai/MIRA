@@ -15,7 +15,7 @@
 //!
 //! Slice 1 ships exactly one tool handler kind (`echo`) and no app-owned
 //! subprocess/HTTP; richer handlers, sandboxing, and per-user scoping are later
-//! slices (see design-docs/apps-framework.md).
+//! slices.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

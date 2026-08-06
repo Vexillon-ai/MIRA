@@ -303,7 +303,7 @@ pub fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), MiraError> {
             return Err(MiraError::ConfigError(
                 "rootfs SHA256 manifest has not been finalized in this MIRA build. \
                  Set MIRA_SANDBOX_DEV_INSTALL=1 to bypass for development. \
-                 See design-docs/phase7a-5-code-run.md.".into()
+                 ".into()
             ));
         }
         warn!("MIRA_SANDBOX_DEV_INSTALL=1 — skipping SHA256 verification for {}", path.display());

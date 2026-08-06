@@ -147,7 +147,7 @@ pub async fn speak(
 // POST /api/tts/speak/stream  (Server-Sent Events)
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Per design doc §4: emits one `chunk` event per sentence with
+// Emits one `chunk` event per sentence with
 // `{ codec, b64, is_final }`, a terminal `done` event, and an `error` event
 // on backend failure. The web client decodes the base64 bytes into Blobs and
 // queues them for sequential playback.

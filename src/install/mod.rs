@@ -3,7 +3,7 @@
 //! `mira install` / `uninstall` — make the OS supervise MIRA so the web
 //! UI's Restart button actually restarts.
 //!
-//! Slices 2/6 of design-docs/install-and-supervisor.md ship the Linux/systemd-user,
+//! Ships the Linux/systemd-user,
 //! macOS/launchd, and Windows/SCM backends. Each also installs the out-of-process
 //! Guardian sentinel as its own supervised unit (`mira guardian-install`). Docker
 //! users are pointed at `docker compose` (slice 5).

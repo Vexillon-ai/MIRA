@@ -5,7 +5,7 @@
 //! MIRA HTTP server (Server). Centralising this here keeps `main.rs` thin
 //! and makes the decision matrix unit-testable.
 //!
-//! See `design-docs/phase6-tui-server-mode.md` for the full matrix.
+//! The TUI/server run-mode matrix.
 
 use mira::config::{expand_path, MiraConfig};
 

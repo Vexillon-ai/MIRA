@@ -227,7 +227,7 @@ pub enum Command {
     },
     // Install MIRA as a systemd user service so the OS supervises it.
     // On first install, run `mira install` and then complete onboarding
-    // in the web UI. See design-docs/install-and-supervisor.md.
+    // in the web UI.
     Install {
         // Path to the config file the service should load.
         // Defaults to `~/.mira/config/mira_config.json`.
@@ -298,7 +298,7 @@ pub enum Command {
     Restart,
     // Show the service's systemd status (active state, recent journal).
     Status,
-    // Skill author tools (slice A8 of design-docs/skills-and-agents.md):
+ // Skill author tools.
     // scaffold, validate, generate signing keys, sign, and package
     // Skills for upload via the web UI.
     Skill {
@@ -387,7 +387,7 @@ pub enum Command {
     // web-push alarm if MIRA goes down — the one failure the co-resident watch
     // can't catch (it shares MIRA's fate). Driven by `guardian.process.*` config
     // (off by default). Use the global `--data-dir` to point at MIRA's data dir.
-    // See design-docs/guardian-separate-process.md.
+    // Runs as a separate process.
     GuardianWatch,
     // Install the Guardian liveness sentinel as its own supervised unit
     // (`mira-guardian-watch.service`), separate from the main MIRA service so it

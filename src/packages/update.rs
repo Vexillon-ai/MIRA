@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Update planning (, slice 1) — the pure diff + policy core that gates
-//! an update (design-docs/plugin-packages.md §"Update & migration").
+//! Update planning (slice 1) — the pure diff + policy core that gates
+//! an update.
 //!
 //! An update is an admin supplying a bundle with the **same `id`** and a
 //! **higher `version`** than an installed package. Before anything is touched,

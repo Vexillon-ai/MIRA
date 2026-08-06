@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! `SkillTool` — exposes one loaded Skill as a single entry in the agent's
-//! tool list (the "Skill router" pattern from `design-docs/skills-and-agents.md`).
+//! tool list.
 //!
 //! Why one entry per Skill instead of one entry per tool? LLMs degrade
 //! sharply once their tool list grows past ~30 — splitting Skills into
@@ -169,7 +169,7 @@ impl Tool for SkillTool {
                 // the executable runner. Tracked for a follow-up slice.
                 Err(MiraError::ToolError(format!(
                     "skill {:?} tool {:?}: executable tools are not yet supported in this MIRA build. \
-                     The runner is tracked as a follow-up to slice A3 in design-docs/skills-and-agents.md.",
+                     The runner is tracked as a follow-up.",
                     self.skill_id(), call.tool,
                 )))
             }

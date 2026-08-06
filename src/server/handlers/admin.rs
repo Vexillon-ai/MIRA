@@ -10,7 +10,7 @@
 //! required for changes to take effect.
 //!
 //! `consolidator_run_now` runs the sleep-like memory consolidator (Phases C,
-//! A, D — see design-docs/memory-research-2026.md §5) on-demand for every user,
+//! A, D) on-demand for every user,
 //! independently of the per-phase config flags that gate the nightly job.
 //! Lets operators eyeball what the consolidator would do without waiting for
 //! the hourly rollup tick or flipping flags on a quiet user.

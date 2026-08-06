@@ -125,8 +125,7 @@ impl EmailAccountRow {
 
 // Per-account security configuration. Lives inside
 // `email_accounts.security_json` so we can extend it across E3
-// chunks without DDL. Defaults are deliberately conservative — see
-// `design-docs/email-channel.md` §6 for the rationale per field.
+// chunks without DDL. Defaults are deliberately conservative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailSecurity {
     // Exact emails or `*@domain` wildcards. Senders matching any

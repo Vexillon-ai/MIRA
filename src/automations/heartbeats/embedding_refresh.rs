@@ -3,7 +3,7 @@
 // src/automations/heartbeats/embedding_refresh.rs
 //! Heartbeat: embedding refresh.
 //!
-//! Per design doc §2.3: refresh stored embeddings against the current model
+//! Internally: refresh stored embeddings against the current model
 //! when the embedder identity changes (different provider, different model
 //! name, different output dimension).  ships the registered handler;
 //! the actual diff/recompute pass lives alongside the embedding subsystem

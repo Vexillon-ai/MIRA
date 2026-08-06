@@ -17,7 +17,7 @@
 //! web-push alarm, opened **cold** from the shared data dir (`web_push_vapid.key`
 //! + `web_push.db`) so it works with MIRA fully offline. On recovery it clears
 //! the alarm. Observe-and-alarm only in this increment — it never restarts or
-//! mutates anything (see design-docs/guardian-separate-process.md).
+//! mutates anything.
 //!
 //! The failure threshold is what makes a normal restart *not* alarm: MIRA comes
 //! back within one probe window, so the miss count never reaches the threshold.
@@ -604,8 +604,8 @@ pub async fn run(config: Arc<MiraConfig>) -> Result<(), MiraError> {
                 // This is also the escalation seam for the Guardian Phase-3 emergency
                 // channel (out-of-band SMS / phone call): when it exists, escalate here
                 // if push yielded 0/failed. That channel is a NEW capability MIRA lacks
-                // and is gated on an owner decision (local GSM gateway vs. cloud) — see
-                // design-docs/guardian-build-plan.md §4.6.
+                // and is gated on an owner decision (local GSM gateway vs. cloud).
+                // It is a future capability, not yet built.
                 if !outcome.reached_anyone() {
                     error!("guardian-watch: DOWN-ALARM REACHED NO ONE — MIRA is down and no delivery \
                             target is registered (0 push devices / no reachable channel). Register a \

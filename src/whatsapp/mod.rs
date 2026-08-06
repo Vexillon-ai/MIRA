@@ -21,7 +21,7 @@
 //! inbound message. Inbound-triggered replies are always inside it.
 //! Proactive sends (companion/automations) may fall outside it and require
 //! a pre-approved **template** — not yet implemented; such sends surface
-//! Meta's 131047 error in the logs. See `design-docs/whatsapp-channel.md`.
+//! Meta's 131047 error in the logs.
 //!
 //! Module shape mirrors the other channels:
 //!   * `types`    — webhook envelope + GET-verify query models.

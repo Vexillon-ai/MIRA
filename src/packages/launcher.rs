@@ -25,7 +25,7 @@
 //!   Fail-closed.
 //!
 //! A true *egress allowlist* (vs all-or-nothing network) remains the container
-//! tier. (See design-docs/plugin-packages.md, "Capability & sandbox model".)
+//! tier.
 
 /// What the launcher applies before exec.
 #[derive(Debug, Clone, Default)]

@@ -2,8 +2,8 @@
 
 // web/src/api/skills.ts
 //
-// TypeScript client for the /api/skills surface (slice A4 from
-// design-docs/skills-and-agents.md). DTO shapes mirror
+// TypeScript client for the /api/skills surface.
+// DTO shapes mirror
 // `src/server/handlers/skills.rs` exactly so axios returns ready-to-render
 // objects without conversion.
 

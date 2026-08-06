@@ -1767,7 +1767,7 @@ Nice to meet you!
 
     #[tokio::test]
     async fn find_tools_round_trip_recovers_a_missing_tool_in_one_turn() {
-        // Regression for design-docs/jit-tools-find-tools-hint.md: with adaptive
+        // Regression test: with adaptive
         // selection narrowing the toolset so `image_generate` is NOT loaded, a
         // request needing it must cause `find_tools` to be invoked and the turn
         // to succeed — without the user re-prompting.

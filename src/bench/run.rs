@@ -305,7 +305,7 @@ async fn run_one_question(
     // Sleep-like consolidator passes (gated by per-phase config flags),
     // mirroring production's nightly job running between ingestion and next-day
     // retrieval. Phase C first so dedup's edge-count tiebreak sees post-
-    // resolution counts. See design-docs/memory-research-2026.md §5.
+ // resolution counts.
     if config.memory.graph.enabled {
         if config.memory.consolidation.contradictions_enabled {
             let (groups, closed) = memory.consolidate_contradictions(BENCH_USER);

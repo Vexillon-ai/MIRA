@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Plugin packages — signed, multi-component bundles (see
-//! design-docs/plugin-packages.md).
+//! Plugin packages — signed, multi-component bundles.
 //!
 //! A package is the distribution + trust unit; its components register into
 //! the existing subsystems (skills store, MCP host, channel accounts). The
 //! package layer is install/uninstall/trust orchestration that fans out — it
 //! does not merge those runtime registries.
 //!
-//!(this slice): the manifest types, verification, and trust levels —
+//! (this slice): the manifest types, verification, and trust levels —
 //! "MIRA can verify a package and show its trust level." Later phases add the
 //! bundle store, the install/update/teardown engine, and the per-component
 //! installers (`mcp_server`).

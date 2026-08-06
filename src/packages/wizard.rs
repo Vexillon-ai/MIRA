@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The `config_schema` + `setup_guide` manifest grammar (see
-//! design-docs/plugin-packages.md §"Manifest grammar").
+//! The `config_schema` + `setup_guide` manifest grammar.
 //!
 //! These two grammars are what turn a `cpp_provider` component from a README
 //! into a wizard MIRA mostly runs itself: `config_schema` declares the install
@@ -9,7 +8,7 @@
 //! derived template, or a setup-step output), and `setup_guide` is the ordered,
 //! typed, MIRA-verifiable list of steps that provision it.
 //!
-//! This module defines and *validates* the grammar (, slice 1). The
+//! This module defines and *validates* the grammar (slice 1). The
 //! executor that runs the steps lives in [`super::engine`] (slice 3); the
 //! `mira.*` action verbs are dispatched there.
 //!
@@ -596,7 +595,7 @@ fn check_acyclic(steps: &[SetupStep]) -> Result<(), ManifestError> {
 mod tests {
     use super::*;
 
-    // The condensed `nextcloud-talk` wizard from design-docs/plugin-packages.md must
+    // The condensed `nextcloud-talk` wizard must
     // round-trip through the grammar.
     const NEXTCLOUD_TALK: &str = r#"{
       "config_schema": [

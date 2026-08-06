@@ -96,7 +96,7 @@ pub struct TurnContext {
     // security/visibility allow-list that adaptive may narrow *within*.
     pub tools_flow_restricted:  bool,
     // Suppress the universal duty-of-care safety floor for this turn. Default
-    // false → the floor is ON for every turn (guardian-scope.md §4.5: serious
+    // false → the floor is ON for every turn (serious
     // risk of harm is always conveyable; no user/config setting can silence it).
     // Set true ONLY for internal, non-user-facing persona turns that carry their
     // own charter — the Guardian, watchdog incident analysis, the benchmark
@@ -129,7 +129,7 @@ pub struct AgentCore {
     system_prompt:     std::sync::RwLock<String>,
     // Just-in-Time Tools — lazily-maintained name→embedding cache for the
     // adaptive per-turn tool selector. Empty until the first adaptive turn;
-    // see src/agent/tool_select.rs + design-docs/just-in-time-tools.md.
+    // see src/agent/tool_select.rs.
     tool_index:        tokio::sync::Mutex<crate::agent::tool_select::ToolIndex>,
     tool_mode:         ToolMode,
     max_tool_rounds:   usize,
@@ -388,7 +388,7 @@ impl AgentCore {
 
     // Run a single **MIRA-Guardian** turn (built-in watchdog persona + Ring-0
     // read-only tools, on the local guardian model) and return its text.
-    // Fail-closed (§5): errors if the Guardian is `off` or its model isn't
+ // Fail-closed: errors if the Guardian is `off` or its model isn't
     // local. Used by the proactive watch loop (P3) and any internal Guardian
     // invocation. Memory/wiki hooks are skipped — Guardian turns aren't the
     // user's conversation.
@@ -904,7 +904,7 @@ impl AgentCore {
         //   require *no* persona override (they're pure-companion-chat features).
         // - `safety_addendum` — the non-overridable duty-of-care floor. It is
         //   UNIVERSAL: on for every user-facing turn regardless of companion
-        //   mode (guardian-scope.md §4.5). Companion users with a contact get the
+        //   mode. Companion users with a contact get the
         //   fuller version; everyone else gets the base floor; only internal
         //   persona turns (`suppress_safety_floor`) opt out. Goes LAST so it has
         //   the final say in the system prompt.
@@ -1289,7 +1289,7 @@ impl AgentCore {
         let expand_pool: Option<&[String]> =
             if expander.is_some() { Some(&pool) } else { None };
 
-        // Progressive-disclosure hint (JIT Tools §3): when we narrowed the
+        // Progressive-disclosure hint: when we narrowed the
         // toolset AND `find_tools` is exposed, tell the model how many tools are
         // loaded, how many more it can pull in, and that it must search before
         // claiming a capability is missing. Without this the model sees a small

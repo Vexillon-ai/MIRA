@@ -3,7 +3,7 @@
 // src/automations/heartbeats/weekly_reflection.rs
 //! Heartbeat: weekly reflection.
 //!
-//! Design doc §2.3 originally describes this as a `Prompt` action ("review
+//! The design originally describes this as a `Prompt` action ("review
 //! the last 7 days…"). It is also seeded as an `Internal` task so the
 //! handler is callable from the standard heartbeat flow — useful when
 //! reflection should happen without burning the agent loop, e.g. during

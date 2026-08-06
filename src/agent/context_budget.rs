@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // src/agent/context_budget.rs
-//! Phase 1 — token-aware context budgeting (see design-docs/context-compaction.md
-//! §5). Replaces the fixed `max_context_turns` window with a real token budget
+//! Phase 1 — token-aware context budgeting.
+//! Replaces the fixed `max_context_turns` window with a real token budget
 //! derived from the model's context length, filling the window efficiently
 //! instead of sending a near-constant slice regardless of what fits.
 //!

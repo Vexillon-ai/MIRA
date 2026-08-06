@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::MiraError;
 
-/// The bounded, reversible, service-restoration action set (§4.2). Deliberately
+/// The bounded, reversible, service-restoration action set. Deliberately
 /// small; never destructive. Each maps to an existing in-process operation at
 /// execution time (P4a-2): re-run/requeue go through the automations scheduler,
 /// restart-bridge through the ChannelManager. There is intentionally NO shell,

@@ -6,7 +6,7 @@
 //! Companion to the structured memory DB (`src/memory/`). Where memory
 //! stores atomic facts indexed for semantic retrieval, the wiki stores
 //! narrative pages on disk that the agent can read into context and the
-//! user can edit by hand. See `design-docs/wiki-feature.md` for the full design.
+//! user can edit by hand.
 //!
 //! # Layers
 //! - **Storage** — atomic markdown files with YAML frontmatter
@@ -26,7 +26,7 @@
 //!    `approve_op`) which runs the applier and flips status to
 //!    `applied` / `failed` / `rejected`.
 //!
-//! Slices B–H build on this foundation; see `design-docs/wiki-feature.md`.
+//! Slices B–H build on this foundation.
 
 // TODO(wiki-v2): multi-user shared wikis at wikis/groups/<id>/
 // TODO(wiki-v2): encryption at rest using ~/.mira/data/master.key

@@ -3,7 +3,7 @@
 // src/automations/heartbeats/conversation_rollup.rs
 //! Heartbeat: conversation roll-up.
 //!
-//! Per design doc §2.3: summarise idle conversations into memory and
+//! Summarise idle conversations into memory and
 //! archive the originals.  ships the registered handler with a
 //! lightweight pass — it reports the count of conversation files older
 //! than the configured idle threshold so an admin can monitor the queue.

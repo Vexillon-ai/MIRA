@@ -277,7 +277,7 @@ pub struct OpenAiCompatClient {
     /// leak into the answer UI), which means the outer `GuardedProvider` — which
     /// only sees `on_token` — can't watch them. We watch them here and abort the
     /// stream early on a degenerate thinking run. `None` = no guard (health
-    /// probes and tests leave it unset). See design-docs/degenerate-output-guard.md.
+ /// probes and tests leave it unset).
     degeneracy: Option<crate::config::DegeneracyGuardConfig>,
 }
 

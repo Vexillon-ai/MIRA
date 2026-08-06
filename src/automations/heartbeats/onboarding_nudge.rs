@@ -3,7 +3,7 @@
 // src/automations/heartbeats/onboarding_nudge.rs
 //! Heartbeat: onboarding nudge.
 //!
-//! Per design doc §2.3: nudge users with stale onboarding groups, daily at
+//! Internally: nudge users with stale onboarding groups, daily at
 //! 09:00 local.  ships the registered handler; the actual notification
 //! enqueues a `ChannelMessage` activation per stale user, which depends on
 //! the per-user groups + reminder windows the onboarding phase tracks. For

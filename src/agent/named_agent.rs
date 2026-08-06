@@ -262,7 +262,7 @@ impl SkillExecutorResolver for NamedAgentResolver {
             if guardian::mode(&self.config) == guardian::GuardianMode::Off {
                 return None;
             }
-            // Fail-closed local-only check (§5): never run the Guardian on a
+ // Fail-closed local-only check: never run the Guardian on a
             // cloud/remote model — it must not egress conversation/log data.
             let chk = guardian::model_check(&self.config);
             if !chk.allowed {

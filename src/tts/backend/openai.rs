@@ -10,7 +10,7 @@
 //!                       (OpenedAI-Speech, LiteLLM, LocalAI, …).
 //!
 //! Single implementation; the discriminant is the configured `id` and base URL.
-//! See `design-docs/phase8-tts.md` §2.5.
+//! Speaks the OpenAI-compatible TTS spec.
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};

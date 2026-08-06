@@ -11,9 +11,8 @@
 //! interpreter is a bundled WASI CPython module (`python.wasm`), provisioned
 //! to `~/.mira/deps` like our other managed runtimes (see the rootfs manager).
 //!
-//! Built only under the `sandbox-wasm` feature. See
-//! design-docs/just-in-time-tools.md + memory project_code_execution_sandbox
-//! (pivot to native AppContainer/App-Sandbox if WASM limits bite).
+//! Built only under the `sandbox-wasm` feature.
+//! (Pivot to native AppContainer/App-Sandbox if WASM limits bite.)
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

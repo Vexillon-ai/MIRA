@@ -20,7 +20,7 @@
 //! removed groups / members linger until pruned (cheap; the
 //! routing gateway filters them out at read time anyway).
 //!
-//! Design ref: `design-docs/companion/design-proposal.md` §9 + §11.11.
+//! Companion group model.
 
 use std::path::Path;
 use std::sync::Mutex;

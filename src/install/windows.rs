@@ -138,7 +138,7 @@ pub fn install(inputs: &InstallInputs) -> Result<(), Box<dyn Error>> {
     // — and we keep them SHORT and flat (1s/2s/2s) with a short reset window
     // so even the fallback path (relauncher couldn't spawn) restarts in ~1s
     // instead of the old escalating 1s/5s/30s that pinned rapid restarts at
-    // 30 s. See design-docs/install-and-supervisor.md.
+ // 30 s.
     let failure_actions = ServiceFailureActions {
         reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(120)),
         reboot_msg:   None,

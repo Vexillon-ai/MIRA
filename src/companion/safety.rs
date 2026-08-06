@@ -71,7 +71,7 @@ pub const MISSED_CHECKIN_THRESHOLD: u32 = 3;
 const SAFETY_THREAD_TITLE: &str = "Safety alerts";
 
 // The **universal** duty-of-care floor — appended to EVERY user-facing turn,
-// regardless of companion mode (guardian-scope.md §4.5 base principle: "privacy
+// regardless of companion mode (base principle: "privacy
 // is honoured except for serious risk of harm, which is always conveyable ... no
 // privacy setting can silence this"). It has NO dependency on a configured
 // safety contact, so it holds even on a plain instance with the companion turned
@@ -128,7 +128,7 @@ not need to announce this notification; it happens automatically.";
 ///   * a configured companion safety contact → the fuller [`SAFETY_ADDENDUM`]
 ///     (adds the "message your contact" offer);
 ///   * otherwise the universal [`SAFETY_ADDENDUM_BASE`] duty-of-care floor.
-/// The floor is on by default for every user-facing turn (guardian-scope §4.5).
+/// The floor is on by default for every user-facing turn.
 pub fn safety_addendum_for(suppress: bool, companion_safety_active: bool) -> &'static str {
     if suppress {
         ""

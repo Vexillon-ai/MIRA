@@ -2,8 +2,8 @@
 
 //! Events the engine evaluates.
 //!
-//! The shape mirrors the JSON schema in `design-docs/skills-and-agents.md`
-//! §"Rule evaluation". Every variant carries the `agent_id` so rules
+//! The shape mirrors the documented JSON schema.
+//! Every variant carries the `agent_id` so rules
 //! can scope by agent (per-agent budgets, depth caps), and the
 //! `skill_id` when one is in scope so rules can scope by Skill
 //! (per-Skill network allowlists, etc).

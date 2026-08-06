@@ -11,7 +11,7 @@
 //!   - `Quarantine` → write to the queue (chunk 5), no agent
 //!   - `Drop`       → discard with an audit row (chunk 5)
 //!
-//! Each gate maps to a defence row in `design-docs/email-channel.md` §6.2.
+//! Each gate maps to a documented defence row.
 //! Per-sender + per-account *rate* limits are accepted as input but
 //! the storage that drives them lands in chunk 6 — until then the
 //! caller passes `None` for the rate-tracker.

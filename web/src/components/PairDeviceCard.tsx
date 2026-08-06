@@ -8,7 +8,7 @@
 // no password re-entry. Polls /status to flip to "✓ Paired" once the phone
 // claims it, with a live countdown to expiry and a regenerate action.
 //
-// The QR encodes the JSON the app expects (see MIRA-SERVER-CHANGES §2.3):
+// The QR encodes the JSON the app expects (see the pairing protocol).
 //   { v, type:"mira_pairing", base_url, remote_url?, server_name,
 //     pairing_id, pairing_secret, expires_at }
 // `base_url` is the LAN / currently-browsed address; `remote_url` is the

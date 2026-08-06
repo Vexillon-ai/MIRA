@@ -2,7 +2,7 @@
 
 //! `Agent` — a spawnable instance of MIRA's reasoning loop (slice B1).
 //!
-//! Phase B in `design-docs/skills-and-agents.md`. The Agent type is the unit
+//! The Agent type is the unit
 //! Phase B's manager/worker hierarchy is built on:
 //!
 //! - The root MIRA agent (today's only agent) becomes one `Agent` with

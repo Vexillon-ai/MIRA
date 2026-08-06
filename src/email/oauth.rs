@@ -5,7 +5,7 @@
 //!
 //! Two providers — Google (Gmail) and Microsoft (Outlook / 365) —
 //! share the same code-with-PKCE flow. The operator brings their
-//! own client_ids at each provider (see design-docs/email-channel.md for
+//! own client_ids at each provider (for
 //! the registration steps); MIRA never stores or expects a client
 //! secret since both providers support PKCE-only public-client
 //! flows.

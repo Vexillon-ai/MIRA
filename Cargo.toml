@@ -101,7 +101,6 @@ rmcp = { version = "1.7", features = [
 # a first-class MIRA channel. async-imap polls for inbound, mail-parser
 # walks the MIME tree, ammonia sanitizes any HTML before we feed it to
 # the agent. SMTP (lettre) lands in E2; OAuth (oauth2 crate) in E4.
-# See design-docs/email-channel.md for the full design + threat model.
 # K1 (Q2 #10) — native Kokoro TTS, optional (gated by the `kokoro`
 # feature). any-tts runs Kokoro on a pure-Rust Candle backend with an
 # in-tree pure-Rust phonemizer: no `ort`/ONNX native lib, no libclang
@@ -273,8 +272,7 @@ sysinfo = { version = "0.36", default-features = false, features = ["system", "d
 
 # Cross-platform code-execution sandbox (WASM/WASI via Wasmtime). Optional,
 # behind the `sandbox-wasm` feature (heavy compile). Brings secure `code_run`
-# to Windows/macOS with one capability-based model. See
-# design-docs/just-in-time-tools.md + memory project_code_execution_sandbox.
+# to Windows/macOS with one capability-based model.
 wasmtime = { version = "36", optional = true, default-features = false, features = ["cranelift", "runtime"] }
 wasmtime-wasi = { version = "36", optional = true }
 

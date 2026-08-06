@@ -9,7 +9,7 @@
 //! survivors are routed into the conversation system the same way
 //! Signal/Telegram inbound is. Outbound (SMTP) lands in slice E2.
 //!
-//! See `design-docs/email-channel.md` for the full design, threat model, and
+//! Covers the full design, threat model, and
 //! slicing plan — that's the source of truth; this module implements it.
 //!
 //! Chunks landing across multiple commits:

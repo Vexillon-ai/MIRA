@@ -2,8 +2,8 @@
 
 //! SQLite-backed record of installed packages + the **provisioning ledger**.
 //!
-//! The ledger is the heart of reversibility (design-docs/plugin-packages.md,
-//! "Uninstall & teardown"): as a package installs, we record exactly what it
+//! The ledger is the heart of reversibility:
+//! as a package installs, we record exactly what it
 //! created (an `mcp_servers` row, a stored secret, …). Uninstall and cancel
 //! both reverse the ledger — so a partial/failed install reverses precisely
 //! what it managed to provision.
