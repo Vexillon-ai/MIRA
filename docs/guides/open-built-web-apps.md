@@ -43,25 +43,31 @@ won't reach it.
 
 ## Reaching it over the network (or WSL gateway IP)
 
-The default `subdomain` mode only works when your browser can resolve
-`<task-id>.localhost` to the machine MIRA runs on — i.e. the browser is on the
-same box, or reaches MIRA via `localhost` (as WSL's built-in port forwarding
-does). If instead you reach MIRA over the LAN or a **WSL gateway IP** (like
-`http://198.51.100.10:<port>`), that subdomain won't resolve there.
+Out of the box `mode` is **`both`**: MIRA serves each app at *both* a per-app
+subdomain origin **and** a shared port-path listener — so it's already reachable
+over the network without changing the mode. Which link you use depends on how
+you reach MIRA:
 
-For those setups, switch the **mode**:
+- **Same machine / `localhost`** (incl. WSL's built-in port forwarding) — the
+  **subdomain** link (`<task-id>.<host_suffix>`) resolves and gives each app its
+  own origin (the strongest isolation).
+- **Over the LAN or a WSL gateway IP** (like `http://198.51.100.10:<port>`) —
+  the subdomain won't resolve there, so use the **port-path** link
+  (`http://<host>:<apps-port>/a/<task-id>/`), which the `both` default already
+  serves on a second listener (default `server.port + 1`). Set
+  `server.web_apps.advertised_host` to the IP you use (e.g. `198.51.100.10`) so
+  the link MIRA hands you points there.
 
-- **`port`** — MIRA opens a *second* listener (default `server.port + 1`) and
-  serves each app at `http://<host>:<apps-port>/a/<task-id>/`. Because it's a
-  real port, it's reachable over any host that reaches MIRA — including a
-  gateway/LAN IP. Set `server.web_apps.advertised_host` to the IP you use (e.g.
-  `198.51.100.10`) so the link MIRA hands you points there.
-- **`both`** — serve both ways; MIRA gives you the subdomain link with the port
-  link as a backup.
+If you want to narrow this, set **`mode`** explicitly:
 
-The trade-off: `subdomain` gives each app its own origin (the strongest
-isolation); `port` puts all apps on one shared origin. For a personal instance
-that difference is minor — pick whichever *reaches* you.
+- **`subdomain`** — only the per-app origin (drops the port listener).
+- **`port`** — only the shared port-path listener.
+- **`both`** (default) — serve both; MIRA gives you the subdomain link with the
+  port link as a backup.
+
+The trade-off: a subdomain gives each app its own origin (the strongest
+isolation); the port path puts all apps on one shared origin. For a personal
+instance that difference is minor — pick whichever *reaches* you.
 
 ## Settings
 
@@ -70,7 +76,7 @@ Serving is **on by default**. Configure it under `server.web_apps`:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `server.web_apps.enabled` | `true` | Serve built web apps at a per-app link. |
-| `server.web_apps.mode` | `subdomain` | `subdomain`, `port`, or `both` (see above). |
+| `server.web_apps.mode` | `both` | `subdomain`, `port`, or `both` (see above). |
 | `server.web_apps.host_suffix` | `localhost` | Host suffix for the subdomain origin (`<task-id>.<suffix>`). |
 | `server.web_apps.port` | `0` | Port-mode listener port (`0` = `server.port + 1`). |
 | `server.web_apps.advertised_host` | *(derived)* | Host to put in port-mode links (a LAN/WSL-gateway IP). |

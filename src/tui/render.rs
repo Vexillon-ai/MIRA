@@ -101,6 +101,7 @@ fn render_unreachable_banner(f: &mut Frame, state: &AppState, chat_area: Rect) {
 }
 
 pub fn render_chat(f: &mut Frame, state: &mut AppState, area: Rect) {
+    let show_timestamps = state.show_timestamps; // Copy — captured before field borrows
     let theme = &state.theme;
     let block = Block::default()
         .title(" MIRA ")
@@ -123,16 +124,20 @@ pub fn render_chat(f: &mut Frame, state: &mut AppState, area: Rect) {
             Role::Assistant => ("MIRA ", theme.ai_msg_style()),
             Role::System    => ("sys  ", theme.system_msg_style()),
         };
-        // Timestamp header
-        let ts_display = if entry.timestamp.len() >= 16 {
-            entry.timestamp[..16].replace('T', " ")
-        } else {
-            entry.timestamp.clone()
-        };
-        lines.push(Line::from(vec![
+        // Message header: role label, and the timestamp only when
+        // `tui.show_timestamps` is on (F: config was previously ignored).
+        let mut header = vec![
             Span::styled(label, label_style.add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {}", ts_display), theme.dim_style()),
-        ]));
+        ];
+        if show_timestamps {
+            let ts_display = if entry.timestamp.len() >= 16 {
+                entry.timestamp[..16].replace('T', " ")
+            } else {
+                entry.timestamp.clone()
+            };
+            header.push(Span::styled(format!("  {}", ts_display), theme.dim_style()));
+        }
+        lines.push(Line::from(header));
         // Content — plain text is pre-wrapped with hanging indent so that
         // all continuation rows stay aligned.
         let msg_style = match entry.role {
@@ -364,10 +369,13 @@ pub fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
             theme.status_style().add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(
-                "  {} tokens  {} tools  {} memories",
-                state.token_count, state.tool_count, state.memory_count
-            ),
+            // `tui.show_token_count` gates the token counter (was always shown).
+            if state.show_token_count {
+                format!("  {} tokens  {} tools  {} memories",
+                    state.token_count, state.tool_count, state.memory_count)
+            } else {
+                format!("  {} tools  {} memories", state.tool_count, state.memory_count)
+            },
             theme.dim_style(),
         ),
     ];
@@ -466,7 +474,11 @@ pub fn render_sidebar(f: &mut Frame, state: &AppState, area: Rect) {
         ))),
         ListItem::new(format!("  ID:     {}", id_short)),
         ListItem::new(format!("  Msgs:   {}", state.messages.len())),
-        ListItem::new(format!("  Tokens: {}", state.token_count)),
+        ListItem::new(if state.show_token_count {
+            format!("  Tokens: {}", state.token_count)
+        } else {
+            String::new()
+        }),
         ListItem::new(""),
         // ── Themes ──
         ListItem::new(Line::from(Span::styled(

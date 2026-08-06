@@ -180,6 +180,9 @@ pub struct AgentCore {
     // down — the gateway-built SafetyFloor already has it, this
     // gives the in-core path the same visibility. Absent in unit tests.
     degradations:      OnceLock<Arc<crate::health::degradation::DegradationTracker>>,
+    // Hash-chained audit store. Used to record a tamper-evident entry when a
+    // turn is skipped for privacy consent ("off the record"). Absent in tests.
+    audit:             OnceLock<Arc<crate::agent::AuditStore>>,
 }
 
 // Progressive disclosure for Just-in-Time Tools: lets the tool loop pull more
@@ -242,6 +245,7 @@ impl AgentCore {
             max_context_turns: max_turns,
             auth: OnceLock::new(),
             degradations: OnceLock::new(),
+            audit: OnceLock::new(),
             event_bus: OnceLock::new(),
             wiki: OnceLock::new(),
             companion: OnceLock::new(),
@@ -353,6 +357,10 @@ impl AgentCore {
     // SafetyFloor + engagement classifier can surface safety-path failures.
     pub fn set_degradations(&self, deg: Arc<crate::health::degradation::DegradationTracker>) {
         let _ = self.degradations.set(deg);
+    }
+
+    pub fn set_audit(&self, audit: Arc<crate::agent::AuditStore>) {
+        let _ = self.audit.set(audit);
     }
 
     // Install the persisted-history store so turns can rehydrate their
@@ -579,7 +587,7 @@ impl AgentCore {
 
     // ── Public API ───────────────────────────────────────────────────────────
 
-    // note that a genuine INBOUND user message arrived, resetting the
+    // Note that a genuine INBOUND user message arrived, resetting the
     // companion missed-check-in counter. Every channel's inbound handler must
     // call this (the web chat handler does its own reset) so a user who receives
     // and answers check-ins on Telegram/Signal/etc. doesn't wrongly climb toward
@@ -1307,7 +1315,7 @@ impl AgentCore {
         // covering every provider the tool loop then calls.
         messages = ChatMessage::coalesce_system(&messages);
 
-        // cap a single tool RESULT fed back mid-loop to ~a quarter of the
+        // Cap a single tool RESULT fed back mid-loop to ~a quarter of the
         // window (bytes ≈ tokens × 4, so `effective_ctx` bytes ≈ effective_ctx/4
         // tokens). The budget above is computed before the loop and can't see a
         // large result that arrives during it; on a small local window one big
@@ -1373,7 +1381,7 @@ impl AgentCore {
         // the per-turn model the user picked), so for "web" we don't double-
         // extract here — core drives only web's heuristic and the full dispatch
         // for every other channel.
-        // honour an explicit "don't record this" — skip ALL post-turn
+        // Honour an explicit "don't record this" — skip ALL post-turn
         // extraction (memory store, knowledge graph, AND wiki) for this turn. The
         // turn still stays in the working conversation history; it just isn't
         // mined into long-term memory. (Web's own post-stream extractor honours
@@ -1381,6 +1389,21 @@ impl AgentCore {
         let no_store = crate::memory::auto_extract::is_no_store_request(input);
         if no_store {
             info!("consent: user asked not to record this turn — skipping memory + wiki extraction");
+            // Make the "the skip is audit-logged" guarantee real: an immutable,
+            // hash-chained record that this turn was suppressed on the user's
+            // explicit request. This single point covers every channel — the web
+            // chat handler drives this same `run_turn`, so a separate audit call
+            // there would double-count.
+            if let Some(audit) = self.audit.get() {
+                let _ = audit.record(
+                    crate::agent::audit::system_agent_id(),
+                    Some(user_id),
+                    crate::agent::audit::AuditEvent::ConsentSkip {
+                        channel:    channel.to_string(),
+                        suppressed: "memory + knowledge-graph + wiki extraction".to_string(),
+                    },
+                );
+            }
         }
         if !context.skip_memory_hooks && !no_store {
             use crate::config::ExtractorKind;
@@ -1453,6 +1476,9 @@ impl AgentCore {
                         notifications: companion.notifications_arc(),
                         groups: Some(companion.groups_arc()),
                         degradations: self.degradations.get().map(Arc::clone),
+                        // Family bridge: an in-core distress escalation reaches
+                        // the contact on their real messaging channel too.
+                        dispatcher: self.companion_dispatcher.get().map(Arc::clone),
                     };
                     let assessor = crate::companion::engagement::EngagementAssessor {
                         provider: Arc::clone(provider),
@@ -1468,6 +1494,7 @@ impl AgentCore {
                         input.to_string(),
                         response_text.clone(),
                         tz,
+                        no_store, // consent: suppress the label, keep safety escalation
                     );
                 }
             }

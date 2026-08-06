@@ -78,6 +78,9 @@ async fn run_inner(
     ui_config: TuiUiConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut state = AppState::new();
+    // tui.show_timestamps / show_token_count — previously declared but never read.
+    state.show_timestamps  = config.tui.show_timestamps;
+    state.show_token_count = config.tui.show_token_count;
 
     // Derive display labels from config
     let provider_label = config.providers.lmstudio.url

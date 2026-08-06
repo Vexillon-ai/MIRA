@@ -561,29 +561,10 @@
             "null"
           ]
         },
-        "max_connections": {
-          "description": "Maximum number of simultaneous client connections.",
-          "type": "integer",
-          "minimum": 1
-        },
         "request_timeout_secs": {
-          "description": "Maximum seconds to process a single request before returning a 408 timeout.",
+          "description": "Timeout (seconds) applied to the server's OUTBOUND HTTP client (the reqwest client the server builds). Note: this is not an inbound per-request/408 limit.",
           "type": "integer",
           "minimum": 1
-        },
-        "allowed_origins": {
-          "description": "CORS allowed origins list. Use [\"*\"] to allow all origins. Empty array disables CORS headers.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "webhook_secret": {
-          "description": "Shared secret used to verify incoming webhook signatures (e.g. from Telegram or Signal). Set to null to skip signature verification.",
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "display_name": {
           "description": "Human-readable label for this instance (e.g. 'Tarek's MIRA'), shown by the mobile app and returned in the device-pairing payload and /api/status. Null falls back to the hostname.",
@@ -685,10 +666,6 @@
               "minimum": 1,
               "maximum": 65535
             },
-            "socket_path": {
-              "description": "Path to the signald UNIX socket for polling mode.",
-              "type": "string"
-            },
             "cli_binary": {
               "description": "Name or full path to the signal-cli binary. Use 'signal-cli' if it is on your PATH.",
               "type": "string"
@@ -717,13 +694,6 @@
             },
             "bot_token": {
               "description": "Telegram Bot API token from @BotFather.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "webhook_url": {
-              "description": "Public HTTPS URL Telegram will POST updates to. Set to null to use long-polling (easier for local dev, no public URL needed).",
               "type": [
                 "string",
                 "null"
@@ -845,14 +815,6 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "vector_backend": {
-          "description": "Storage backend for vector embeddings. 'sqlite' uses the bundled SQLite database (no extra services needed). 'qdrant' connects to an external Qdrant server for production or high-volume use.",
-          "type": "string",
-          "enum": [
-            "sqlite",
-            "qdrant"
-          ]
-        },
         "embedding": {
           "description": "Embedding model configuration. Embeddings convert text to vectors for semantic (meaning-based) memory search.",
           "type": "object",
@@ -913,18 +875,6 @@
           "description": "How many memories the per-turn context hook retrieves and injects into the prompt. Higher helps aggregation / 'how many' / multi-session questions at the cost of a larger prompt. Default 15.",
           "type": "integer",
           "minimum": 1
-        },
-        "per_user_isolation": {
-          "description": "Give each user their own isolated memory namespace. Strongly recommended for multi-user deployments (Signal, Telegram).",
-          "type": "boolean"
-        },
-        "share_across_channels": {
-          "description": "When per_user_isolation is true, allow the same user's memories to be visible across different channels. A memory stored via Signal will also be accessible in the CLI for the same user ID.",
-          "type": "boolean"
-        },
-        "qdrant_url": {
-          "description": "Qdrant server URL. Only used when vector_backend is 'qdrant'. Run Qdrant via Docker: docker run -p 6333:6333 qdrant/qdrant.",
-          "type": "string"
         },
         "indexer": {
           "description": "Background transcript indexer. Embeds historical chat messages into message_vectors so semantic recall can reach past conversations. Disabling stops new inserts but leaves existing vectors intact.",
@@ -1329,7 +1279,7 @@
           "additionalProperties": false,
           "properties": {
             "enabled": {
-              "description": "Master switch. When off, overflowing turns are dropped (Phase-1 behaviour) instead of compacted. Default true.",
+              "description": "Auto-compaction master switch. When token budgeting (context_length_tokens > 0) is on and the oldest turns overflow the window, compact them into a rolling anchored summary instead of dropping them. Inert unless token budgeting is enabled. Default true.",
               "type": "boolean"
             },
             "keep_last_turns": {
@@ -1354,7 +1304,7 @@
           "additionalProperties": false,
           "properties": {
             "enabled": {
-              "description": "Master switch. Default true. Turn off (or widen the thresholds) for a legitimate request to emit a long repeated pattern.",
+              "description": "Degenerate-output guard: detects a model stuck emitting pathologically repetitive text (a wedged local model once produced ~8k tokens of '/'), aborts that generation early, and treats it as a failed turn + provider error so the garbage is neither shown nor fed to the memory/wiki extractors. Applies to every LLM call. Default true; turn off (or widen the thresholds) for a legitimate request to emit a long repeated pattern.",
               "type": "boolean"
             },
             "min_chars": {
@@ -1687,6 +1637,11 @@
           "type": "integer",
           "minimum": 0
         },
+        "isolation_autonomy_kinds": {
+          "description": "Staged autonomy opt-in: which bounded action kinds the Guardian may execute on its own under isolation once isolation_dry_run = false. A per-kind allowlist so an operator grants the harmless 'rerun_audit' first and the more-impactful 'restart_bridge' only when comfortable. Always intersected with the hard code ceiling (config can never widen autonomy beyond rerun_audit/restart_bridge); any eligible kind not listed falls back to observe-only. Default: just 'rerun_audit'.",
+          "type": "array",
+          "items": { "type": "string", "enum": ["rerun_audit", "restart_bridge"] }
+        },
         "provision_model": {
           "description": "Ollama-registry model the provisioning flow (P2b) pulls + binds the Guardian to when no local provider is configured, so a fresh install can run the Guardian without manual LLM setup. Default 'qwen2.5:3b-instruct'.",
           "type": "string"
@@ -1713,7 +1668,7 @@
           "additionalProperties": false,
           "properties": {
             "enabled": {
-              "description": "Master switch for the sentinel process. Off by default; the sentinel is a separate service the operator enables + supervises.",
+              "description": "Master switch for the out-of-process liveness sentinel (mira guardian-watch), a separate supervised process that probes MIRA's /health and raises a direct web-push alarm if MIRA goes down. Off by default; the operator enables + supervises it.",
               "type": "boolean"
             },
             "probe_interval_secs": {
@@ -2017,25 +1972,6 @@
           "type": "integer",
           "minimum": 1
         },
-        "caldav": {
-          "description": "CalDAV server credentials. Only used when sync_provider = 'caldav'.",
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "url": {
-              "description": "Full URL to the CalDAV calendar collection.",
-              "type": "string"
-            },
-            "username": {
-              "description": "Basic-auth username (often the user's email).",
-              "type": "string"
-            },
-            "password": {
-              "description": "Basic-auth password or app-specific token.",
-              "type": "string"
-            }
-          }
-        },
         "google": {
           "description": "Google Calendar OAuth client settings. Only used when sync_provider = 'google'.",
           "type": "object",
@@ -2094,7 +2030,7 @@
           "type": "boolean"
         },
         "seccomp_mode": {
-          "description": "Which seccomp filter the backend installs. `denylist` (default) blocks escape primitives; `allowlist` permits only the syscalls a Python interpreter needs.",
+          "description": "Which seccomp filter the backend installs. `allowlist` (default) permits only the syscalls a Python interpreter needs; `denylist` blocks a fixed set of escape primitives.",
           "type": "string",
           "enum": [
             "denylist",
@@ -2216,7 +2152,7 @@
           ]
         },
         "streaming": {
-          "description": "Sentence-chunked streaming for chat (Stage 2+).",
+          "description": "Sentence-chunked streaming for chat. When true (default) the /api/tts/speak/stream endpoint emits one audio chunk per sentence so playback starts as soon as the first sentence is synthesised; when false it returns the full buffer as a single chunk (fewer synth calls, higher time-to-first-audio).",
           "type": "boolean"
         },
         "max_chars_per_request": {
@@ -2830,7 +2766,7 @@
       "additionalProperties": false,
       "properties": {
         "scheduled_enabled": {
-          "description": "Run a scheduled snapshot loop in the background. Off by default. When on, writes <data_dir>/backups/mira-backup-…tar.gz every scheduled_interval_secs and keeps scheduled_retention_count most-recent files.",
+          "description": "Run a scheduled snapshot loop in the background. Off by default. When on, writes <data_dir>/backups/mira-backup-…tar.gz every scheduled_interval_secs and keeps scheduled_retention_count most-recent files. Toggling this requires a service restart.",
           "type": "boolean"
         },
         "scheduled_interval_secs": {
@@ -2856,7 +2792,7 @@
           "additionalProperties": false,
           "properties": {
             "enabled": {
-              "description": "Master switch. false → behaves exactly as before (web push only).",
+              "description": "Master switch for Firebase Cloud Messaging (push to the native mobile app). false → behaves exactly as before (web push only).",
               "type": "boolean"
             },
             "project_id": {
@@ -2883,7 +2819,7 @@
       "additionalProperties": false,
       "properties": {
         "provider": {
-          "description": "Weather data source. 'open_meteo' (default, keyless) or 'openweathermap' (requires api_key).",
+          "description": "Weather data source for the built-in weather tool. 'open_meteo' (default) is free, global, and keyless (includes geocoding). 'openweathermap' requires weather.api_key.",
           "type": "string",
           "enum": ["open_meteo", "openweathermap"]
         },
@@ -2915,7 +2851,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "default_model": { "description": "Default image model, e.g. dall-e-3 or gpt-image-1.", "type": "string" }
+            "default_model": { "description": "OpenAI image model, e.g. dall-e-3 or gpt-image-1. Key + endpoint come from providers.openai.", "type": "string" }
           }
         },
         "automatic1111": {
@@ -2923,8 +2859,8 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled":  { "description": "Enable the Automatic1111 backend.", "type": "boolean" },
-            "base_url": { "description": "WebUI base URL, e.g. http://127.0.0.1:7860.", "type": "string" },
+            "enabled":  { "description": "Enable the local Automatic1111 / SD WebUI backend (needs the server launched with --api --listen).", "type": "boolean" },
+            "base_url": { "description": "WebUI base URL, e.g. http://127.0.0.1:7860 (or http://windows-host:7860 from WSL).", "type": "string" },
             "model":    { "description": "Optional checkpoint to switch to per call (override_settings.sd_model_checkpoint). Empty = leave the WebUI's current model.", "type": "string" },
             "steps":    { "description": "Sampling steps.", "type": "integer" },
             "sampler":  { "description": "Sampler name, e.g. 'Euler a'.", "type": "string" },

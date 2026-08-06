@@ -131,12 +131,16 @@ passphrases typed into a conversation would leak.
 
 ## Code-execution sandbox and runtime confinement
 
-When the agent runs code, an **optional sandbox** confines that execution. On
-Linux this isolates the process; treat the sandbox as a containment layer for
-code execution rather than a guarantee against a determined attacker. (The
-sandbox is Linux-only — it's a no-op elsewhere — and at present a pre-baked
-rootfs isn't shipped, so sandboxed code can still see the host filesystem.
-Enable code execution and shell only on deployments you trust accordingly.)
+When the agent runs code, a **sandbox** confines that execution. By default MIRA
+uses a cross-platform **WASM/WASI** backend (Wasmtime + a bundled WASI CPython)
+that runs on Linux, macOS, and Windows and confines the guest to a single fresh
+scratch directory — no host filesystem, no network, no environment. On Linux a
+higher-fidelity **namespace + seccomp** backend is used instead when a rootfs is
+installed (`mira sandbox install python`); run without a rootfs it still shares
+the host filesystem, so provision one — or rely on the WASM backend — for full
+filesystem isolation. Treat any sandbox as a containment layer rather than a
+guarantee against a determined attacker, and enable shell access only on
+deployments you trust accordingly.
 
 The same **deny-by-default** philosophy governs plugin components: a spawned
 plugin reaches the network only if its manifest declares an egress allowlist,

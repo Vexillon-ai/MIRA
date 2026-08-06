@@ -13,7 +13,7 @@ An honest list so MIRA can set expectations rather than over-promise.
 ## MCP
 - Tool results that are **video** have no standard MCP source today (video isn't an MCP content-block type); audio and images are fully supported.
 - Adding/removing servers hot-reloads, but a slow server reconnect is done inline on save (a refinement to reconnect only the changed server is on the backlog).
-- stdio MCP servers run with the gateway's environment; their runtimes (npx/uvx) must be reachable on the service PATH.
+- stdio MCP servers run with the gateway's environment. MIRA can provision pinned Node/uv runtimes into `~/.mira/deps` (on a consent prompt) and prepend them to PATH for the spawned server, so npx/uvx work even when they aren't on the service PATH (e.g. a Windows LocalSystem service that can't see a user-PATH Node); only a runtime MIRA doesn't manage still needs to be reachable itself.
 
 ## Web / browsing
 - Built-in web tools (`web_fetch`, `url_preview`) are **read-only**. To *act* in a browser (click, fill, log in) you need the Puppeteer MCP server.
@@ -35,4 +35,4 @@ An honest list so MIRA can set expectations rather than over-promise.
 - Email webhook ingest does not verify per-provider HMAC signatures (the path secret is the authenticator); Mailgun multipart routes are unsupported (use the URL-encoded forward route).
 
 ## Multi-user
-- Single-server multi-user works (separate accounts/memory/settings), but team/RBAC polish (SSO, fine-grained permissions) is basic compared to dedicated multi-tenant tools.
+- Single-server multi-user is mature — separate accounts/memory/settings, SSO/OIDC and LDAP/AD sign-in, self-service signup/invites, admin session revocation, and **four-axis capability RBAC** (which providers, models, tools, and channels each group/user may use, plus per-task/session budget caps). The remaining gap is a dedicated multi-tenant SaaS control plane (org billing, cross-instance federation), not per-user isolation or permissions.

@@ -96,6 +96,11 @@ pub struct SessionStore {
     sessions: Arc<RwLock<HashMap<SessionId, SessionData>>>,
     /// Session timeout in seconds (default: 1 hour)
     timeout_secs: u64,
+    /// `session.max_turns` — hard cap on a session's in-memory conversation
+    /// history; the oldest turns are dropped on `update` once it's exceeded.
+    /// `0` = unlimited. Distinct from `agent.max_context_turns` (which bounds
+    /// how many turns are *injected* into the model prompt per request).
+    max_turns: usize,
 }
 
 impl SessionStore {
@@ -104,15 +109,17 @@ impl SessionStore {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             timeout_secs: 3600,  // 1 hour
+            max_turns: 0,        // unlimited (no-config path)
         }
     }
 
     /// Create a session store with explicit configuration.
-    pub fn new_with_config(_max_turns: usize, timeout_secs: u64) -> Self {
-        info!("Initializing session store (timeout={}s)", timeout_secs);
+    pub fn new_with_config(max_turns: usize, timeout_secs: u64) -> Self {
+        info!("Initializing session store (timeout={}s, max_turns={})", timeout_secs, max_turns);
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             timeout_secs,
+            max_turns,
         }
     }
 
@@ -194,7 +201,12 @@ impl SessionStore {
     }
 
     /// Update a session (merge changes)
-    pub async fn update(&self, session: SessionData) {
+    pub async fn update(&self, mut session: SessionData) {
+        // Enforce `session.max_turns`: drop the oldest turns so the in-memory
+        // history can't grow without bound. `0` = unlimited.
+        if self.max_turns > 0 {
+            session.truncate_history(self.max_turns);
+        }
         let mut sessions = self.sessions.write().await;
         sessions.insert(session.session_id.clone(), session);
     }
@@ -238,6 +250,31 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `session.max_turns`: `update` drops the oldest turns past the cap.
+    #[tokio::test]
+    async fn update_enforces_max_turns() {
+        let store = SessionStore::new_with_config(3, 3600);
+        let mut s = store.get_or_create("s1".to_string(), "u1".to_string(), "cli".to_string()).await;
+        for i in 0..6 { s.add_turn("user", format!("m{i}")); }
+        store.update(s).await;
+        let back = store.get_or_create("s1".to_string(), "u1".to_string(), "cli".to_string()).await;
+        assert_eq!(back.conversation_history.len(), 3, "should keep only the last 3 turns");
+        // Kept the NEWEST three (m3, m4, m5).
+        assert_eq!(back.conversation_history.last().unwrap().content, "m5");
+        assert_eq!(back.conversation_history.first().unwrap().content, "m3");
+    }
+
+    // max_turns = 0 (the `new()` / unlimited path) never truncates.
+    #[tokio::test]
+    async fn update_unlimited_when_max_turns_zero() {
+        let store = SessionStore::new(); // max_turns = 0
+        let mut s = store.get_or_create("s2".to_string(), "u1".to_string(), "cli".to_string()).await;
+        for i in 0..10 { s.add_turn("user", format!("m{i}")); }
+        store.update(s).await;
+        let back = store.get_or_create("s2".to_string(), "u1".to_string(), "cli".to_string()).await;
+        assert_eq!(back.conversation_history.len(), 10);
+    }
 
     #[tokio::test]
     async fn test_session_creation() {

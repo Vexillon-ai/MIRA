@@ -34,7 +34,7 @@ const ENGAGEMENT_TIMEOUT: Duration = Duration::from_secs(20);
 // which is fine.
 const MIN_TURN_CHARS_FOR_LABEL: usize = 6;
 
-// a tiny high-precision pre-screen so a SHORT distress message bypasses the
+// A tiny high-precision pre-screen so a SHORT distress message bypasses the
 // length gate and is always classified. Deliberately narrow — a false positive
 // only triggers one (cheap) classification; a false negative could drop a real
 // cry for help. Substring match, ASCII-lowercased.
@@ -60,7 +60,7 @@ pub struct EngagementAssessor {
     // wired — the label still lands in the engagement log, just
     // without escalation.
     pub safety: Option<SafetyFloor>,
-    // health-degradation tracker. Raised when the distress classifier
+    // Health-degradation tracker. Raised when the distress classifier
     // errors/times out (the turn went un-screened for distress), so a
     // persistently-down classifier surfaces on the health page. `None` in
     // tests / builds without the tracker wired.
@@ -81,8 +81,14 @@ pub fn spawn_post_hook(
     user_msg: String,
     assistant_msg: String,
     user_tz: Option<String>,
+    // Consent: the user asked not to record this turn ("off the record"). We
+    // still classify — and still escalate genuine distress, because a safety
+    // net must not be silenceable by a recording-consent request — but we
+    // suppress the stored engagement LABEL so no persistent record of the turn
+    // is written.
+    no_store: bool,
 ) {
-    // a short turn is normally skipped (little signal, LLM cost isn't
+    // A short turn is normally skipped (little signal, LLM cost isn't
     // worth it) — but a SHORT cry for help ("help", "die", "kill myself") is
     // exactly the distress case we must never drop. Only skip when the USER
     // message is both short AND shows no distress keyword. The assistant reply's
@@ -121,7 +127,14 @@ pub fn spawn_post_hook(
             day_of_week: local.weekday().num_days_from_monday() as u8,
             created_at: now,
         };
-        if let Err(e) = assessor.log.insert(&entry) {
+        if no_store {
+            // Off-the-record turn: honour the privacy request by NOT persisting
+            // the engagement label. Distress escalation below still runs.
+            debug!(
+                "companion engagement: '{user_id}' → {} (label suppressed — off-the-record turn)",
+                label.as_str(),
+            );
+        } else if let Err(e) = assessor.log.insert(&entry) {
             warn!("companion engagement: log insert failed for '{user_id}': {e}");
         } else {
             debug!(
@@ -139,7 +152,7 @@ pub fn spawn_post_hook(
                 let sev = severity.unwrap_or_default();
                 let _ = floor.handle_distress(&user_id, &summary, sev).await;
             } else {
-                // distress detected but no SafetyFloor / care-net contact is
+                // Distress detected but no SafetyFloor / care-net contact is
                 // configured, so there's no one to escalate to. Do NOT fail
                 // silently — log it loudly and actionably. (The Distressed label is
                 // preserved in the engagement log above, so the event isn't lost;
@@ -193,12 +206,12 @@ async fn classify(
         provider.generate(&messages, &opts),
     ).await {
         Ok(Ok(r))  => r.content,
-        // the engagement classifier is also the DISTRESS detector — a
+        // The engagement classifier is also the DISTRESS detector — a
         // failure here means this turn was NOT screened for distress. Flag the
         // safety impact explicitly (was a bland "classifier failed") so a
         // persistently-down classifier is greppable/alertable. Follow-up: raise
         // a health degradation (needs a DegradationTracker threaded into the
-        // EngagementAssessor + SafetyFloor — shared).
+        // EngagementAssessor + SafetyFloor).
         Ok(Err(e)) => {
             warn!("engagement/DISTRESS classifier: provider failed — turn NOT screened for distress: {e}");
             if let Some(deg) = degradations {
@@ -318,7 +331,7 @@ mod tests {
         assert_eq!(parse_label("distressed:acute"), Some(EngagementLabel::Distressed));
     }
 
-    // short cries for help must bypass the length gate.
+    // Short cries for help must bypass the length gate.
     #[test]
     fn distress_keywords_catch_short_cries() {
         for s in ["help", "die", "kill", "i want to die", "hurt", "suicide", "hopeless"] {

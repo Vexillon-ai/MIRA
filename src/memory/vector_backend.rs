@@ -27,8 +27,14 @@ pub trait VectorStoreBackend: Send + Sync {
 }
 
 /// SQLite-backed vector store. Vectors are stored as raw little-endian f32 BLOBs.
+///
+/// The DB is the source of truth; a full in-memory mirror (`cache`) is held so
+/// `search` scores against RAM instead of re-`SELECT`ing + blob-deserialising
+/// every vector on each query. The cache is seeded once at construction and kept
+/// consistent on every `upsert`/`delete` (the sole write paths).
 pub struct SqliteVectorBackend {
-    conn: std::sync::Mutex<rusqlite::Connection>,
+    conn:  std::sync::Mutex<rusqlite::Connection>,
+    cache: std::sync::RwLock<std::collections::HashMap<u64, (RawVector, String)>>,
 }
 
 impl SqliteVectorBackend {
@@ -44,7 +50,18 @@ impl SqliteVectorBackend {
             CREATE INDEX IF NOT EXISTS idx_vectors_id ON memory_vectors(id);",
         )
         .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
-        Ok(Self { conn: std::sync::Mutex::new(conn) })
+        let backend = Self {
+            conn:  std::sync::Mutex::new(conn),
+            cache: std::sync::RwLock::new(std::collections::HashMap::new()),
+        };
+        // Seed the cache from the DB (one read at startup).
+        let initial = backend.load_all()?;
+        let mut cache = backend.cache.write().unwrap();
+        for (id, vec, cat) in initial {
+            cache.insert(id, (vec, cat));
+        }
+        drop(cache);
+        Ok(backend)
     }
 
     fn vec_to_blob(v: &RawVector) -> Vec<u8> {
@@ -61,22 +78,27 @@ impl SqliteVectorBackend {
 impl VectorStoreBackend for SqliteVectorBackend {
     fn upsert(&self, id: u64, vector: &RawVector, category: &str) -> Result<(), MiraError> {
         let blob = Self::vec_to_blob(vector);
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO memory_vectors (id, category, vector) VALUES (?1, ?2, ?3)
-             ON CONFLICT(id) DO UPDATE SET vector = excluded.vector, category = excluded.category",
-            rusqlite::params![id, category, blob],
-        )
-        .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO memory_vectors (id, category, vector) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET vector = excluded.vector, category = excluded.category",
+                rusqlite::params![id, category, blob],
+            )
+            .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
+        }
+        // Mirror into the cache only after the DB write succeeds.
+        self.cache.write().unwrap().insert(id, (vector.clone(), category.to_string()));
         Ok(())
     }
 
     fn search(&self, query: &RawVector, top_k: usize) -> Result<Vec<(u64, f32)>, MiraError> {
-        // Load all into memory and do brute-force cosine (fast for <50K records)
-        let all = self.load_all()?;
-        let mut results: Vec<(u64, f32)> = all
+        // Brute-force cosine over the in-memory mirror — no per-query DB read.
+        // (Still O(n) scoring; an ANN index would be the next step at large scale.)
+        let cache = self.cache.read().unwrap();
+        let mut results: Vec<(u64, f32)> = cache
             .iter()
-            .map(|(id, vec, _)| (*id, crate::memory::semantic::cosine_similarity(query, vec)))
+            .map(|(id, (vec, _))| (*id, crate::memory::semantic::cosine_similarity(query, vec)))
             .collect();
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(top_k);
@@ -84,9 +106,12 @@ impl VectorStoreBackend for SqliteVectorBackend {
     }
 
     fn delete(&self, id: u64) -> Result<(), MiraError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM memory_vectors WHERE id = ?1", rusqlite::params![id])
-            .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute("DELETE FROM memory_vectors WHERE id = ?1", rusqlite::params![id])
+                .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
+        }
+        self.cache.write().unwrap().remove(&id);
         Ok(())
     }
 
@@ -144,6 +169,43 @@ mod tests {
         b.upsert(1, &vec![1.0, 0.0, 0.0], "fact").unwrap();
         b.delete(1).unwrap();
         assert!(b.load_all().unwrap().is_empty());
+    }
+
+    // The in-memory cache stays consistent with mutations — search reflects an
+    // overwrite and a delete (would fail if search read a stale cache).
+    #[test]
+    fn search_reflects_overwrite_and_delete() {
+        let b = make_backend();
+        b.upsert(1, &vec![1.0, 0.0, 0.0], "fact").unwrap();
+        b.upsert(2, &vec![0.0, 1.0, 0.0], "fact").unwrap();
+        // Overwrite id 1 to point along the y-axis.
+        b.upsert(1, &vec![0.0, 1.0, 0.0], "fact").unwrap();
+        let top = b.search(&vec![0.0, 1.0, 0.0], 1).unwrap();
+        assert_eq!(top.len(), 1);
+        assert!(top[0].1 > 0.99, "overwritten vector should score ~1.0");
+        // Delete id 2 → it must vanish from search results.
+        b.delete(2).unwrap();
+        let ids: Vec<u64> = b.search(&vec![0.0, 1.0, 0.0], 5).unwrap()
+            .into_iter().map(|(id, _)| id).collect();
+        assert!(!ids.contains(&2), "deleted id must not appear in search");
+        assert!(ids.contains(&1));
+    }
+
+    // A fresh backend over an existing DB seeds its cache from disk, so search
+    // works immediately without any upsert this process.
+    #[test]
+    fn cache_seeds_from_existing_db_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vec.db");
+        {
+            let b1 = SqliteVectorBackend::new(&path).unwrap();
+            b1.upsert(7, &vec![1.0, 0.0], "fact").unwrap();
+            b1.upsert(8, &vec![0.0, 1.0], "fact").unwrap();
+        }
+        let b2 = SqliteVectorBackend::new(&path).unwrap();
+        let results = b2.search(&vec![1.0, 0.0], 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 7, "cache should be seeded from the DB");
     }
 
     #[test]

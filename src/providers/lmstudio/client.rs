@@ -260,6 +260,20 @@ impl LmStudioProvider {
 
     /// Override the per-path token caps. Production construction sites
     /// pull these from `AgentConfig`.
+    /// G3: apply the operator-configured request timeout
+    /// (`providers.lmstudio.timeout_secs`) — the schema says set 300–600 for
+    /// large models, but `new` hardcodes 300s. `0` keeps the default. Rebuilds
+    /// the HTTP client.
+    pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
+        if timeout_secs > 0 {
+            self.client = ClientBuilder::new()
+                .timeout(Duration::from_secs(timeout_secs))
+                .build()
+                .expect("Failed to create HTTP client");
+        }
+        self
+    }
+
     pub fn with_token_caps(mut self, tool_round: u32, response: u32) -> Self {
         self.tool_round_max_tokens = tool_round;
         self.response_max_tokens   = response;

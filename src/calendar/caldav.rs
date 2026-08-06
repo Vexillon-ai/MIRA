@@ -20,7 +20,6 @@ use reqwest::Client;
 use std::time::Duration;
 use tracing::{debug, warn};
 
-use crate::config::CalDavConfig;
 use crate::MiraError;
 
 use super::ical::parse_events;
@@ -36,10 +35,6 @@ pub struct CalDavSync {
 }
 
 impl CalDavSync {
-    pub fn from_config(cfg: &CalDavConfig) -> Self {
-        Self::new(cfg.url.clone(), cfg.username.clone(), cfg.password.clone())
-    }
-
     /// Build from explicit credentials — used for the per-user CalDAV path, where
     /// each user's url/username/password come from the encrypted calendar store
     /// rather than the global config.
@@ -47,7 +42,7 @@ impl CalDavSync {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent(format!("MIRA/{}", env!("CARGO_PKG_VERSION")))
-            // never follow a redirect — the connect handler SSRF-checks the
+            // Never follow a redirect — the connect handler SSRF-checks the
             // user-supplied URL up front (guard_public_url), and a followed
             // cross-host redirect could bounce past that check to loopback/metadata.
             .redirect(reqwest::redirect::Policy::none())

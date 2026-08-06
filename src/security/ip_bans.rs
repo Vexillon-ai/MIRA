@@ -25,7 +25,7 @@ use std::time::Instant;
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use tower::{Layer, Service};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::auth::AuthDb;
 
@@ -41,6 +41,10 @@ pub struct IpBanCache {
     /// middle for the health-audit cadence (auto-actions fire hourly,
     /// so a 30s lag is invisible end-to-end).
     refresh_secs: u64,
+    /// G1: static, always-banned IPs from `security.blocked_ips` in the config.
+    /// Checked before (and independently of) the dynamic DB-backed set, so an
+    /// operator's configured block takes effect immediately and never expires.
+    static_blocklist: Arc<HashSet<IpAddr>>,
 }
 
 #[derive(Default)]
@@ -55,12 +59,39 @@ impl IpBanCache {
     }
 
     pub fn with_refresh(db: Arc<AuthDb>, refresh_secs: u64) -> Self {
-        Self { inner: Arc::new(RwLock::new(Snapshot::default())), db, refresh_secs }
+        Self {
+            inner: Arc::new(RwLock::new(Snapshot::default())),
+            db,
+            refresh_secs,
+            static_blocklist: Arc::new(HashSet::new()),
+        }
+    }
+
+    /// G1: seed the always-banned set from `security.blocked_ips`. Unparseable
+    /// entries are logged + skipped rather than failing boot.
+    pub fn with_static_blocklist(mut self, blocked_ips: &[String]) -> Self {
+        let mut set = HashSet::new();
+        for s in blocked_ips {
+            match s.trim().parse::<IpAddr>() {
+                Ok(ip) => { set.insert(ip); }
+                Err(_) if s.trim().is_empty() => {}
+                Err(e) => warn!("security.blocked_ips: ignoring invalid IP '{s}': {e}"),
+            }
+        }
+        if !set.is_empty() {
+            info!("security.blocked_ips: {} IP(s) permanently blocked", set.len());
+        }
+        self.static_blocklist = Arc::new(set);
+        self
     }
 
     /// Returns true if `ip` is currently banned. Refreshes the cache
     /// from DB if stale (or never fetched).
     pub fn is_banned(&self, ip: IpAddr) -> bool {
+        // G1: static config blocklist — always banned, no DB refresh needed.
+        if self.static_blocklist.contains(&ip) {
+            return true;
+        }
         // Stale? Refresh under a write lock.
         let needs_refresh = {
             let g = self.inner.read().expect("ip-ban cache");
@@ -182,6 +213,22 @@ mod tests {
         let db = open_test_db();
         let cache = IpBanCache::new(db);
         assert!(!cache.is_banned("1.2.3.4".parse().unwrap()));
+    }
+
+    // G1: `security.blocked_ips` are banned immediately, with no DB entry.
+    #[test]
+    fn static_blocklist_is_always_banned() {
+        let db = open_test_db();
+        let cache = IpBanCache::new(db).with_static_blocklist(&[
+            "203.0.113.10".to_string(),
+            "  198.51.100.7  ".to_string(), // surrounding whitespace tolerated
+            "".to_string(),                 // blank skipped
+            "not-an-ip".to_string(),        // invalid skipped (logged, no panic)
+        ]);
+        assert!(cache.is_banned("203.0.113.10".parse().unwrap()));
+        assert!(cache.is_banned("198.51.100.7".parse().unwrap()));
+        // A non-listed IP is not statically banned (empty DB → not banned).
+        assert!(!cache.is_banned("192.0.2.1".parse().unwrap()));
     }
 
     #[test]

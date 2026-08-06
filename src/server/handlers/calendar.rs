@@ -261,6 +261,13 @@ pub struct OAuthStartResponse {
     pub authorize_url: String,
 }
 
+/// The operator-configured OAuth scopes if set (non-blank), else the built-in
+/// default. Wires `calendar.{google,outlook}.scopes`, which were previously
+/// declared but never read (the auth flow always used the hardcoded consts).
+fn effective_scopes<'a>(configured: &'a str, default: &'a str) -> &'a str {
+    if configured.trim().is_empty() { default } else { configured }
+}
+
 /// Kick off an OAuth authorisation flow. Returns the authorization URL the
 /// browser should redirect to. Uses the user's id as the `state` parameter
 /// so the callback can identify which user is connecting.
@@ -269,16 +276,19 @@ pub async fn oauth_start(
     Extension(config): Extension<Arc<MiraConfig>>,
     Query(q):          Query<OAuthStartQuery>,
 ) -> impl IntoResponse {
+    // Use the operator-configured scopes (`calendar.{google,outlook}.scopes`)
+    // when set, else the built-in read-only defaults. This is where the scope
+    // is actually granted, so it's the meaningful place to honor the config.
     let (auth, scopes, client_id, redirect) = match q.provider.as_str() {
         "google" => (
             GOOGLE_AUTH,
-            GOOGLE_SCOPES,
+            effective_scopes(&config.calendar.google.scopes, GOOGLE_SCOPES),
             &config.calendar.google.client_id,
             &config.calendar.google.redirect_uri,
         ),
         "outlook" => (
             MS_AUTH,
-            MS_SCOPES,
+            effective_scopes(&config.calendar.outlook.scopes, MS_SCOPES),
             &config.calendar.outlook.client_id,
             &config.calendar.outlook.redirect_uri,
         ),
@@ -342,14 +352,14 @@ pub async fn oauth_callback(
             &config.calendar.google.client_id,
             &config.calendar.google.client_secret,
             &config.calendar.google.redirect_uri,
-            GOOGLE_SCOPES,
+            effective_scopes(&config.calendar.google.scopes, GOOGLE_SCOPES),
         ),
         "outlook" => (
             "https://login.microsoftonline.com/common/oauth2/v2.0/token",
             &config.calendar.outlook.client_id,
             &config.calendar.outlook.client_secret,
             &config.calendar.outlook.redirect_uri,
-            MS_SCOPES,
+            effective_scopes(&config.calendar.outlook.scopes, MS_SCOPES),
         ),
         _ => return (StatusCode::BAD_REQUEST, "unsupported provider").into_response(),
     };

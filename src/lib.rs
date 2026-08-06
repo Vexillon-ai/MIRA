@@ -35,6 +35,7 @@ pub mod install;
 pub mod setup;
 pub mod email;
 pub mod log_filter;
+pub mod log_rotate;
 pub mod matrix;
 pub mod whatsapp;
 pub mod slack;

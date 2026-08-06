@@ -284,7 +284,7 @@ impl GatewayBuilder {
                     info!("Auth service initialised ({})", auth_db_path.display());
                     match svc.ensure_admin_exists() {
                         Ok(Some(pw)) => {
-                            // the one-time password goes to STDOUT ONLY, never the
+                            // The one-time password goes to STDOUT ONLY, never the
                             // tracing log — which writes to the persistent, sentinel-
                             // shared, backup-swept app log file where a plaintext admin
                             // credential must not live. For a service, stdout → journald
@@ -925,6 +925,13 @@ impl GatewayBuilder {
         // engagement classifier can surface safety-path failures.
         agent_core.set_degradations(Arc::clone(&degradation_tracker));
 
+        // Same hash-chained audit store the supervisor records into, so a
+        // consent-driven extraction skip ("off the record") lands a tamper-
+        // evident audit entry.
+        if let Some(ref store) = agent_audit {
+            agent_core.set_audit(Arc::clone(store));
+        }
+
         // Install the history store so a turn can rehydrate its in-memory
         // session from persisted conversation messages on a cache miss (after a
         // restart or 1-hour idle eviction). Callers opt in per turn by setting
@@ -1370,7 +1377,7 @@ impl GatewayBuilder {
                     // narrate MIRA's recent autonomous work for the user.
                     // Same store the supervisor records into (with_audit_store).
                     .with_agent_audit(agent_audit.clone())
-                    // per-user push subscriptions to confirm web delivery.
+                    // Per-user push subscriptions to confirm web delivery.
                     .with_web_push(web_push.clone())
                     // TTS so proactive check-ins/briefings honour the
                     // owner's per-channel "voice: always" preference and
@@ -1393,6 +1400,9 @@ impl GatewayBuilder {
                         notifications: Some(Arc::clone(&notification_bus)),
                         groups:        Some(sys.groups_arc()),
                         degradations:  Some(Arc::clone(&degradation_tracker)),
+                        // Family bridge: reach a missed-check-in contact on
+                        // their real messaging channel, not only the web thread.
+                        dispatcher:    Some(Arc::clone(&dispatcher)),
                     };
                     let scheduler = crate::companion::scheduler::CompanionScheduler::spawn(
                         sys.store_arc(),
@@ -1805,6 +1815,7 @@ pub(crate) fn build_provider_chain(
         let model = config.providers.lmstudio.default_model.clone();
         providers.push(("lmstudio", Box::new(
             LmStudioProvider::new(url, model)
+                .with_timeout(config.providers.lmstudio.timeout_secs)
                 .with_token_caps(
                     config.agent.max_tool_round_tokens,
                     config.agent.max_response_tokens,
@@ -1821,7 +1832,10 @@ pub(crate) fn build_provider_chain(
     if config.providers.ollama.enabled {
         let url   = config.providers.ollama.url.clone();
         let model = config.providers.ollama.default_model.clone();
-        providers.push(("ollama", Box::new(OllamaProvider::new(url, model))));
+        providers.push(("ollama", Box::new(
+            OllamaProvider::new(url, model)
+                .with_timeout(config.providers.ollama.timeout_secs)
+        )));
         info!("Provider: Ollama registered (model={})", config.providers.ollama.default_model);
     } else {
         info!("Provider: Ollama skipped (enabled=false)");
@@ -3296,7 +3310,7 @@ mod failover_policy_tests {
 
     #[test]
     fn single_provider_override_is_wrapped_in_the_degeneracy_guard() {
-        // the per-turn model-override path must apply the degeneracy guard
+        // The per-turn model-override path must apply the degeneracy guard
         // (like build_provider_chain), so a wedged model picked for one message is
         // still caught. `guard()` reports "guarded" via name() only when it wraps.
         let mut c = cfg();

@@ -60,8 +60,9 @@ Rolling the *binary* back is easy; rolling back *data* is not, because upgrades
 migrate your databases forward. If you roll back far enough that an older binary
 can't safely read the migrated data, MIRA **refuses to start** with a clear
 message rather than risk corrupting anything. In that case, restore the
-pre-upgrade **backup** (`mira backup list` / `mira backup restore`, or the
-Backups page) — see [Backup & restore](backup-and-restore.md).
+pre-upgrade **backup** from the Backups page (**Settings → Server → Restore**),
+or ask MIRA in chat (the `backup_list` / `backup_restore` tools) — see
+[Backup & restore](backup-and-restore.md).
 
 ## See also
 

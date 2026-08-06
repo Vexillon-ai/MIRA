@@ -8,7 +8,7 @@ Server-wide configuration in `mira_config.json`: LLM providers + keys, channels,
 
 - **Who can view/change:** admins only.
 - **Where:** Settings UI (Server tab, provider/channel/voice sections), or `mira_config.json` directly. MIRA can also read and (for admins, with confirmation) change many of these on request.
-- **Secrets are redacted.** API keys, tokens, passwords, `jwt_secret`, `webhook_secret`, `hmac_key`, etc. are never shown — MIRA will tell you whether one is *set* or *unset*, but never read the value back (it would otherwise leak into chat logs, voice notes, or relayed messages). You can overwrite a secret, but you can't read it.
+- **Secrets are redacted.** API keys, tokens, passwords, `jwt_secret`, per-channel `hmac_key`, etc. are never shown — MIRA will tell you whether one is *set* or *unset*, but never read the value back (it would otherwise leak into chat logs, voice notes, or relayed messages). You can overwrite a secret, but you can't read it.
 - **Some changes need a restart** (Rust/embedded changes); most config edits apply live via the config watcher.
 
 ## 2. Per-user settings

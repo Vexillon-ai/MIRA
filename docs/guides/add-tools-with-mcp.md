@@ -35,8 +35,8 @@ you) can use.
 
 The quickest path is the built-in catalogue of recommended servers.
 
-1. Open the **`/mcp`** page (it's in the sidebar as **MCP servers**).
-2. Click **Browse catalogue** and pick a server — for example **Filesystem**,
+1. Open the **`/mcp`** page (it's in the sidebar as **MCP**).
+2. Click **Browse catalog** and pick a server — for example **Filesystem**,
    **GitHub**, or **Puppeteer**.
 3. Click **Use**. MIRA shows any settings the server needs.
 4. **Fill in any path or key** the server asks for — a directory to expose, an

@@ -894,6 +894,8 @@ export default function SettingsPage() {
   const str  = (path: string, fallback = '') => String(getPath(draft, path) ?? fallback)
   const num  = (path: string, fallback = 0)  => Number(getPath(draft, path) ?? fallback)
   const bool = (path: string, fallback = false) => Boolean(getPath(draft, path) ?? fallback)
+  const list = (path: string, fallback: string[] = []) =>
+    (getPath(draft, path) as string[] | undefined) ?? fallback
 
   const handleSave = () => {
     if (tab === 'advanced') {
@@ -1069,7 +1071,7 @@ export default function SettingsPage() {
           </div>
         )}
         {tab === 'guardian' && (
-          <GuardianTab set={set} str={str} num={num} bool={bool} />
+          <GuardianTab set={set} str={str} num={num} bool={bool} list={list} />
         )}
         {tab === 'server' && (
           <ServerTab set={set} str={str} num={num} bool={bool} draft={draft} />
@@ -1975,13 +1977,24 @@ function WslUrlHint() {
 // (the Guardian's named-agent resolver reads a startup config snapshot). The
 // live status surface lives on the System Health page.
 function GuardianTab({
-  set, str, num, bool,
+  set, str, num, bool, list,
 }: {
   set: (p: string, v: unknown) => void
   str: (p: string, fb?: string) => string
   num: (p: string, fb?: number) => number
   bool: (p: string, fb?: boolean) => boolean
+  list: (p: string, fb?: string[]) => string[]
 }) {
+  // Staged autonomy opt-in. The master switch inverts `isolation_dry_run`
+  // (off = observe-only, the default); the per-kind toggles pick which bounded
+  // actions may run once it's on.
+  const autonomyOn = !bool('guardian.isolation_dry_run', true)
+  const kinds = list('guardian.isolation_autonomy_kinds', ['rerun_audit'])
+  const hasKind = (k: string) => kinds.includes(k)
+  const toggleKind = (k: string, on: boolean) =>
+    set('guardian.isolation_autonomy_kinds',
+      on ? Array.from(new Set([...kinds, k])) : kinds.filter((x) => x !== k))
+
   return (
     <div className={styles.tabBody}>
       <Section title="MIRA-Guardian">
@@ -2008,6 +2021,51 @@ function GuardianTab({
         </Field>
         <Field label="Provision model" desc="The Ollama-registry model the one-click provisioning flow pulls + binds when no local model is configured.">
           <TextInput value={str('guardian.provision_model', '')} onChange={(v) => set('guardian.provision_model', v)} placeholder="qwen2.5:3b-instruct" mono />
+        </Field>
+      </Section>
+
+      <Section title="Autonomous action when isolated">
+        <p className={styles.sectionDesc}>
+          In <strong>Active</strong> mode, if the Guardian detects a real problem
+          and <em>cannot reach you</em> (a message to your channel fails), it can
+          take a single bounded, reversible step on its own to try to restore
+          contact — under strict limits: <strong>one action per incident</strong>,
+          a grace window in which your decision overrides it, every step
+          HMAC-audited, and a reconcile message the moment you're reachable again.
+          It never runs shell, config, data, or self-restart actions.
+          <strong> Off by default</strong> — it only records what it <em>would</em>
+          do until you enable it.
+        </p>
+        <Field label="Allow autonomous action" desc="Off (default): observe-only — the Guardian logs what it would do without acting. On: it may run the opted-in actions below while you're unreachable.">
+          <Toggle
+            value={autonomyOn}
+            onChange={(on) => {
+              if (on) {
+                if (confirm(
+                  'Allow MIRA-Guardian to act on its own when it can’t reach you?\n\n'
+                  + 'In Active mode, if a real problem is detected and your channel is '
+                  + 'unreachable, the Guardian may run ONE bounded, reversible action from '
+                  + 'the list you enable below (never shell, config, data, or self-restart). '
+                  + 'Your decision during the grace window always overrides it, and every '
+                  + 'step is HMAC-audited with a reconcile message once you’re reachable.\n\n'
+                  + 'Enable autonomous action?'
+                )) {
+                  set('guardian.isolation_dry_run', false)
+                }
+              } else {
+                set('guardian.isolation_dry_run', true)
+              }
+            }}
+          />
+        </Field>
+        <Field label="Grace period (seconds)" desc="How long the Guardian waits for your decision before acting. Your approval or decline during this window always wins. Default 180 (3 min).">
+          <NumberInput value={num('guardian.isolation_grace_secs', 180)} onChange={(v) => set('guardian.isolation_grace_secs', v)} min={0} max={3600} />
+        </Field>
+        <Field label="→ Re-run health audit" desc="Read-only and idempotent — harmless. Safe to grant first.">
+          <Toggle value={hasKind('rerun_audit')} onChange={(on) => toggleKind('rerun_audit', on)} />
+        </Field>
+        <Field label="→ Restart a wedged channel bridge" desc="Reversible, and the action that may actually restore contact so the Guardian can reach you. More impactful — opt in deliberately.">
+          <Toggle value={hasKind('restart_bridge')} onChange={(on) => toggleKind('restart_bridge', on)} />
         </Field>
       </Section>
 

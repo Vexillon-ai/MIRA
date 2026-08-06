@@ -211,7 +211,11 @@ impl MemorySystem {
                     }
                 });
                 info!("Using HTTP embedding provider: {} @ {}", emb.model, url);
-                Box::new(HttpEmbeddingProvider::with_cache_size(url, emb.model.clone(), cache_size))
+                Box::new(
+                    HttpEmbeddingProvider::with_cache_size(url, emb.model.clone(), cache_size)
+                        // G4: authenticate to a cloud embedding endpoint (OpenAI/OpenRouter).
+                        .with_api_key(emb.api_key.clone())
+                )
             }
         };
 

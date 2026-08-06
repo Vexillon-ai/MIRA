@@ -132,6 +132,14 @@ can't enable companion check-ins without one — because a feature that holds
 daily conversations with a vulnerable person needs somewhere to turn when
 something's wrong.
 
+The heads-up reaches the contact **on their own messaging channel** — whichever
+they last used with MIRA (Signal, Telegram, email, and so on) — so it lands on
+their phone, not just a web page they may not have open. It's also recorded in a
+"Safety alerts" thread in their MIRA web account as a durable copy, and a
+contact who only uses the web still gets it there. If the messaging channel
+can't be reached, MIRA falls back to the web record and flags the delivery
+problem on the health page rather than failing silently.
+
 ## Turn on the daily briefing
 
 The daily briefing is a single morning summary, assembled from:

@@ -524,11 +524,17 @@ impl TtsService {
     // Streaming variant of [`speak`]. Splits the input through
     // [`SentenceChunker`] and synthesises each sentence in turn, yielding one
     // [`AudioChunk`] per sentence. The final chunk has `is_final = true`.
-    //     // Each chunk is an independently playable audio buffer (current internal
+    //
+    // When `tts.streaming` is `false` the input is collapsed to a single chunk,
+    // so the stream yields one full-buffer `AudioChunk` (the config-controlled
+    // full-buffer path); callers see the same stream shape either way.
+    //
+    // Each chunk is an independently playable audio buffer (current internal
     // backends emit a complete WAV per call); the web client queues them
-    // sequentially. A future  can swap to MediaSource appends once
+    // sequentially. A future refactor can swap to MediaSource appends once
     // we have a single-stream codec like MP3.
-    //     // Cache lookup happens per sentence — short repeated sentences (greetings,
+    //
+    // Cache lookup happens per sentence — short repeated sentences (greetings,
     // system phrases) skip synthesis on subsequent plays.
     pub async fn speak_stream(
         &self,
@@ -586,6 +592,14 @@ impl TtsService {
         if sentences.is_empty() {
             // Pathological: trimmed non-empty but chunker yielded nothing.
             sentences.push(trimmed.to_string());
+        }
+        // Honour `tts.streaming`. When off, collapse to a single chunk so the
+        // SSE endpoint emits one full-buffer `chunk` (is_final) instead of one
+        // per sentence. The stream *shape* is unchanged — the web client's
+        // queue plays a lone chunk identically — only the granularity (and thus
+        // time-to-first-audio vs. number of synth calls) differs.
+        if !snap.cfg.streaming {
+            sentences = vec![trimmed.to_string()];
         }
         let total = sentences.len();
         debug!("tts: speak_stream split into {total} sentence(s)");
@@ -941,6 +955,24 @@ mod tests {
         for r in &results {
             assert!(r.is_err(), "no Piper binary in tests; expected errors, got {r:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn speak_stream_collapses_to_one_chunk_when_streaming_disabled() {
+        // Same multi-sentence input as `speak_stream_chunks_long_text`, but with
+        // `tts.streaming = false` the service must emit a single full-buffer
+        // chunk instead of one per sentence.
+        use futures::StreamExt;
+        let dir = tempdir().unwrap();
+        let mut cfg = mira_cfg(dir.path());
+        cfg.tts.streaming = false;
+        let svc = TtsService::from_config(&cfg);
+        let stream = svc.speak_stream(
+            "First sentence here. Second sentence follows! Third one too?",
+            None, None, None, Some("piper"), None,
+        ).await.expect("stream returned");
+        let results: Vec<_> = stream.collect().await;
+        assert_eq!(results.len(), 1, "streaming off → one full-buffer chunk");
     }
 
     #[tokio::test]

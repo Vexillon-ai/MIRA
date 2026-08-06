@@ -14,8 +14,9 @@ Open **http://localhost:8080** in your browser. Sign in with the **admin
 account** you created during `mira setup`.
 
 > Didn't set one up, or installed manually? The first time MIRA starts with no
-> users, it prints a one-time admin password to the console/log — use that, then
-> change it from **Settings → Users**.
+> users, it prints a one-time admin password to the **console/stdout** (never to
+> the log file, so it can't leak there) — use that, then change it from
+> **Settings → Users**.
 
 ## 2. Finish setting up MIRA
 

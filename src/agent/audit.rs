@@ -106,6 +106,18 @@ pub enum AuditEvent {
         decision:    String,
         detail:      Option<String>,
     },
+    /// Privacy-consent enforcement: the user explicitly asked not to record a
+    /// turn ("off the record" / "don't record this"), so the post-turn memory,
+    /// knowledge-graph, and wiki extractors were skipped. Recorded under the
+    /// nil (system) `AgentId` with the initiating user, so the tamper-evident
+    /// chain proves the request was honoured. Backs the "the skip is
+    /// audit-logged" guarantee in the docs.
+    ConsentSkip {
+        /// Channel the turn arrived on (web / telegram / …).
+        channel:    String,
+        /// What was suppressed, e.g. "memory + knowledge-graph + wiki".
+        suppressed: String,
+    },
 }
 
 impl AuditEvent {
@@ -121,6 +133,7 @@ impl AuditEvent {
             Self::Interrupted           { .. } => "interrupted",
             Self::PolicyDecision        { .. } => "policy_decision",
             Self::GuardianAction        { .. } => "guardian_action",
+            Self::ConsentSkip           { .. } => "consent_skip",
         }
     }
 }
@@ -128,6 +141,12 @@ impl AuditEvent {
 /// Sentinel `AgentId` for MIRA-Guardian audit records (the Guardian is a
 /// built-in agent, not a spawned worker with a real id).
 pub fn guardian_agent_id() -> crate::agent::instance::AgentId {
+    crate::agent::instance::AgentId(uuid::Uuid::nil())
+}
+
+/// Sentinel `AgentId` for system-initiated audit records that aren't tied to a
+/// spawned worker (e.g. a consent-driven extraction skip on a user's turn).
+pub fn system_agent_id() -> crate::agent::instance::AgentId {
     crate::agent::instance::AgentId(uuid::Uuid::nil())
 }
 
@@ -481,6 +500,31 @@ mod tests {
         // Newest first.
         assert!(matches!(rows[0].event, AuditEvent::StatusChange { .. }));
         assert!(matches!(rows[1].event, AuditEvent::SpawnRequested { .. }));
+    }
+
+    #[test]
+    fn consent_skip_records_and_filters_by_kind_and_user() {
+        let store = AuditStore::open_in_memory();
+        // A consent-driven extraction skip on a user's turn, under the system id.
+        store.record(system_agent_id(), Some("alice"), AuditEvent::ConsentSkip {
+            channel: "web".into(),
+            suppressed: "memory + knowledge-graph + wiki extraction".into(),
+        }).unwrap();
+
+        // Filterable by its kind tag...
+        let by_kind = store.query(&AuditFilter {
+            kinds: vec!["consent_skip"],
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(by_kind.len(), 1);
+        match &by_kind[0].event {
+            AuditEvent::ConsentSkip { channel, .. } => assert_eq!(channel, "web"),
+            other => panic!("expected ConsentSkip, got {other:?}"),
+        }
+        assert_eq!(by_kind[0].user_id.as_deref(), Some("alice"));
+
+        // ...and it participates in the tamper-evident chain.
+        store.verify_chain().unwrap();
     }
 
     #[test]

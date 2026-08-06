@@ -55,6 +55,9 @@ pub struct SecurityConfig {
     pub cors_origins:    Vec<String>,
     /// Signal webhook HMAC-SHA256 key.
     pub signal_hmac_key: Option<String>,
+    /// G1: statically-blocked client IPs (`security.blocked_ips`) — always
+    /// rejected, before rate limiting, via the `IpBanLayer`'s static blocklist.
+    pub blocked_ips:     Vec<String>,
 }
 
 impl SecurityConfig {
@@ -109,6 +112,7 @@ impl SecurityConfig {
             rate_limit_rpm:  cfg.security.rate_limit_rpm,
             cors_origins:    cfg.security.cors_allowed_origins.clone(),
             signal_hmac_key: cfg.channels.signal.hmac_key.clone(),
+            blocked_ips:     cfg.security.blocked_ips.clone(),
         }
     }
 }
@@ -164,6 +168,7 @@ impl Default for SecurityConfig {
             rate_limit_rpm:  60,
             cors_origins:    vec![],
             signal_hmac_key: None,
+            blocked_ips:     Vec::new(),
         }
     }
 }

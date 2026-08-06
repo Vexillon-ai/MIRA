@@ -56,7 +56,21 @@ impl OllamaProvider {
         
         Self { client, url, model }
     }
-    
+
+    /// G3: apply the operator-configured request timeout
+    /// (`providers.ollama.timeout_secs`) — the schema advertises raising it for
+    /// large models / slow hardware, but `new` hardcodes 120s. `0` keeps the
+    /// built-in default. Rebuilds the HTTP client.
+    pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
+        if timeout_secs > 0 {
+            self.client = ClientBuilder::new()
+                .timeout(Duration::from_secs(timeout_secs))
+                .build()
+                .expect("Failed to create HTTP client");
+        }
+        self
+    }
+
     pub fn model_name(&self) -> &str { &self.model }
 
     /// Best-effort: the loaded context length (`num_ctx`) of `model` from Ollama's

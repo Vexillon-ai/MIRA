@@ -436,6 +436,21 @@ pub fn is_autonomy_eligible(kind: crate::agent::guardian_actions::GuardianAction
     matches!(kind, RestartBridge | RerunAudit)
 }
 
+/// The effective autonomy gate: `true` only when the master switch is on
+/// (`!isolation_dry_run`), the kind is within the hard code ceiling
+/// (`is_autonomy_eligible`), AND the operator has opted this kind in via
+/// `isolation_autonomy_kinds`. Config can never widen autonomy past the code
+/// ceiling — it can only narrow it. (Mode/isolation checks are applied by the
+/// caller.)
+pub fn autonomy_will_execute(
+    cfg:  &crate::config::GuardianConfig,
+    kind: crate::agent::guardian_actions::GuardianActionKind,
+) -> bool {
+    !cfg.isolation_dry_run
+        && is_autonomy_eligible(kind)
+        && cfg.isolation_autonomy_kinds.iter().any(|k| k == kind.as_str())
+}
+
 /// Process-global telemetry for the proactive watch loop, surfaced read-only to
 /// the operator via `GET /api/guardian/status`. There's exactly one watch loop
 /// per process, so a singleton avoids threading a new Extension through the
@@ -661,6 +676,19 @@ pub fn spawn_watch_loop(
                                         decision: "autonomous_dry_run".into(), detail: Some(detail) });
                                     continue;
                                 }
+                                // Staged opt-in (§4.5): an eligible kind the operator
+                                // hasn't opted into stays observe-only. `is_autonomy_eligible`
+                                // is the hard code ceiling; this is the per-kind grant on top.
+                                if !config.guardian.isolation_autonomy_kinds.iter().any(|k| k == &kind_s) {
+                                    let detail = format!(
+                                        "ISOLATED (channel '{ch}' down): '{}' {} eligible but NOT opted in — observe only [{}]",
+                                        kind_s, a.target.as_deref().unwrap_or(""), a.reason);
+                                    warn!("MIRA-Guardian isolation autonomy (not opted in): {detail}");
+                                    let _ = au.record(guardian_agent_id(), None, AuditEvent::GuardianAction {
+                                        action_id: a.id.clone(), action_kind: kind_s,
+                                        decision: "autonomous_not_opted_in".into(), detail: Some(detail) });
+                                    continue;
+                                }
                                 // ── P4c-2 — REAL autonomous execution ──────────────
                                 let now = chrono::Utc::now().timestamp();
                                 // Blast-radius: per-kind cooldown.
@@ -725,6 +753,31 @@ pub fn spawn_watch_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autonomy_gate_respects_dry_run_ceiling_and_opt_in() {
+        use crate::agent::guardian_actions::GuardianActionKind::*;
+        let mut cfg = crate::config::GuardianConfig::default();
+
+        // Default: dry-run on → nothing executes, even a listed eligible kind.
+        assert!(cfg.isolation_dry_run);
+        assert!(!autonomy_will_execute(&cfg, RerunAudit));
+
+        // Master on, default opt-in list (rerun_audit only).
+        cfg.isolation_dry_run = false;
+        assert!(autonomy_will_execute(&cfg, RerunAudit), "opted-in eligible kind executes");
+        assert!(!autonomy_will_execute(&cfg, RestartBridge), "eligible but not opted in → observe");
+
+        // Opt restart_bridge in explicitly.
+        cfg.isolation_autonomy_kinds = vec!["rerun_audit".into(), "restart_bridge".into()];
+        assert!(autonomy_will_execute(&cfg, RestartBridge));
+
+        // Config can NEVER widen past the code ceiling: a non-eligible kind
+        // listed in config is still refused.
+        cfg.isolation_autonomy_kinds = vec!["trim_logs".into(), "requeue_automation".into()];
+        assert!(!autonomy_will_execute(&cfg, TrimLogs));
+        assert!(!autonomy_will_execute(&cfg, RequeueAutomation));
+    }
 
     #[test]
     fn definition_is_stable_and_reserved() {

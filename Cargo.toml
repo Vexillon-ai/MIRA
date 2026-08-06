@@ -2,7 +2,7 @@
 name = "mira"
 # First public release: 0.272.0 = "public beta 1" (tag v0.272.0; GitHub release
 # marked pre-release). Post-beta fixes continue from 0.272.1.
-version = "0.321.3"
+version = "0.331.0"
 edition = "2024"
 description = "Multi-tasking Intelligent Responsive Assistant - A personal AI agent framework"
 authors = ["Tarek El Diab"]
@@ -44,7 +44,7 @@ thiserror = "2.0"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 
 # CLI

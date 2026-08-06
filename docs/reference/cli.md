@@ -128,6 +128,21 @@ Common flags:
 - `--force` — *(source)* allow upgrading with uncommitted changes; *(binary)*
   re-install the same version (repair).
 
+### `mira rollback`
+
+Roll back to the binary **and** config snapshot saved before the last upgrade
+(snapshots are created automatically on every `mira upgrade`). Works even if the
+current build **crash-loops** — run it from an admin terminal to recover.
+
+Common flags:
+
+- `--list` — list the available rollback snapshots and exit.
+- `--version <VERSION>` — roll back to a specific version (e.g. `0.292.3`);
+  defaults to the most recent snapshot.
+- `--no-restart` — restore the binary + config but don't restart the service.
+
+See [Updating & rolling back](../guides/updating-and-rolling-back.md).
+
 ## Benchmarking
 
 ### `mira bench memory`
@@ -173,6 +188,15 @@ mira bench memory --dataset ./longmemeval_s.json --all --out results.json
 See [Memory & the wiki](../concepts/memory-and-wiki.md) for what's being
 measured.
 
+### `mira bench context`
+
+A local, no-API-spend estimator for context-window utilisation: it projects
+tokens, context-window usage %, and turns dropped across a range of conversation
+lengths. Flags: `--turns <N,N,…>` (default `10,40,100,300`), `--avg-msg-chars`,
+`--context-length`, `--system-tokens`, `--max-response-tokens`, `--safety-margin`,
+and `--out <PATH>` for a CSV report. A measurement tool for tuning
+`agent.context_length_tokens` / compaction — no model calls.
+
 ## Other commands
 
 A handful of narrower subcommands round out the CLI:
@@ -195,6 +219,16 @@ A handful of narrower subcommands round out the CLI:
   helper enables native-tier plugin **egress filtering**; without it, a native
   plugin that declares an egress allowlist runs with no network at all.
   `mira helper-status` probes the running helper.
+- **`mira guardian-install`** — install the out-of-process **Guardian liveness
+  sentinel** as its own supervised unit (`mira-guardian-watch.service`), separate
+  from the main service so it outlives a server crash. Run after enabling
+  `guardian.process.enabled` in **Settings → Guardian**. Flags: `--config <PATH>`,
+  `--working-dir <PATH>`, `--no-enable`, `--system` (system-scope, needs sudo).
+  `mira guardian-uninstall` removes the unit. Linux/systemd today.
+- **`mira wsl-host-alias-install`** — *(WSL2, root)* add a `windows-host` hosts
+  alias so MIRA can reach services on the Windows host when the LAN IP isn't
+  routable. `--alias <NAME>` overrides the name. Usually run for you by
+  `mira helper-install`; run `sudo mira wsl-host-alias-install` to do it directly.
 
 ## Internal commands
 

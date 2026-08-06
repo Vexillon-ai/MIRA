@@ -1844,7 +1844,13 @@ async fn run_tts_command(
 fn init_logging(config: &MiraConfig) {
     // Shared with the Windows service entry (install::windows::service_main) so
     // both write logs the same way and the Logs page always has a file to tail.
-    mira::log_filter::init_to_file(&config.logging.level, &config.log_file_path());
+    mira::log_filter::init_to_file(
+        &config.logging.level,
+        &config.logging.format,
+        &config.log_file_path(),
+        config.logging.max_file_size_mb,
+        config.logging.max_files,
+    );
 }
 
 // ── Simple reedline CLI (--simple flag) ───────────────────────────────────────

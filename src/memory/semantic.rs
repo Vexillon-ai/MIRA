@@ -180,6 +180,11 @@ pub struct HttpEmbeddingProvider {
     base_url: String,
     model:    String,
     dim:      usize,
+    // G4: bearer token for a cloud embedding endpoint (OpenAI/OpenRouter).
+    // `None` for a local/keyless provider. Was declared in config
+    // (`memory.embedding.api_key`) but never threaded, so cloud embeddings went
+    // out unauthenticated.
+    api_key:  Option<String>,
     cache:    StdMutex<LruCache<String, Embedding>>,
 }
 
@@ -199,8 +204,16 @@ impl HttpEmbeddingProvider {
             base_url,
             model,
             dim: 384, // default; actual dim is determined by the first response
+            api_key: None,
             cache: StdMutex::new(LruCache::new(cache_size)),
         }
+    }
+
+    /// G4: attach a bearer token for a cloud embedding endpoint. An empty/blank
+    /// string is treated as no key (keeps a local/keyless provider unauthenticated).
+    pub fn with_api_key(mut self, key: Option<String>) -> Self {
+        self.api_key = key.filter(|k| !k.trim().is_empty());
+        self
     }
 
     /// Insert a vector into the cache — useful in tests to avoid HTTP calls.
@@ -225,10 +238,15 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
         let payload = serde_json::json!({ "model": self.model, "input": text });
 
-        let response = self.client
+        let mut req = self.client
             .post(&url)
             .header("Content-Type", "application/json")
-            .json(&payload)
+            .json(&payload);
+        // G4: authenticate to a cloud embedding endpoint when a key is configured.
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+        let response = req
             .send()
             .await
             .map_err(|e| format!("Embedding request failed: {}", e))?;

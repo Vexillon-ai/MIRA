@@ -78,20 +78,15 @@ struct LegacySignal {
     #[serde(default)] enabled: Option<bool>,
     #[serde(default)] phone_number: Option<String>,
     #[serde(default)] rest_port: Option<u16>,
-    #[serde(default)] socket_path: Option<String>,
     #[serde(default)] cli_binary: Option<String>,
     #[serde(default)] data_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct LegacyMemory {
-    #[serde(default)] vector_backend: Option<String>,
     #[serde(default)] embedding_dim: Option<usize>,
-    #[serde(default)] per_user_isolation: Option<bool>,
-    #[serde(default)] share_across_channels: Option<bool>,
     #[serde(default)] similarity_threshold: Option<f64>,
     #[serde(default)] embedding_cache_size: Option<usize>,
-    #[serde(default)] qdrant_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -240,18 +235,13 @@ fn migrate_toml_to_config(path: &Path) -> Result<MiraConfig, MiraError> {
     if let Some(v) = legacy.signal.enabled      { cfg.channels.signal.enabled      = v; }
     cfg.channels.signal.phone_number             = legacy.signal.phone_number;
     if let Some(v) = legacy.signal.rest_port     { cfg.channels.signal.rest_port    = v; }
-    if let Some(v) = legacy.signal.socket_path   { cfg.channels.signal.socket_path  = v; }
     if let Some(v) = legacy.signal.cli_binary    { cfg.channels.signal.cli_binary   = v; }
     if let Some(v) = legacy.signal.data_dir      { cfg.channels.signal.data_dir     = v; }
 
     // memory
-    if let Some(v) = legacy.memory.vector_backend       { cfg.memory.vector_backend       = v; }
     if let Some(v) = legacy.memory.embedding_dim        { cfg.memory.embedding_dim        = v; }
-    if let Some(v) = legacy.memory.per_user_isolation   { cfg.memory.per_user_isolation   = v; }
-    if let Some(v) = legacy.memory.share_across_channels{ cfg.memory.share_across_channels= v; }
     if let Some(v) = legacy.memory.similarity_threshold { cfg.memory.similarity_threshold = v as f32; }
     if let Some(v) = legacy.memory.embedding_cache_size { cfg.memory.embedding_cache_size = v; }
-    if let Some(v) = legacy.memory.qdrant_url           { cfg.memory.qdrant_url           = v; }
 
     // session
     if let Some(v) = legacy.session.cleanup_interval_secs { cfg.session.cleanup_interval_secs = v; }

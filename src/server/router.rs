@@ -237,7 +237,11 @@ pub fn build_router(
         auth_service.as_ref().map(|svc| svc.db_arc());
     let ip_ban_layer = auth_db_arc.as_ref().map(|db| {
         crate::security::IpBanLayer::new(
-            crate::security::IpBanCache::new(Arc::clone(db)),
+            // G1: seed the always-banned set from `security.blocked_ips` so the
+            // existing IpBanLayer enforces the static config denylist alongside
+            // the dynamic DB-backed bans.
+            crate::security::IpBanCache::new(Arc::clone(db))
+                .with_static_blocklist(&security.blocked_ips),
         )
     });
 

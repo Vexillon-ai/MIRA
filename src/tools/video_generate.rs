@@ -29,16 +29,23 @@ use crate::MiraError;
 pub struct VideoGenerateTool {
     service:   Arc<VideoService>,
     artifacts: Arc<ArtifactStore>,
+    // Configured fallbacks (`video.openai.default_size`/`default_seconds`) used
+    // when a call omits `size`/`seconds`. Previously hardcoded 1280×720 / 0 —
+    // the config keys did nothing.
+    default_dims:    (u32, u32),
+    default_seconds: u32,
 }
 
 impl VideoGenerateTool {
     pub fn new(config: &MiraConfig, artifacts: Arc<ArtifactStore>) -> Self {
         let service = Arc::new(VideoService::from_config(&config.video, &config.providers.openai));
-        Self { service, artifacts }
+        let default_dims = VideoRequest::dims_from_size(
+            Some(&config.video.openai.default_size), (1280, 720));
+        Self { service, artifacts, default_dims, default_seconds: config.video.openai.default_seconds }
     }
 
     pub fn from_service(service: Arc<VideoService>, artifacts: Arc<ArtifactStore>) -> Self {
-        Self { service, artifacts }
+        Self { service, artifacts, default_dims: (1280, 720), default_seconds: 4 }
     }
 }
 
@@ -113,11 +120,11 @@ impl Tool for VideoGenerateTool {
         };
         let backend = args.get("backend").and_then(Value::as_str);
         let (width, height) = VideoRequest::dims_from_size(
-            args.get("size").and_then(Value::as_str), (1280, 720));
+            args.get("size").and_then(Value::as_str), self.default_dims);
         let seconds = args.get("seconds")
             .and_then(|v| v.as_u64().map(|n| n as u32)
                 .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
-            .unwrap_or(0); // 0 → backend default
+            .unwrap_or(self.default_seconds); // configured default (0 → backend default)
 
         let req = VideoRequest {
             prompt:          prompt.to_string(),

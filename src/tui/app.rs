@@ -66,6 +66,11 @@ pub struct AppState {
     pub memory_count:      usize,
     pub session_id:        String,
     pub health_ok:         bool,
+    /// `tui.show_timestamps` — show the per-message time header (default true).
+    pub show_timestamps:   bool,
+    /// `tui.show_token_count` — show the token count in the status bar / sidebar
+    /// (default true).
+    pub show_token_count:  bool,
     /// "local" or "server" — rendered as [local]/[server] in the status bar
     /// and used to gate server-only behaviour (e.g. the server-unreachable
     /// banner). Set from `TuiUiConfig::backend_label` in `tui::run`.
@@ -109,6 +114,8 @@ impl AppState {
             memory_count:     0,
             session_id:       uuid_short(),
             health_ok:        false,
+            show_timestamps:  true,
+            show_token_count: true,
             backend_label:    "local".to_string(),
             layout_mode:      LayoutMode::Standard,
             theme:            MIRA_DARK.clone(),

@@ -52,7 +52,7 @@ use crate::notifications::{Notification, NotificationBus, NotificationKind};
 // recorded as `Suppressed` rather than re-notifying. Conservative
 // default — better to under-spam the contact than to flood them.
 const DISTRESS_DEDUP_SECS: i64 = 10 * 60;
-// minimum gap between missed-checkin escalations for the SAME ongoing
+// Minimum gap between missed-checkin escalations for the SAME ongoing
 // silence. The scheduler now escalates on `count >= threshold` (not exact `==`),
 // so this window both prevents spamming the contact every tick AND re-alerts a
 // persistently-silent user at most once per window (fixing "escalates only
@@ -190,11 +190,17 @@ pub struct SafetyFloor {
     // groups in addition to the single safety_contact. `None`
     // keeps the Slice-4 single-contact behaviour.
     pub groups: Option<Arc<CompanionGroupStore>>,
-    // health-degradation tracker. When a distress escalation fails to
+    // Health-degradation tracker. When a distress escalation fails to
     // deliver, we raise a (transient) degradation so it surfaces on the health
     // page + toasts an operator, not just an audit row. `None` in tests /
     // builds without the tracker wired.
     pub degradations: Option<Arc<crate::health::degradation::DegradationTracker>>,
+    // Family bridge: the companion dispatcher's outbound channel senders, so a
+    // safety escalation also reaches the contact on their real messaging
+    // channel (Signal/Telegram/email/…) — not only the web "Safety alerts"
+    // thread they may never open. `None` (tests / no companion) keeps delivery
+    // web-only, as before.
+    pub dispatcher: Option<Arc<crate::companion::dispatcher::CompanionDispatcher>>,
 }
 
 impl SafetyFloor {
@@ -285,14 +291,14 @@ impl SafetyFloor {
             outcome,
             contact_user_id: Some(contact.clone()),
             summary: clip(summary),
-            // on failure the audit row carries the ACTUAL delivery error
+            // On failure the audit row carries the ACTUAL delivery error
             // (was only in a warn! log), not just the severity — which now has
             // its own column.
             note: deliver_err.clone(),
             severity: Some(severity.as_str().into()),
         });
 
-        // a failed SAFETY delivery must be loud, not a single unread audit
+        // A failed SAFETY delivery must be loud, not a single unread audit
         // row — a real distress signal reached NOBODY. Log at error level AND
         // raise a health degradation so it surfaces on the operator's health page
         // + toasts, exactly like other subsystem fallbacks.
@@ -354,7 +360,7 @@ impl SafetyFloor {
             }
         };
 
-        // dedup an ongoing silence — don't re-alert the contact more than
+        // Dedup an ongoing silence — don't re-alert the contact more than
         // once per re-escalate window. A delivered escalation starts the window;
         // a failed/no-contact one does not, so the next qualifying tick retries.
         if self
@@ -543,30 +549,47 @@ impl SafetyFloor {
         Some(contact)
     }
 
-    // Deliver a notice to `contact_user_id` by writing into their
-    // "Safety alerts" web conversation and waking their UI via the
-    // NotificationBus. Returns the appropriate
-    // [`EscalationOutcome`] for the audit log.
-    //     // v1 delivers via the web channel only. Signal /
-    // Telegram outbound for safety notices is a follow-up — the web
-    // audit + the in-history thread are enough for v1 because every
-    // MIRA user has a web account.
-    // Returns the outcome plus, on failure, a short error detail so the caller
-    // can record it in the audit row instead of losing it to a warn! log.
+    // Deliver a distress notice to `contact_user_id` across two paths:
+    //
+    //   1. The durable **web record** — write into their "Safety alerts"
+    //      conversation + wake their UI via the NotificationBus. Every MIRA
+    //      user has a web account, so this always exists and is the fallback
+    //      for a web-only contact.
+    //   2. The **family bridge** — also push it to the contact's real messaging
+    //      channel (Signal/Telegram/email/…) via the companion dispatcher, so a
+    //      safety alert lands on their phone rather than only a web thread they
+    //      may never open. `deliver_to_user` skips web/cli/tui (covered by 1);
+    //      `NoChannel` just means a web-only contact.
+    //
+    // Outcome is `Delivered` when *either* path reached the contact, so the
+    // loud "no one was alerted" failure fires only when truly nobody was
+    // reached. The returned detail notes which channel(s) carried the alert
+    // (recorded in the audit row).
     async fn deliver(&self, contact_user_id: &str, body: &str) -> (EscalationOutcome, Option<String>) {
-        let Some(history) = self.history.as_ref() else {
-            return (EscalationOutcome::DeliveryFailed, Some("no history store wired".into()));
-        };
+        use crate::companion::dispatcher::DeliveryOutcome as DO;
 
-        let conv_id = match find_or_create_safety_thread(history, contact_user_id) {
-            Ok(id) => id,
-            Err(e) => {
+        let web = self.deliver_web(contact_user_id, body);
+        let channel = match &self.dispatcher {
+            Some(d) => d.deliver_to_user(contact_user_id, body).await,
+            None    => DO::NoChannel,
+        };
+        combine_delivery(&channel, &web)
+    }
+
+    // Write the notice into the contact's "Safety alerts" web conversation and
+    // wake their UI. `Ok(())` on success; `Err(detail)` carries a short reason
+    // for the audit row. The always-available durable record; see [`deliver`].
+    fn deliver_web(&self, contact_user_id: &str, body: &str) -> Result<(), String> {
+        let history = self.history.as_ref()
+            .ok_or_else(|| "no history store wired".to_string())?;
+
+        let conv_id = find_or_create_safety_thread(history, contact_user_id)
+            .map_err(|e| {
                 warn!("companion safety: conv resolution failed for '{contact_user_id}': {e}");
-                return (EscalationOutcome::DeliveryFailed, Some(format!("thread resolution failed: {e}")));
-            }
-        };
+                format!("thread resolution failed: {e}")
+            })?;
 
-        if let Err(e) = history.add_message(NewMessage {
+        history.add_message(NewMessage {
             conversation_id: conv_id.clone(),
             role:            MessageRole::Assistant,
             content:         body.to_string(),
@@ -578,10 +601,10 @@ impl SafetyFloor {
                 "companion_safety": true,
                 "delivered_at_ms": Utc::now().timestamp_millis(),
             }).to_string()),
-        }) {
+        }).map_err(|e| {
             warn!("companion safety: persist failed for '{contact_user_id}': {e}");
-            return (EscalationOutcome::DeliveryFailed, Some(format!("persist failed: {e}")));
-        }
+            format!("persist failed: {e}")
+        })?;
         let _ = history.touch_conversation(&conv_id);
 
         if let Some(bus) = &self.notifications {
@@ -595,8 +618,32 @@ impl SafetyFloor {
                 category:        Some("wellbeing".into()),
             });
         }
+        Ok(())
+    }
+}
 
-        (EscalationOutcome::Delivered, None)
+// Combine the two delivery paths (real messaging channel + durable web record)
+// into a single escalation outcome + audit note. `Delivered` when EITHER path
+// reached the contact, so the loud "no one was alerted" failure fires
+// only when BOTH failed. Pure so the outcome matrix is unit-tested directly.
+fn combine_delivery(
+    channel: &crate::companion::dispatcher::DeliveryOutcome,
+    web: &Result<(), String>,
+) -> (EscalationOutcome, Option<String>) {
+    use crate::companion::dispatcher::DeliveryOutcome as DO;
+    let reached_channel = matches!(channel, DO::Delivered(_));
+    let note = match (channel, web.as_ref()) {
+        (DO::Delivered(ch), Ok(()))  => Some(format!("delivered via {ch} + web thread")),
+        (DO::Delivered(ch), Err(e))  => Some(format!("delivered via {ch}; web record failed: {e}")),
+        (DO::Failed(ch, e), Ok(()))  => Some(format!("web thread only; real-channel ({ch}) failed: {e}")),
+        (DO::Failed(ch, e), Err(we)) => Some(format!("real-channel ({ch}) failed: {e}; web record failed: {we}")),
+        (DO::NoChannel, Ok(()))      => None, // web-only contact — expected
+        (DO::NoChannel, Err(e))      => Some(e.clone()),
+    };
+    if web.is_ok() || reached_channel {
+        (EscalationOutcome::Delivered, note)
+    } else {
+        (EscalationOutcome::DeliveryFailed, note)
     }
 }
 
@@ -694,6 +741,40 @@ mod tests {
         assert!(!SAFETY_ADDENDUM_BASE.contains("safety contact"));
     }
 
+    #[test]
+    fn combine_delivery_delivered_when_either_path_reaches() {
+        use crate::companion::dispatcher::DeliveryOutcome as DO;
+
+        // Real channel reached → Delivered, note names the channel + web thread.
+        let (o, n) = combine_delivery(&DO::Delivered("signal".into()), &Ok(()));
+        assert_eq!(o, EscalationOutcome::Delivered);
+        assert!(n.unwrap().contains("signal"));
+
+        // Web-only contact (no messaging channel), web ok → Delivered, no note.
+        let (o, n) = combine_delivery(&DO::NoChannel, &Ok(()));
+        assert_eq!(o, EscalationOutcome::Delivered);
+        assert!(n.is_none());
+
+        // Real channel failed but the web record + push landed → still Delivered.
+        let (o, n) = combine_delivery(&DO::Failed("telegram".into(), "timeout".into()), &Ok(()));
+        assert_eq!(o, EscalationOutcome::Delivered);
+        assert!(n.unwrap().contains("telegram"));
+
+        // Real channel reached but the web write failed → still Delivered.
+        let (o, _) = combine_delivery(&DO::Delivered("signal".into()), &Err("db".into()));
+        assert_eq!(o, EscalationOutcome::Delivered);
+
+        // Nobody reached: no channel AND web failed → the loud failure fires,
+        // note carries the web error.
+        let (o, n) = combine_delivery(&DO::NoChannel, &Err("no history store wired".into()));
+        assert_eq!(o, EscalationOutcome::DeliveryFailed);
+        assert!(n.unwrap().contains("history"));
+
+        // Channel failed AND web failed → DeliveryFailed.
+        let (o, _) = combine_delivery(&DO::Failed("signal".into(), "x".into()), &Err("y".into()));
+        assert_eq!(o, EscalationOutcome::DeliveryFailed);
+    }
+
     fn fresh_setup() -> (tempfile::TempDir, SafetyFloor, Arc<HistoryStore>) {
         let dir = tempdir().unwrap();
         let store = Arc::new(CompanionStore::open(&dir.path().join("companion.db")).unwrap());
@@ -707,6 +788,7 @@ mod tests {
             notifications: None,
             groups: None,
             degradations: None,
+            dispatcher: None,
         };
         (dir, floor, history)
     }
@@ -730,6 +812,7 @@ mod tests {
             notifications: None,
             groups: Some(Arc::clone(&groups)),
             degradations: None,
+            dispatcher: None,
         };
         (dir, floor, history, groups)
     }

@@ -567,7 +567,10 @@ fn service_main(_args: Vec<OsString>) {
             // same process, so reader and writer always agree.
             crate::log_filter::init_to_file(
                 &config.logging.level,
+                &config.logging.format,
                 &config.log_file_path(),
+                config.logging.max_file_size_mb,
+                config.logging.max_files,
             );
             let gateway = crate::gateway::GatewayBuilder::new()
                 .with_config(Arc::new(config))
@@ -699,7 +702,13 @@ fn guardian_service_main(_args: Vec<OsString>) {
                     .join("logs").join("mira.log")
                     .to_string_lossy().into_owned();
             }
-            crate::log_filter::init_to_file(&config.logging.level, &config.log_file_path());
+            crate::log_filter::init_to_file(
+                &config.logging.level,
+                &config.logging.format,
+                &config.log_file_path(),
+                config.logging.max_file_size_mb,
+                config.logging.max_files,
+            );
             let config = Arc::new(config);
             // The sentinel loops until stopped; race it against the SCM Stop notify.
             tokio::select! {

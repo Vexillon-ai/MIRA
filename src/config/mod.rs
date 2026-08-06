@@ -914,17 +914,8 @@ pub struct ServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
 
-    #[serde(default = "default_max_connections")]
-    pub max_connections: u32,
-
     #[serde(default = "default_request_timeout")]
     pub request_timeout_secs: u32,
-
-    #[serde(default)]
-    pub allowed_origins: Vec<String>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub webhook_secret: Option<String>,
 
     // Human-readable label for this instance ("Tarek's MIRA"), shown by the
     // mobile app and returned in the device-pairing payload + /api/status.
@@ -1090,10 +1081,7 @@ impl Default for ServerConfig {
             tls_cert_path:        None,
             tls_key_path:         None,
             auth_token:           None,
-            max_connections:      default_max_connections(),
             request_timeout_secs: default_request_timeout(),
-            allowed_origins:      vec![],
-            webhook_secret:       None,
             display_name:         None,
             public_base_url:      None,
             remote_url:           None,
@@ -1140,9 +1128,6 @@ pub struct SignalConfig {
     #[serde(default = "default_signal_port")]
     pub rest_port: u16,
 
-    #[serde(default = "default_signal_socket")]
-    pub socket_path: String,
-
     #[serde(default = "default_signal_binary")]
     pub cli_binary: String,
 
@@ -1162,7 +1147,6 @@ impl Default for SignalConfig {
             enabled:      false,
             phone_number: None,
             rest_port:    default_signal_port(),
-            socket_path:  default_signal_socket(),
             cli_binary:   default_signal_binary(),
             data_dir:     default_signal_data_dir(),
             hmac_key:     None,
@@ -1178,9 +1162,6 @@ pub struct TelegramConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot_token: Option<String>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub webhook_url: Option<String>,
-
     #[serde(default)]
     pub polling: bool,
     // `secret_token` was removed in 0.152.x — the per-account
@@ -1195,7 +1176,6 @@ impl Default for TelegramConfig {
         Self {
             enabled:     false,
             bot_token:   None,
-            webhook_url: None,
             polling:     false,
         }
     }
@@ -1286,9 +1266,6 @@ impl Default for LoggingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
-    #[serde(default = "default_vector_backend")]
-    pub vector_backend: String,
-
     #[serde(default)]
     pub embedding: EmbeddingConfig,
 
@@ -1307,14 +1284,6 @@ pub struct MemoryConfig {
     #[serde(default = "default_context_top_k")]
     pub context_top_k: usize,
 
-    #[serde(default = "default_true")]
-    pub per_user_isolation: bool,
-
-    #[serde(default = "default_true")]
-    pub share_across_channels: bool,
-
-    #[serde(default = "default_qdrant_url")]
-    pub qdrant_url: String,
 
     #[serde(default)]
     pub auto_extract: AutoExtractConfig,
@@ -1338,15 +1307,11 @@ pub struct MemoryConfig {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            vector_backend:       default_vector_backend(),
             embedding:            EmbeddingConfig::default(),
             embedding_dim:        default_embedding_dim(),
             embedding_cache_size: default_embedding_cache_size(),
             similarity_threshold: default_similarity_threshold(),
             context_top_k:        default_context_top_k(),
-            per_user_isolation:   true,
-            share_across_channels:true,
-            qdrant_url:           default_qdrant_url(),
             auto_extract:         AutoExtractConfig::default(),
             indexer:              IndexerConfig::default(),
             rollup:               RollupConfig::default(),
@@ -1455,6 +1420,17 @@ pub struct GuardianConfig {
     #[serde(default = "default_guardian_isolation_grace")]
     pub isolation_grace_secs: u64,
 
+    // Staged autonomy opt-in: which bounded action kinds the Guardian may
+    // execute on its own under isolation, once `isolation_dry_run = false`.
+    // A per-kind allowlist so an operator grants the harmless `rerun_audit`
+    // first and the more-impactful `restart_bridge` only when comfortable.
+    // Always intersected with the hard code ceiling `is_autonomy_eligible`
+    // (config can never widen it beyond {rerun_audit, restart_bridge}). Any
+    // eligible kind not listed falls back to observe-only. Default: just
+    // `rerun_audit` (the read-only, harmless one).
+    #[serde(default = "default_guardian_autonomy_kinds")]
+    pub isolation_autonomy_kinds: Vec<String>,
+
     // The Ollama-registry model the provisioning flow (P2b) pulls + binds the
     // Guardian to when no local provider is already configured — so a fresh
     // install can run the Guardian without manually setting up an LLM. A small,
@@ -1501,6 +1477,7 @@ impl Default for GuardianConfig {
             watch_interval_secs: default_guardian_watch_interval(),
             isolation_dry_run: true,
             isolation_grace_secs: default_guardian_isolation_grace(),
+            isolation_autonomy_kinds: default_guardian_autonomy_kinds(),
             provision_model: default_guardian_provision_model(),
             routine_provider: None,
             routine_model: None,
@@ -1514,6 +1491,10 @@ impl Default for GuardianConfig {
 fn default_guardian_mode() -> String { "off".to_owned() }
 fn default_guardian_watch_interval() -> u64 { 900 }
 fn default_guardian_isolation_grace() -> u64 { 180 }
+// Staged default: only the read-only, harmless `rerun_audit` is opted in when
+// autonomy is switched on. The more-impactful `restart_bridge` requires an
+// explicit opt-in.
+fn default_guardian_autonomy_kinds() -> Vec<String> { vec!["rerun_audit".to_owned()] }
 fn default_guardian_provision_model() -> String { "qwen2.5:3b-instruct".to_owned() }
 
 /// The out-of-process Guardian liveness sentinel (`mira guardian-watch`). A
@@ -2577,9 +2558,6 @@ pub struct CalendarConfig {
     pub sync_interval_mins: u64,
 
     #[serde(default)]
-    pub caldav: CalDavConfig,
-
-    #[serde(default)]
     pub google: CalendarOAuthConfig,
 
     #[serde(default)]
@@ -2592,28 +2570,10 @@ impl Default for CalendarConfig {
             enabled:            true,
             sync_provider:      default_calendar_sync_provider(),
             sync_interval_mins: default_calendar_sync_interval(),
-            caldav:             CalDavConfig::default(),
             google:             CalendarOAuthConfig::default(),
             outlook:            CalendarOAuthConfig::default(),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CalDavConfig {
-    // Full URL to the user's CalDAV calendar collection, e.g.
-    // `https://cal.example.com/dav/calendars/alice/primary/`.
-    #[serde(default)]
-    pub url: String,
-
-    // Basic-auth username. Common deployments use email-as-username.
-    #[serde(default)]
-    pub username: String,
-
-    // Password or app-specific token. Stored in the config file — the user
-    // is expected to protect it with filesystem perms on the config dir.
-    #[serde(default)]
-    pub password: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2809,8 +2769,11 @@ pub struct TtsConfig {
     #[serde(default = "default_tts_format")]
     pub default_format: String,
 
-    // Sentence-chunked streaming for chat.  honours this; 
-    // returns the full buffer regardless.
+    // Sentence-chunked streaming for chat. The `/api/tts/speak/stream`
+    // endpoint honours this: when `true` (default) it emits one audio chunk
+    // per sentence so playback starts as soon as the first sentence is
+    // synthesised; when `false` it returns the full buffer as a single chunk
+    // (fewer synth calls, higher time-to-first-audio).
     #[serde(default = "default_true")]
     pub streaming: bool,
 
@@ -3607,11 +3570,9 @@ fn default_server_port()     -> u16     { 8080 }
 fn default_web_apps_enabled()     -> bool   { true }
 fn default_web_apps_mode()        -> String { "both".to_string() }
 fn default_web_app_host_suffix()  -> String { "localhost".to_string() }
-fn default_max_connections() -> u32     { 100 }
 fn default_request_timeout() -> u32     { 30 }
 
 fn default_signal_port()     -> u16     { 8080 }
-fn default_signal_socket()   -> String  { "/run/signald/signald.sock".to_string() }
 fn default_signal_binary()   -> String  { "signal-cli".to_string() }
 fn default_signal_data_dir() -> String  {
     dirs::home_dir()
@@ -3625,7 +3586,6 @@ pub(crate) fn default_log_file() -> String  { "~/.mira/logs/mira.log".to_string(
 fn default_log_max_size()    -> u32     { 10 }
 fn default_log_max_files()   -> u32     { 5 }
 
-fn default_vector_backend()      -> String  { "sqlite".to_string() }
 // Default to the in-process fastembed engine: no external server, no model to
 // load in LM Studio, works on a fresh install with no setup. (The previous
 // lmstudio default named a model that doesn't exist in a stock LM Studio, so
@@ -3638,7 +3598,6 @@ fn default_embedding_dim()       -> usize   { 384 }
 fn default_embedding_cache_size()-> usize   { 1000 }
 fn default_similarity_threshold()-> f32     { 0.6 }
 fn default_context_top_k()       -> usize   { 15 }
-fn default_qdrant_url()          -> String  { "http://localhost:6333".to_string() }
 
 fn default_cleanup_interval()    -> u64     { 600 }
 fn default_session_timeout()     -> u64     { 3600 }
@@ -3940,13 +3899,19 @@ impl MiraConfig {
             ))?;
 
         // Parse JSON
-        let json_value: serde_json::Value = serde_json::from_str(&content)
+        let mut json_value: serde_json::Value = serde_json::from_str(&content)
             .map_err(|e| MiraError::ConfigError(
                 format!(
                     "Config file '{}' is not valid JSON:\n  {}",
                     path.display(), e
                 )
             ))?;
+
+        // Drop keys removed in a newer version. An older config still serialises
+        // them, and the schema is `additionalProperties:false`, so without this
+        // the upgraded instance would fail validation below and crash-loop on a
+        // config it wrote itself. Safe: every stripped key had no reader.
+        strip_removed_keys(&mut json_value);
 
         // Validate against embedded schema
         if let Err(errors) = validate_config_json(&json_value) {
@@ -4851,7 +4816,7 @@ pub struct OidcProvider {
     #[serde(default)]
     pub default_role: String,
 
-    // trust the IdP's `email` claim even when it does NOT assert
+    // Trust the IdP's `email` claim even when it does NOT assert
     // `email_verified == true`. OFF by default — an unverified email must
     // never link to (or auto-provision) an account, or an attacker who can
     // set an arbitrary email at the IdP could take over a MIRA account by
@@ -4913,6 +4878,44 @@ pub struct SystemEmailConfig {
 
 fn default_smtp_port() -> u16 { 465 }
 
+/// Remove config keys declared in older versions but since pruned from the
+/// schema + structs. An older config file still serialises them and the schema
+/// is `additionalProperties:false`, so leaving them would fail boot validation
+/// and crash-loop. Each key here had NO behavioral reader (Batch-19 config
+/// sweep) — dropping it changes nothing. Add to this list whenever a key is
+/// pruned so the next release doesn't reject an unmigrated config.
+fn strip_removed_keys(v: &mut serde_json::Value) {
+    fn drop_key(v: &mut serde_json::Value, path: &[&str]) {
+        let Some((last, parents)) = path.split_last() else { return };
+        let mut cur = v;
+        for p in parents {
+            match cur.get_mut(*p) {
+                Some(next) if next.is_object() => cur = next,
+                _ => return,
+            }
+        }
+        if let Some(obj) = cur.as_object_mut() {
+            obj.remove(*last);
+        }
+    }
+    // Pruned in 0.323.0 (verified dead in the config sweep).
+    drop_key(v, &["server", "webhook_secret"]);
+    drop_key(v, &["server", "allowed_origins"]);
+    drop_key(v, &["calendar", "caldav"]);
+    drop_key(v, &["channels", "telegram", "webhook_url"]);
+    // Pruned in 0.325.0 — the Qdrant vector-backend fiction (never built; always
+    // fell back to SQLite).
+    drop_key(v, &["memory", "vector_backend"]);
+    drop_key(v, &["memory", "qdrant_url"]);
+    // Pruned in 0.326.0 — dead knobs from a superseded design: memory isolation
+    // (the live path scopes by user id at query time), the never-constructed
+    // signald polling socket, and an unenforced connection cap.
+    drop_key(v, &["memory", "per_user_isolation"]);
+    drop_key(v, &["memory", "share_across_channels"]);
+    drop_key(v, &["channels", "signal", "socket_path"]);
+    drop_key(v, &["server", "max_connections"]);
+}
+
 impl Default for SystemEmailConfig {
     // Manual (not derived) so `Default` matches the serde defaults: a derived
     // Default gives smtp_port = 0 (violates the schema's `minimum: 1`) and
@@ -4948,6 +4951,39 @@ mod tests {
         let p = dir.path().join("mira_config.json");
         std::fs::write(&p, r#"{"config_version":"1","primary_provider":"lmstudio"}"#).unwrap();
         p
+    }
+
+    // Prune migration safety: an older config carrying keys removed in a newer
+    // version must validate cleanly AFTER strip_removed_keys — otherwise the
+    // strict `additionalProperties:false` schema would crash-loop the upgraded
+    // instance on a config it wrote itself.
+    #[test]
+    fn strip_removed_keys_lets_an_old_config_validate() {
+        let mut v = serde_json::json!({
+            "config_version": "1",
+            "primary_provider": "lmstudio",
+            "server":   { "webhook_secret": "x", "allowed_origins": ["*"] },
+            "calendar": { "caldav": { "url": "u", "username": "n", "password": "p" } },
+            "channels": { "telegram": { "webhook_url": "https://x/" }, "signal": { "socket_path": "/run/s.sock" } },
+            "memory":   { "vector_backend": "qdrant", "qdrant_url": "http://localhost:6333",
+                          "per_user_isolation": true, "share_across_channels": false }
+        });
+        // server.max_connections lives at the top level of "server".
+        v["server"]["max_connections"] = serde_json::json!(100);
+        // With the removed keys present, the strict schema rejects it.
+        assert!(validate_config_json(&v).is_err());
+        strip_removed_keys(&mut v);
+        // After stripping, it validates.
+        assert!(validate_config_json(&v).is_ok(), "stripped config should validate");
+        assert!(v["server"].get("webhook_secret").is_none());
+        assert!(v["calendar"].get("caldav").is_none());
+        assert!(v["channels"]["telegram"].get("webhook_url").is_none());
+        assert!(v["memory"].get("vector_backend").is_none());
+        assert!(v["memory"].get("qdrant_url").is_none());
+        assert!(v["memory"].get("per_user_isolation").is_none());
+        assert!(v["memory"].get("share_across_channels").is_none());
+        assert!(v["channels"]["signal"].get("socket_path").is_none());
+        assert!(v["server"].get("max_connections").is_none());
     }
 
     #[test]
@@ -5119,7 +5155,7 @@ mod tests {
 
     #[test]
     fn env_does_not_override_a_config_set_openrouter_key() {
-        // a key the user explicitly set (config/UI) must WIN over a stale
+        // A key the user explicitly set (config/UI) must WIN over a stale
         // .env value — the reverse of the old silent-override footgun. The
         // assertion (config wins) holds whether the env var is present or not,
         // so it's robust to the shared-process-env race with the fill-empty test.
