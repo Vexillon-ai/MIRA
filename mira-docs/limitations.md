@@ -15,6 +15,9 @@ An honest list so MIRA can set expectations rather than over-promise.
 - Adding/removing servers hot-reloads, but a slow server reconnect is done inline on save (a refinement to reconnect only the changed server is on the backlog).
 - stdio MCP servers run with the gateway's environment. MIRA can provision pinned Node/uv runtimes into `~/.mira/deps` (on a consent prompt) and prepend them to PATH for the spawned server, so npx/uvx work even when they aren't on the service PATH (e.g. a Windows LocalSystem service that can't see a user-PATH Node); only a runtime MIRA doesn't manage still needs to be reachable itself.
 
+## Memory & time
+- Recall is **time-aware** — every turn carries the current date/time and each recalled fact is tagged with when it was recorded — so MIRA reasons about whether a fact is past/current/future rather than treating old facts as current. But it relies on the **model** doing that reasoning from the labels: memories are **not auto-expired or rewritten** when their time passes (a past appointment stays in memory, just marked with its age), and relative phrases ("tomorrow", "next Friday") are stored as-said rather than resolved to an absolute date. A weaker local model may still occasionally miss the reconciliation.
+
 ## Web / browsing
 - Built-in web tools (`web_fetch`, `url_preview`) are **read-only**. To *act* in a browser (click, fill, log in) you need the Puppeteer MCP server.
 

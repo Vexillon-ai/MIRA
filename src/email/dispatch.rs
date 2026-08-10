@@ -165,6 +165,7 @@ pub async fn dispatch_inbound(
         skip_wiki_hooks:   false,
         // Inbound email is a user-facing turn — keep the duty-of-care floor on.
         suppress_safety_floor: false,
+        suppress_time_context: false,
         reasoning_effort:  None,
         disable_reasoning: None,
         // Set the persisted thread so the agent can rehydrate this

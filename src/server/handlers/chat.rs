@@ -740,6 +740,7 @@ fn build_onboarding_turn_context(
         // Onboarding is a real user-facing conversation — keep the duty-of-care
         // safety floor on (a distressed user mid-onboarding must still be met).
         suppress_safety_floor:  false,
+        suppress_time_context:  false,
     }
 }
 

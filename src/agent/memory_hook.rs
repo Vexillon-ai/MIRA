@@ -13,11 +13,59 @@
 //! extract and persist new memories from the conversation.
 
 use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
 use tracing::{debug, warn};
 
 use crate::auth::LocalAuthService;
 use crate::memory::MemorySystem;
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A compact, human-relative age for a recalled fact ("today", "yesterday",
+/// "3 weeks ago"), so the model can tell a fresh fact from a stale one. Derived
+/// from the fact's `created_at` (when MIRA recorded it), not its content.
+fn relative_age(created_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let days = (now - created_at).num_days();
+    match days {
+        i64::MIN..=0 => "today".to_string(),
+        1            => "yesterday".to_string(),
+        2..=6        => format!("{days} days ago"),
+        7..=13       => "a week ago".to_string(),
+        14..=59      => format!("{} weeks ago", days / 7),
+        60..=364     => format!("{} months ago", days / 30),
+        _            => "over a year ago".to_string(),
+    }
+}
+
+/// Format the per-turn "current date & time" anchor the model sees so it has a
+/// reference for "now" (otherwise it must guess or call the `now` tool, and
+/// treats stale recalled facts as current). Resolves to the given timezone;
+/// falls back to UTC when the tz is absent or unparseable. Pure for testing;
+/// callers pass `Utc::now()`.
+fn format_time_anchor(now: DateTime<Utc>, tz_name: Option<&str>) -> String {
+    if let Some(name) = tz_name {
+        if let Ok(tz) = name.parse::<chrono_tz::Tz>() {
+            let local = now.with_timezone(&tz);
+            return format!(
+                "[Current date & time: {} ({name}).]\n",
+                local.format("%A %-d %B %Y, %-I:%M %p"),
+            );
+        }
+    }
+    format!("[Current date & time: {} (UTC).]\n", now.format("%A %-d %B %Y, %H:%M"))
+}
+
+/// Build the "now" anchor block for a turn, resolving the user's profile
+/// timezone. Empty only if there is genuinely no clock (there always is) — it's
+/// unconditional so every real turn knows what "now" is.
+pub fn time_context_hook(auth: Option<&Arc<LocalAuthService>>, user_id: &str) -> String {
+    let tz = auth
+        .and_then(|a| a.get_profile(user_id).ok().flatten())
+        .and_then(|p| p.timezone);
+    format!("\n\n{}", format_time_anchor(Utc::now(), tz.as_deref()))
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -54,18 +102,29 @@ pub async fn pre_hook(
             // honest abstention when the needed fact isn't present.
             let mut block = String::from(
                 "\n\n[What you already know about this user, recalled from your own memory of past \
-                 conversations. Treat every line below as established fact you personally hold — do NOT \
-                 say you lack access, cannot recall, or need to look it up or check records. When the \
-                 user asks you to count, total, sum, or list, do it directly from these facts and give \
-                 the number/answer. Only if the specific fact needed genuinely isn't listed here should \
-                 you say you don't have that information.]\n"
+                 conversations — each line is tagged with when you recorded it. Treat these as facts you \
+                 personally hold (do NOT say you lack access, cannot recall, or need to check records), \
+                 but reconcile them against the current date & time you've been given this turn: durable \
+                 facts (their name, home, \
+                 relationships, ongoing preferences) hold regardless of age, while time-bound ones \
+                 (plans, trips, appointments, or a \"current\"/\"this week\" state) may already be in the \
+                 PAST — an old \"tomorrow\" or \"next Friday\" has most likely already happened. Don't \
+                 assume a dated plan is still upcoming or a past state still holds; if it matters and \
+                 you're unsure, ask rather than assert. When the user asks you to count, total, sum, or \
+                 list, do it directly from these facts. Only if the specific fact needed genuinely isn't \
+                 listed here should you say you don't have that information.]\n"
             );
-            // No second similarity gate here — `semantic_search` already
+            // Stamp each fact with its recorded age so the model can tell fresh
+            // from stale. No second similarity gate — `semantic_search` already
             // filtered at the configurable `memory.similarity_threshold`, so a
             // redundant hardcoded floor only re-dropped low-but-relevant facts
             // (which starved aggregation / multi-session questions).
+            let now = Utc::now();
             for item in items {
-                block.push_str(&format!("• {}\n", item.content));
+                block.push_str(&format!(
+                    "• {} (recorded {})\n",
+                    item.content, relative_age(item.created_at, now),
+                ));
             }
             // Graph facts are the *complete* set for the entities the question
             // names — flag them as authoritative for counting so the model
@@ -159,6 +218,40 @@ mod tests {
     use super::*;
     use crate::auth::{LocalAuthService, NewUser, Role};
     use tempfile::tempdir;
+
+    #[test]
+    fn relative_age_buckets() {
+        let now = Utc::now();
+        let ago = |d: i64| now - chrono::Duration::days(d);
+        assert_eq!(relative_age(now, now), "today");
+        assert_eq!(relative_age(ago(1), now), "yesterday");
+        assert_eq!(relative_age(ago(3), now), "3 days ago");
+        assert_eq!(relative_age(ago(9), now), "a week ago");
+        assert_eq!(relative_age(ago(28), now), "4 weeks ago");
+        assert_eq!(relative_age(ago(90), now), "3 months ago");
+        assert_eq!(relative_age(ago(800), now), "over a year ago");
+        // A clock skew (future created_at) must not panic or go negative.
+        assert_eq!(relative_age(now + chrono::Duration::days(2), now), "today");
+    }
+
+    #[test]
+    fn time_anchor_resolves_timezone_and_falls_back_to_utc() {
+        // A fixed instant: 2026-08-11 09:30 UTC.
+        let now = DateTime::parse_from_rfc3339("2026-08-11T09:30:00Z")
+            .unwrap().with_timezone(&Utc);
+
+        let mel = format_time_anchor(now, Some("Australia/Melbourne"));
+        assert!(mel.contains("Australia/Melbourne"), "got: {mel}");
+        // Melbourne is UTC+10 in August (no DST) → 19:30 local, same date.
+        assert!(mel.contains("11 August 2026"), "got: {mel}");
+        assert!(mel.contains("7:30 PM"), "got: {mel}");
+
+        // Unknown/blank tz → UTC, never panics.
+        let utc = format_time_anchor(now, None);
+        assert!(utc.contains("(UTC)"), "got: {utc}");
+        assert!(utc.contains("09:30"), "got: {utc}");
+        assert!(format_time_anchor(now, Some("Not/AZone")).contains("(UTC)"));
+    }
 
     #[test]
     fn default_context_top_k_is_positive() {

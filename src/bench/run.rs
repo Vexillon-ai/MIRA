@@ -367,7 +367,13 @@ async fn ask(agent: &Arc<AgentCore>, session_id: &str, question: &str) -> Result
     // Default context = memory + wiki hooks ON (real retrieval). Suppress the
     // universal safety floor so benchmark prompts stay stable/comparable across
     // runs and aren't skewed by the duty-of-care addendum.
-    let ctx = TurnContext { suppress_safety_floor: true, ..TurnContext::default() };
+    // Bench injects its own fixed "(Today is …)" per question; the real-now
+    // anchor would contradict it, so suppress it here.
+    let ctx = TurnContext {
+        suppress_safety_floor: true,
+        suppress_time_context: true,
+        ..TurnContext::default()
+    };
     let mut rx = agent
         .process_with_context(session_id, BENCH_USER, BENCH_CHANNEL, question, None, ctx)
         .await?;

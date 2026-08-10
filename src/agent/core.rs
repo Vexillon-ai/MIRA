@@ -102,6 +102,12 @@ pub struct TurnContext {
     // own charter — the Guardian, watchdog incident analysis, the benchmark
     // harness — where a crisis-response floor would be off-key.
     pub suppress_safety_floor:  bool,
+    // Suppress the per-turn "current date & time" anchor. Default false → every
+    // real turn is told what "now" is (so the model can judge whether a recalled
+    // time-bound fact is past/current/future). Set true ONLY where the turn
+    // supplies its own date — notably the benchmark harness, which injects a
+    // fixed "(Today is …)" and must not be contradicted by real-now.
+    pub suppress_time_context:  bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1176,8 +1182,28 @@ impl AgentCore {
         } else {
             String::new()
         };
-        let mut user_msg = if !folded_context.is_empty() {
-            ChatMessage::user(format!("{}\n\n{}", folded_context, input))
+        // Temporal anchor: on a normal turn the model has no idea what "now" is
+        // (it would have to call the `now` tool) and so treats stale recalled
+        // facts as current. Inject a tz-resolved current date/time every turn.
+        // It's volatile, so it rides in the user message (after the cached
+        // prefix), never the system prompt. Suppressed only where the turn
+        // supplies its own date (the benchmark harness).
+        let time_context = if context.suppress_time_context {
+            String::new()
+        } else {
+            memory_hook::time_context_hook(self.auth.get(), user_id)
+        };
+        let user_prefix = {
+            let mut p = String::new();
+            p.push_str(time_context.trim());
+            if !folded_context.is_empty() {
+                if !p.is_empty() { p.push_str("\n\n"); }
+                p.push_str(&folded_context);
+            }
+            p
+        };
+        let mut user_msg = if !user_prefix.is_empty() {
+            ChatMessage::user(format!("{}\n\n{}", user_prefix, input))
         } else {
             ChatMessage::user(input.to_string())
         };
