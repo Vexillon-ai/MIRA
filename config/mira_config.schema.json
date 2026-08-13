@@ -1628,6 +1628,11 @@
           "type": "integer",
           "minimum": 60
         },
+        "action_approver_ids": {
+          "description": "User ids permitted to approve/decline the Guardian's pending (system) actions in addition to admins. Lets an owner delegate approval of household fixes to a trusted adult without granting full admin. Empty (default) = admins only. Admins can always approve regardless.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
         "isolation_dry_run": {
           "description": "Isolation autonomy dry-run. When true (default), on detecting it cannot reach you (a configured channel's delivery failed) the Guardian only logs + audits what it would do — it does not execute. Set false to permit real autonomous remediation under isolation. Only relevant in 'active' mode.",
           "type": "boolean"

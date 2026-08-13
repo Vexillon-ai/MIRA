@@ -77,6 +77,9 @@ export interface PresenceSettings {
   care_role: CareRole
   /** Whether the care arrangement has been disclosed to + acknowledged. */
   care_consent: boolean
+  /** Additional guardians beyond the primary safety contact — a distress
+   *  escalation reaches all of them. */
+  guardian_ids: string[]
 }
 
 /** Fields PUT /api/me/companion accepts (a partial update). Note this does NOT
@@ -100,6 +103,7 @@ export type PresenceUpdate = Partial<
     | 'safety_contact_user_id'
     | 'care_role'
     | 'care_consent'
+    | 'guardian_ids'
   >
 >
 
@@ -111,4 +115,33 @@ export function getPresence(): Promise<PresenceSettings> {
 /** PUT /api/me/companion — partial update; returns the full updated settings. */
 export function updatePresence(body: PresenceUpdate): Promise<PresenceSettings> {
   return api.put<PresenceSettings>('/api/me/companion', body).then((r) => r.data)
+}
+
+/** A ward's wellbeing summary over a trailing window (aggregate engagement
+ *  signals — never message content). */
+export interface WardWellbeing {
+  window_days: number
+  engaged: number
+  brief: number
+  declined: number
+  distressed: number
+  total: number
+  disengaged_fraction: number
+  last_active_at_ms: number | null
+  recent_distress_count: number
+  last_distress_at_ms: number | null
+}
+
+/** A person the caller looks after (guardian view, Slice 6). */
+export interface Ward {
+  ward_id: string
+  ward_name: string
+  care_role: CareRole
+  wellbeing: WardWellbeing
+}
+
+/** GET /api/me/wards — the wards this caller guards + their wellbeing.
+ *  Cross-member visibility gated server-side by role + consent. */
+export function getMyWards(): Promise<{ wards: Ward[] }> {
+  return api.get<{ wards: Ward[] }>('/api/me/wards').then((r) => r.data)
 }

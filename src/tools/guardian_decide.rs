@@ -111,7 +111,10 @@ impl Tool for GuardianDecideTool {
         if approve {
             self.record(&a.id, kind, "approved", format!("approved via chat by {caller}"));
             let mgr = self.channel_manager.get();
-            match execute_action(a.kind, a.target.as_deref(), self.automations.as_ref(), mgr).await {
+            // Member-scoped device actions execute via the HTTP approve endpoint
+            // (which resolves the tool registry + guardian routing); the chat
+            // decide path handles system actions only, so no registry here.
+            match execute_action(a.kind, a.target.as_deref(), self.automations.as_ref(), mgr, None).await {
                 Ok(msg) => {
                     let _ = self.store.decide(&a.id, GuardianActionStatus::Executed, &msg);
                     self.record(&a.id, kind, "executed", msg.clone());

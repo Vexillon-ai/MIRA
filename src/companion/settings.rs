@@ -172,6 +172,14 @@ pub struct CareNet {
     /// one-time, plain-language heads-up. Never covert.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consent_at: Option<DateTime<Utc>>,
+    /// Additional guardian user ids beyond the primary `safety_contact_user_id`
+    /// — a ward can have more than one guardian (e.g. both parents),
+    /// all notified on a distress/missed-check-in escalation. The primary
+    /// contact stays in `safety_contact_user_id` for back-compat; this is the
+    /// extra set. Stored in `carenet_json` (no migration). See
+    /// `companion::governance::guardians_of`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guardian_ids: Vec<String>,
 }
 
 // Per-user companion-mode state. JSON fields (`quiet_hours`,
@@ -239,6 +247,32 @@ pub struct CompanionSettings {
 }
 
 impl CompanionSettings {
+    /// A fresh settings row for `user_id` with safe, inert defaults (disabled,
+    /// no contact, `Standard` care role). Callers set the fields they need, then
+    /// `CompanionStore::upsert`.
+    pub fn new(user_id: &str) -> Self {
+        let now = Utc::now();
+        Self {
+            user_id: user_id.to_string(),
+            enabled: false,
+            paused_until: None,
+            quiet_hours: vec![],
+            preferred_channels: vec![],
+            safety_contact_user_id: None,
+            setup_completed_at: None,
+            last_checkin_at: None,
+            consecutive_missed_checkins: 0,
+            daily_briefing_enabled: false,
+            daily_briefing_hour: 7,
+            last_briefing_at: None,
+            cadence: CompanionCadence::default(),
+            presence: PresenceTuning::default(),
+            care: CareNet::default(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     // Convenience: is the user currently in the "enabled and not
     // paused" state? Returns false when setup isn't done — even an
     // enabled-but-unconfigured account should not have hooks fire.
@@ -250,6 +284,23 @@ impl CompanionSettings {
             None => true,
         }
     }
+}
+
+/// An app entity bound to a family member (Slice 5 / family-domain infra).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnedEntity {
+    pub app_id:    String,
+    pub entity_id: String,
+    pub label:     Option<String>,
+}
+
+/// An ownership binding incl. the owning member (admin view).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityOwnership {
+    pub app_id:    String,
+    pub entity_id: String,
+    pub user_id:   String,
+    pub label:     Option<String>,
 }
 
 pub struct CompanionStore {
@@ -292,6 +343,23 @@ impl CompanionStore {
             );
             CREATE INDEX IF NOT EXISTS idx_companion_enabled
                 ON companion_settings(enabled, paused_until);
+
+            -- Generic member↔device ownership (Slice 5 / family-domain infra):
+            -- which app entity belongs to which family member, so a per-member
+            -- protective action (e.g. pause a ward's device via Home Assistant)
+            -- routes approval to that member's guardians. App-agnostic — the
+            -- security/health apps reuse the same binding. An entity has one
+            -- owner (PK on app_id+entity_id).
+            CREATE TABLE IF NOT EXISTS entity_ownership (
+                app_id     TEXT NOT NULL,
+                entity_id  TEXT NOT NULL,
+                user_id    TEXT NOT NULL,
+                label      TEXT,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (app_id, entity_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_entity_ownership_user
+                ON entity_ownership(user_id);
         "#)?;
         // Step 2 — idempotent column adds for DBs created by earlier
         // slices. SQLite returns "duplicate column name" when the
@@ -531,6 +599,115 @@ impl CompanionStore {
         Ok(())
     }
 
+    /// Users who have `guardian_id` as a guardian — their primary safety
+    /// contact **or** an additional guardian (`CareNet::guardian_ids`). The
+    /// reverse of [`crate::companion::governance::guardians_of`]. A full scan
+    /// that parses `carenet_json` for the extra guardians; fine at family scale.
+    pub fn wards_of(&self, guardian_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("companion store poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT user_id, safety_contact_user_id, carenet_json FROM companion_settings",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (user_id, primary, carenet) = row?;
+            if primary.as_deref() == Some(guardian_id) {
+                out.push(user_id);
+                continue;
+            }
+            if let Ok(care) = serde_json::from_str::<CareNet>(&carenet) {
+                if care.guardian_ids.iter().any(|g| g == guardian_id) {
+                    out.push(user_id);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    // ── Member↔device ownership (Slice 5 / family-domain infra) ──────────────
+
+    /// Bind `entity_id` (belonging to app `app_id`) to family member `user_id`,
+    /// with an optional human `label`. Upsert — re-binding replaces the owner.
+    pub fn set_entity_owner(
+        &self, app_id: &str, entity_id: &str, user_id: &str, label: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("companion store poisoned");
+        conn.execute(
+            "INSERT INTO entity_ownership (app_id, entity_id, user_id, label, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(app_id, entity_id) DO UPDATE SET
+                 user_id = excluded.user_id, label = excluded.label",
+            params![app_id, entity_id, user_id, label, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Remove the ownership binding for `(app_id, entity_id)`.
+    pub fn remove_entity_owner(&self, app_id: &str, entity_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("companion store poisoned");
+        conn.execute(
+            "DELETE FROM entity_ownership WHERE app_id = ?1 AND entity_id = ?2",
+            params![app_id, entity_id],
+        )?;
+        Ok(())
+    }
+
+    /// The member who owns `(app_id, entity_id)`, if any.
+    pub fn entity_owner(&self, app_id: &str, entity_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("companion store poisoned");
+        conn.query_row(
+            "SELECT user_id FROM entity_ownership WHERE app_id = ?1 AND entity_id = ?2",
+            params![app_id, entity_id],
+            |r| r.get(0),
+        ).optional().map_err(Into::into)
+    }
+
+    /// All ownership bindings (admin view).
+    pub fn list_entity_ownership(&self) -> Result<Vec<EntityOwnership>> {
+        let conn = self.conn.lock().expect("companion store poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT app_id, entity_id, user_id, label FROM entity_ownership
+             ORDER BY user_id, app_id, entity_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(EntityOwnership {
+                app_id:    r.get(0)?,
+                entity_id: r.get(1)?,
+                user_id:   r.get(2)?,
+                label:     r.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r?); }
+        Ok(out)
+    }
+
+    /// Every entity owned by `user_id` (across apps).
+    pub fn entities_of(&self, user_id: &str) -> Result<Vec<OwnedEntity>> {
+        let conn = self.conn.lock().expect("companion store poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT app_id, entity_id, label FROM entity_ownership
+             WHERE user_id = ?1 ORDER BY app_id, entity_id",
+        )?;
+        let rows = stmt.query_map(params![user_id], |r| {
+            Ok(OwnedEntity {
+                app_id:    r.get(0)?,
+                entity_id: r.get(1)?,
+                label:     r.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r?); }
+        Ok(out)
+    }
+
     // All users currently in the "enabled AND past their paused_until"
     // state. 's scheduler uses this to find candidates for a
     // check-in tick. Setup-incomplete users are excluded — they don't
@@ -630,6 +807,31 @@ fn row_to_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompanionSetting
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn entity_ownership_bind_lookup_remove_reassign() {
+        let (_dir, store) = fresh_store();
+        store.set_entity_owner("ha", "switch.kid_router", "kid", Some("Kid's router")).unwrap();
+        store.set_entity_owner("ha", "media_player.kid_tv", "kid", None).unwrap();
+        store.set_entity_owner("ha", "switch.gran_lamp", "gran", None).unwrap();
+
+        assert_eq!(store.entity_owner("ha", "switch.kid_router").unwrap().as_deref(), Some("kid"));
+        assert!(store.entity_owner("ha", "unknown").unwrap().is_none());
+
+        let mut kids: Vec<_> = store.entities_of("kid").unwrap().into_iter()
+            .map(|e| e.entity_id).collect();
+        kids.sort();
+        assert_eq!(kids, vec!["media_player.kid_tv".to_string(), "switch.kid_router".to_string()]);
+
+        // Re-binding an entity replaces its owner (PK on app+entity).
+        store.set_entity_owner("ha", "switch.kid_router", "gran", None).unwrap();
+        assert_eq!(store.entity_owner("ha", "switch.kid_router").unwrap().as_deref(), Some("gran"));
+        assert_eq!(store.entities_of("kid").unwrap().len(), 1); // only the TV remains
+
+        // Removal.
+        store.remove_entity_owner("ha", "switch.kid_router").unwrap();
+        assert!(store.entity_owner("ha", "switch.kid_router").unwrap().is_none());
+    }
 
     fn fresh_store() -> (tempfile::TempDir, CompanionStore) {
         let dir = tempdir().unwrap();

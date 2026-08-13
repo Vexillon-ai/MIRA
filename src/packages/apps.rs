@@ -60,7 +60,51 @@ pub struct AppSpec {
     /// polls it and emits `emit_on_failure` on a transition to unhealthy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check: Option<AppHealthCheck>,
+    /// Optional managed service container (FDI-2). When present, MIRA runs it
+    /// detached + restart-on-failure as `mira-app-<id>` on enable and removes it
+    /// on disable/uninstall — for long-running backends (a security stack, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<AppContainer>,
 }
+
+/// A managed service container an app runs (FDI-2 — distinct from the confined,
+/// foreground `subprocess` tool handler; this is a long-running backend).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppContainer {
+    /// Registry image reference (e.g. `wazuh/wazuh-manager:4.9.0`).
+    pub image: String,
+    /// Published ports. Bound to loopback unless `public` (LAN).
+    #[serde(default)]
+    pub ports: Vec<AppPort>,
+    /// Env `KEY=value`; a value may be a `${config.KEY}` template.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Named-volume mounts for persistence.
+    #[serde(default)]
+    pub volumes: Vec<AppVolume>,
+    /// Memory ceiling (e.g. `2g`). Default `1g`.
+    #[serde(default = "default_container_memory")]
+    pub memory: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppPort {
+    pub host:      u16,
+    pub container: u16,
+    /// Publish on all interfaces (LAN) rather than loopback-only.
+    #[serde(default)]
+    pub public:    bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppVolume {
+    /// Logical name — realised as the named volume `mira-app-<id>-<name>`.
+    pub name: String,
+    /// Mount path inside the container.
+    pub path: String,
+}
+
+fn default_container_memory() -> String { "1g".to_string() }
 
 /// A periodic reachability check for an app-backed service (apps framework). The
 /// framework polls `url` (templated `${config.*}`, e.g. an API base + a token
@@ -823,6 +867,61 @@ pub fn build_app_tools(
         }
     }
     out
+}
+
+/// Reconcile managed app **service containers** (FDI-2) to the current set of
+/// active apps: start a container for each active app that declares one, and
+/// remove MIRA-managed containers whose app is gone/disabled. No-op (logged)
+/// when no container engine (docker/podman) is available — container apps' tools
+/// + UI still install; only the backend stays inert. Blocking — call from
+/// `spawn_blocking`.
+pub fn reconcile_app_containers(pkg_store: &PackageStore) {
+    use crate::packages::app_container as ac;
+    let mut desired: Vec<(String, AppContainer, serde_json::Value)> = Vec::new();
+    for pkg in pkg_store.list().unwrap_or_default() {
+        if pkg.state != "active" { continue; }
+        for spec in app_specs_of(&pkg) {
+            if let Some(c) = spec.container {
+                desired.push((pkg.id.clone(), c, pkg.config.clone()));
+                break;
+            }
+        }
+    }
+    let Some(engine) = crate::packages::container::detect_engine() else {
+        if !desired.is_empty() {
+            tracing::warn!("apps: {} container app(s) declared but no container engine (docker/podman) \
+                   found — their backends are inert", desired.len());
+        }
+        return;
+    };
+    let wanted: std::collections::HashSet<String> =
+        desired.iter().map(|(id, _, _)| ac::container_name(id)).collect();
+    // Reap MIRA-managed containers whose app is no longer active.
+    for name in ac::managed_container_names(&engine) {
+        if !wanted.contains(&name) {
+            let _ = std::process::Command::new(&engine).args(["rm", "-f", &name]).output();
+            tracing::info!("apps: removed orphan container '{name}'");
+        }
+    }
+    // Start each desired container that isn't already running.
+    for (id, spec, config) in &desired {
+        if ac::is_running(&engine, id) { continue; }
+        let env = ac::resolve_env(spec, config);
+        match ac::start(&engine, id, spec, &env) {
+            Ok(())  => tracing::info!("apps: started container for '{id}' ({})", spec.image),
+            Err(e)  => tracing::warn!("apps: failed to start container for '{id}': {e}"),
+        }
+    }
+}
+
+/// Open the package store at `auth_db` and [`reconcile_app_containers`]. Owns no
+/// borrows, so it's `spawn_blocking`-friendly (container ops are blocking + can
+/// take minutes on a first image pull).
+pub fn reconcile_app_containers_at(auth_db: &std::path::Path) {
+    match PackageStore::open(auth_db) {
+        Ok(store) => reconcile_app_containers(&store),
+        Err(e) => tracing::warn!("apps: container reconcile — cannot open package store: {e}"),
+    }
 }
 
 /// Parse an installed package's manifest and return its first `App` component

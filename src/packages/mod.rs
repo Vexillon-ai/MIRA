@@ -12,6 +12,7 @@
 //! bundle store, the install/update/teardown engine, and the per-component
 //! installers (`mcp_server`).
 
+pub mod app_container;
 pub mod apps;
 pub mod apps_exec;
 pub mod apps_poll;

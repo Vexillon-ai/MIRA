@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wazuh Security</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 20px; color: #ddd; background: #1a1a1a; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    p { opacity: 0.8; }
+    code { background: #2a2a2a; padding: 1px 5px; border-radius: 4px; }
+    .ok { color: #6ec06e; }
+  </style>
+</head>
+<body>
+  <h1>🛡️ Wazuh Security</h1>
+  <p>
+    MIRA runs the Wazuh manager as a <span class="ok">managed container</span> and
+    supervises it. The Guardian watches for the manager going unreachable and
+    triages it. Ask MIRA things like <em>"which devices is Wazuh monitoring?"</em>
+    (the <code>list_agents</code> tool).
+  </p>
+  <p>
+    Configure the API URL, user, and password under <strong>Apps → Wazuh
+    Security</strong>. This is an illustrative single-container example; a full
+    Wazuh deployment adds an indexer + dashboard.
+  </p>
+</body>
+</html>

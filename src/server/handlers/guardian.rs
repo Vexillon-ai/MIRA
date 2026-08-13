@@ -38,6 +38,37 @@ fn admin_only(caller: &AuthUser) -> Option<Response> {
     } else { None }
 }
 
+/// Governance gate for *deciding* a Guardian action (family-governance Slice 1). System-infra actions are
+/// admin-only; member-scoped actions (a later slice) also admit the affected
+/// member's guardians. Returns `Some(403)` when the caller may not decide it.
+///
+/// Guardian resolution is passed empty for now — every current action kind is
+/// `System` (admin-only), so this is behaviour-identical to `admin_only`. When
+/// member-scoped actions land, `guardians` is filled via
+/// `companion::governance::guardians_of` and the member's guardians gain access.
+fn require_approver(
+    caller:           &AuthUser,
+    kind:             crate::agent::guardian_actions::GuardianActionKind,
+    target:           Option<&str>,
+    system_approvers: &[String],
+    agent:            &crate::agent::core::AgentCore,
+) -> Option<Response> {
+    use crate::agent::guardian_actions::ApprovalScope;
+    let scope = crate::agent::guardian_actions::approval_scope(kind, target);
+    // For a member-scoped action, a guardian of that member may also approve —
+    // resolve them via the role model.
+    let guardians: Vec<String> = match &scope {
+        ApprovalScope::Member(member) => agent.companion()
+            .map(|c| crate::companion::governance::guardians_of(c.store(), member))
+            .unwrap_or_default(),
+        ApprovalScope::System => Vec::new(),
+    };
+    let ok = crate::agent::guardian_actions::may_approve(
+        &scope, &caller.0.id, caller.0.role == Role::Admin, &guardians, system_approvers,
+    );
+    if ok { None } else { Some(err(StatusCode::FORBIDDEN, "not authorised to decide this action")) }
+}
+
 // ── Out-of-process sentinel relay (2c) ───────────────────────────────────────
 
 /// The wrapped shared secret the sentinel authenticates with. Injected as an
@@ -134,9 +165,15 @@ pub struct ListQuery { pub status: Option<String> }
 pub async fn list_actions(
     caller: AuthUser,
     Extension(store): Extension<Arc<GuardianActionStore>>,
+    Extension(live_cfg): Extension<Arc<crate::web::LiveConfig>>,
     Query(q): Query<ListQuery>,
 ) -> Response {
-    if let Some(r) = admin_only(&caller) { return r; }
+    // Admins, plus designated family approvers, may see the pending queue (they
+    // need to see what they're being asked to approve).
+    let approvers = live_cfg.get().await.guardian.action_approver_ids.clone();
+    if caller.0.role != Role::Admin && !approvers.iter().any(|a| a == &caller.0.id) {
+        return err(StatusCode::FORBIDDEN, "not authorised");
+    }
     let status = match q.status.as_deref() {
         Some("pending")  => Some(GuardianActionStatus::Pending),
         Some("executed") => Some(GuardianActionStatus::Executed),
@@ -154,18 +191,46 @@ pub async fn list_actions(
 pub async fn approve_action(
     caller: AuthUser,
     Extension(store): Extension<Arc<GuardianActionStore>>,
+    Extension(live_cfg): Extension<Arc<crate::web::LiveConfig>>,
+    Extension(agent): Extension<Arc<crate::agent::core::AgentCore>>,
     automations: Option<Extension<Arc<AutomationsStore>>>,
     channel_mgr: Option<Extension<ChannelManagerExt>>,
     audit: Option<Extension<Arc<AuditStore>>>,
     Path(id): Path<String>,
 ) -> Response {
-    if let Some(r) = admin_only(&caller) { return r; }
-
+    let approvers = live_cfg.get().await.guardian.action_approver_ids.clone();
+    let authorized_for_system =
+        caller.0.role == Role::Admin || approvers.iter().any(|a| a == &caller.0.id);
     let action = match store.get(&id) {
         Ok(Some(a)) => a,
-        Ok(None)    => return err(StatusCode::NOT_FOUND, "action not found"),
+        // Don't leak an action's existence to a caller who couldn't decide it.
+        Ok(None)    => return if authorized_for_system {
+            err(StatusCode::NOT_FOUND, "action not found")
+        } else {
+            err(StatusCode::FORBIDDEN, "not authorised")
+        },
         Err(e)      => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
     };
+    if let Some(r) = require_approver(&caller, action.kind, action.target.as_deref(), &approvers, &agent) {
+        return r;
+    }
+    // Integrity for a member-device action: the device must actually be OWNED by
+    // the member named in the target — otherwise the approval routing (which
+    // reads that member) could be spoofed to actuate someone else's device.
+    if action.kind == crate::agent::guardian_actions::GuardianActionKind::ControlMemberDevice {
+        use crate::agent::guardian_actions::MemberDeviceTarget;
+        match MemberDeviceTarget::parse(action.target.as_deref()) {
+            Some(t) => {
+                let owner = agent.companion()
+                    .and_then(|c| c.store().entity_owner(&t.app_id, &t.entity_id).ok().flatten());
+                if owner.as_deref() != Some(t.member.as_str()) {
+                    return err(StatusCode::CONFLICT,
+                        "device is not registered to the named member — refusing to act");
+                }
+            }
+            None => return err(StatusCode::BAD_REQUEST, "invalid member-device target"),
+        }
+    }
     if action.status != GuardianActionStatus::Pending {
         return err(StatusCode::CONFLICT,
             &format!("action already {} — not pending", action.status.as_str()));
@@ -181,6 +246,7 @@ pub async fn approve_action(
         action.target.as_deref(),
         automations.as_ref().map(|e| &e.0),
         channel_mgr.as_ref().map(|e| &e.0.0),
+        Some(&agent.tools),
     ).await;
 
     let kind = action.kind.as_str();
@@ -211,13 +277,29 @@ pub struct DeclineBody { pub note: Option<String> }
 pub async fn decline_action(
     caller: AuthUser,
     Extension(store): Extension<Arc<GuardianActionStore>>,
+    Extension(live_cfg): Extension<Arc<crate::web::LiveConfig>>,
+    Extension(agent): Extension<Arc<crate::agent::core::AgentCore>>,
     audit: Option<Extension<Arc<AuditStore>>>,
     Path(id): Path<String>,
     body: Option<Json<DeclineBody>>,
 ) -> Response {
-    if let Some(r) = admin_only(&caller) { return r; }
+    let approvers = live_cfg.get().await.guardian.action_approver_ids.clone();
+    let authorized_for_system =
+        caller.0.role == Role::Admin || approvers.iter().any(|a| a == &caller.0.id);
+    let action = match store.get(&id) {
+        Ok(Some(a)) => a,
+        Ok(None)    => return if authorized_for_system {
+            err(StatusCode::CONFLICT, "action not found or already decided")
+        } else {
+            err(StatusCode::FORBIDDEN, "not authorised")
+        },
+        Err(e)      => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
+    };
+    if let Some(r) = require_approver(&caller, action.kind, action.target.as_deref(), &approvers, &agent) {
+        return r;
+    }
     let note = body.and_then(|b| b.0.note).unwrap_or_else(|| "declined by operator".to_string());
-    let kind = store.get(&id).ok().flatten().map(|a| a.kind.as_str().to_string()).unwrap_or_default();
+    let kind = action.kind.as_str().to_string();
     match store.decide(&id, GuardianActionStatus::Declined, &note) {
         Ok(true)  => {
             audit_decision(&audit, &id, &kind, "declined",

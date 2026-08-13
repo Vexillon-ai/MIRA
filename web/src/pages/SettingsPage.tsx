@@ -1976,6 +1976,104 @@ function WslUrlHint() {
 // local + HMAC-audited. Mode/interval changes apply on the next service restart
 // (the Guardian's named-agent resolver reads a startup config snapshot). The
 // live status surface lives on the System Health page.
+// Delegated-approver picker: lists non-admin users with a toggle for whether
+// they may approve the Guardian's household actions. Admins are omitted (they
+// always can). Writes the chosen user ids to `guardian.action_approver_ids`.
+function ApproverPicker({
+  approvers, onChange,
+}: {
+  approvers: string[]
+  onChange: (ids: string[]) => void
+}) {
+  const { data: users } = useQuery<Array<{ id: string; username: string; display_name?: string; role: string }>>({
+    queryKey: ['users'],
+    queryFn: () => api.get('/api/users').then((r) => r.data),
+  })
+  const nonAdmins = (users ?? []).filter((u) => u.role !== 'admin')
+  const has = (id: string) => approvers.includes(id)
+  const toggle = (id: string, on: boolean) =>
+    onChange(on ? Array.from(new Set([...approvers, id])) : approvers.filter((x) => x !== id))
+
+  if (nonAdmins.length === 0) {
+    return <p className={styles.sectionDesc}>No non-admin users to delegate approval to.</p>
+  }
+  return (
+    <>
+      {nonAdmins.map((u) => (
+        <Field key={u.id} label={u.display_name || u.username} desc={`@${u.username}`}>
+          <Toggle value={has(u.id)} onChange={(on) => toggle(u.id, on)} />
+        </Field>
+      ))}
+    </>
+  )
+}
+
+// Member↔device ownership: bind app entities (e.g. Home Assistant switches) to
+// family members, so a per-member protective action (pause a ward's device)
+// routes approval to that member's guardians. Its own API (not config).
+function MemberDeviceOwnership() {
+  const qc = useQueryClient()
+  const { data: users = [] } = useQuery<Array<{ id: string; username: string; display_name?: string }>>({
+    queryKey: ['users'],
+    queryFn: () => api.get('/api/users').then((r) => r.data),
+  })
+  const { data: own } = useQuery<{ ownership: Array<{ app_id: string; entity_id: string; user_id: string; label?: string }> }>({
+    queryKey: ['entity-ownership'],
+    queryFn: () => api.get('/api/admin/entity-ownership').then((r) => r.data),
+  })
+  const rows = own?.ownership ?? []
+  const [form, setForm] = useState({ app_id: 'com.mira.home-assistant', entity_id: '', user_id: '', label: '' })
+  const setMut = useMutation({
+    mutationFn: (b: typeof form) => api.put('/api/admin/entity-ownership', b),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['entity-ownership'] }); setForm((f) => ({ ...f, entity_id: '', label: '' })) },
+  })
+  const rmMut = useMutation({
+    mutationFn: (b: { app_id: string; entity_id: string }) => api.delete('/api/admin/entity-ownership', { data: b }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['entity-ownership'] }),
+  })
+  const nameOf = (id: string) => { const u = users.find((u) => u.id === id); return u ? (u.display_name || u.username) : id }
+  const canAdd = form.app_id.trim() && form.entity_id.trim() && form.user_id.trim()
+
+  return (
+    <>
+      {rows.length > 0 && (
+        <div style={{ marginBottom: 10 }}>
+          {rows.map((r) => (
+            <div key={`${r.app_id}/${r.entity_id}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', fontSize: 13 }}>
+              <code style={{ opacity: 0.85 }}>{r.entity_id}</code>
+              <span style={{ opacity: 0.6 }}>→ {nameOf(r.user_id)}</span>
+              {r.label && <span style={{ opacity: 0.5 }}>({r.label})</span>}
+              <button
+                style={{ marginLeft: 'auto', fontSize: 12 }}
+                onClick={() => rmMut.mutate({ app_id: r.app_id, entity_id: r.entity_id })}
+              >Remove</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 6, alignItems: 'center' }}>
+        <input
+          placeholder="entity id (e.g. switch.kid_router)"
+          value={form.entity_id}
+          onChange={(e) => setForm((f) => ({ ...f, entity_id: e.target.value }))}
+        />
+        <SelectInput
+          value={form.user_id}
+          onChange={(v) => setForm((f) => ({ ...f, user_id: v }))}
+          options={[{ value: '', label: '— owner —' }, ...users.map((u) => ({ value: u.id, label: u.display_name || u.username }))]}
+        />
+        <button disabled={!canAdd || setMut.isPending} onClick={() => setMut.mutate(form)}>Add</button>
+      </div>
+      <input
+        placeholder="label (optional, e.g. Kid's router)"
+        value={form.label}
+        onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
+        style={{ marginTop: 6, width: '100%' }}
+      />
+    </>
+  )
+}
+
 function GuardianTab({
   set, str, num, bool, list,
 }: {
@@ -2022,6 +2120,31 @@ function GuardianTab({
         <Field label="Provision model" desc="The Ollama-registry model the one-click provisioning flow pulls + binds when no local model is configured.">
           <TextInput value={str('guardian.provision_model', '')} onChange={(v) => set('guardian.provision_model', v)} placeholder="qwen2.5:3b-instruct" mono />
         </Field>
+      </Section>
+
+      <Section title="Delegated approvers">
+        <p className={styles.sectionDesc}>
+          By default only <strong>admins</strong> can approve the Guardian's
+          proposed fixes. Grant a trusted non-admin the ability to
+          approve/decline the Guardian's household actions (e.g. restarting a
+          stuck channel bridge) without giving them full admin. Admins can
+          always approve regardless.
+        </p>
+        <ApproverPicker
+          approvers={list('guardian.action_approver_ids', [])}
+          onChange={(ids) => set('guardian.action_approver_ids', ids)}
+        />
+      </Section>
+
+      <Section title="Member devices">
+        <p className={styles.sectionDesc}>
+          Bind an app device (e.g. a Home Assistant switch/plug) to a family
+          member, so a per-member protective action — like pausing a ward's
+          internet — routes its approval to that member's <strong>guardian(s)</strong>,
+          not just admins. The device must be registered here before it can be
+          controlled. Applies immediately (no restart).
+        </p>
+        <MemberDeviceOwnership />
       </Section>
 
       <Section title="Autonomous action when isolated">

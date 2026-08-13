@@ -486,6 +486,7 @@ fn settings_to_dto(s: &CompanionSettings) -> serde_json::Value {
         "care_role":              s.care.role,
         "care_consent":           s.care.consent_at.is_some(),
         "safety_contact_user_id": s.safety_contact_user_id,
+        "guardian_ids":           s.care.guardian_ids,
     })
 }
 
@@ -517,8 +518,143 @@ pub async fn get_my_companion(
             "care_role": CareRole::default(),
             "care_consent": false,
             "safety_contact_user_id": serde_json::Value::Null,
+            "guardian_ids": Vec::<String>::new(),
         }),
     }))
+}
+
+/// GET /api/me/wards — the caller's guardian view: each ward they look after
+/// (Slice 6). Cross-member wellbeing visibility, gated by
+/// `governance::may_view_wellbeing` — a ward must be a *monitored role* AND
+/// have *consented* to the arrangement (the non-negotiable transparency floor),
+/// and the caller must be a guardian (or an admin). Returns a wellbeing summary
+/// derived from the ward's engagement signals over a trailing window.
+pub async fn get_my_wards(
+    AuthUser(me):     AuthUser,
+    Extension(agent): Extension<Arc<AgentCore>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let sys = agent.companion().ok_or_else(|| err(
+        StatusCode::SERVICE_UNAVAILABLE, "companion feature not enabled on this server"))?;
+    let store = sys.store();
+    let engagement = sys.engagement_arc();
+    let auth = sys.auth();
+    let is_admin = me.role == crate::auth::Role::Admin;
+
+    let ward_ids = store.wards_of(&me.id)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("wards: {e}")))?;
+
+    let mut wards = Vec::new();
+    for ward_id in ward_ids {
+        if !crate::companion::governance::may_view_wellbeing(&me.id, &ward_id, is_admin, store) {
+            continue;
+        }
+        let ward = match store.get(&ward_id) { Ok(Some(s)) => s, _ => continue };
+        let name = auth.as_ref()
+            .and_then(|a| a.get_profile(&ward_id).ok().flatten())
+            .and_then(|p| p.preferred_name.or(p.full_name))
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| ward_id.clone());
+        wards.push(serde_json::json!({
+            "ward_id":   ward_id,
+            "ward_name": name,
+            "care_role": ward.care.role,
+            "wellbeing": build_wellbeing(&engagement, &ward_id, 14),
+        }));
+    }
+    Ok(Json(serde_json::json!({ "wards": wards })))
+}
+
+/// A ward's wellbeing summary over the last `window_days`, from the engagement
+/// log — minimal disclosure (aggregate signals, never message content).
+fn build_wellbeing(
+    engagement: &crate::companion::engagement_log::EngagementLog,
+    ward_id:    &str,
+    window_days: i64,
+) -> serde_json::Value {
+    use crate::companion::engagement_log::EngagementLabel;
+    let since = Utc::now() - chrono::Duration::days(window_days);
+    let tally = engagement.tally_since(ward_id, since).unwrap_or_default();
+    let recent = engagement.list_recent(ward_id, 200).unwrap_or_default(); // newest first
+    let last_active = recent.first().map(|e| e.created_at.timestamp_millis());
+    let in_window: Vec<_> = recent.iter().filter(|e| e.created_at >= since).collect();
+    let distress_count = in_window.iter()
+        .filter(|e| matches!(e.label, EngagementLabel::Distressed))
+        .count();
+    let last_distress = in_window.iter()
+        .find(|e| matches!(e.label, EngagementLabel::Distressed))
+        .map(|e| e.created_at.timestamp_millis());
+    serde_json::json!({
+        "window_days":           window_days,
+        "engaged":               tally.engaged,
+        "brief":                 tally.brief,
+        "declined":              tally.declined,
+        "distressed":            tally.distressed,
+        "total":                 tally.total(),
+        "disengaged_fraction":   tally.disengaged_fraction(),
+        "last_active_at_ms":     last_active,
+        "recent_distress_count": distress_count,
+        "last_distress_at_ms":   last_distress,
+    })
+}
+
+// ── Member↔device ownership (admin) ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct SetOwnershipRequest {
+    pub app_id:    String,
+    pub entity_id: String,
+    pub user_id:   String,
+    pub label:     Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveOwnershipRequest {
+    pub app_id:    String,
+    pub entity_id: String,
+}
+
+/// GET /api/admin/entity-ownership — all member↔device bindings (Slice 5).
+pub async fn list_entity_ownership(
+    _admin: AdminUser,
+    Extension(agent): Extension<Arc<AgentCore>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let sys = agent.companion().ok_or_else(|| err(
+        StatusCode::SERVICE_UNAVAILABLE, "companion feature not enabled on this server"))?;
+    let rows = sys.store().list_entity_ownership()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+    Ok(Json(serde_json::json!({ "ownership": rows })))
+}
+
+/// PUT /api/admin/entity-ownership — bind an app entity to a family member.
+pub async fn set_entity_ownership(
+    _admin: AdminUser,
+    Extension(agent): Extension<Arc<AgentCore>>,
+    Json(body): Json<SetOwnershipRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if body.app_id.trim().is_empty() || body.entity_id.trim().is_empty()
+        || body.user_id.trim().is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "app_id, entity_id and user_id are required"));
+    }
+    let sys = agent.companion().ok_or_else(|| err(
+        StatusCode::SERVICE_UNAVAILABLE, "companion feature not enabled on this server"))?;
+    sys.store().set_entity_owner(
+        body.app_id.trim(), body.entity_id.trim(), body.user_id.trim(),
+        body.label.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+    ).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// DELETE /api/admin/entity-ownership — remove a binding.
+pub async fn remove_entity_ownership(
+    _admin: AdminUser,
+    Extension(agent): Extension<Arc<AgentCore>>,
+    Json(body): Json<RemoveOwnershipRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let sys = agent.companion().ok_or_else(|| err(
+        StatusCode::SERVICE_UNAVAILABLE, "companion feature not enabled on this server"))?;
+    sys.store().remove_entity_owner(body.app_id.trim(), body.entity_id.trim())
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -538,7 +674,10 @@ pub struct UpdateCompanionRequest {
     // Care-net (Pass 2).
     pub care_role:             Option<CareRole>,
     pub care_consent:          Option<bool>,    // true = acknowledge/disclose; false = clear
-    pub safety_contact_user_id: Option<String>, // who gets the heads-up
+    pub safety_contact_user_id: Option<String>, // primary guardian / who gets the heads-up
+    // Additional guardians beyond the primary contact; a distress
+    // escalation reaches all of them. `Some([])` clears them.
+    pub guardian_ids:          Option<Vec<String>>,
 }
 
 /// PUT /api/me/companion — partial update of the caller's Presence tuning. Does
@@ -627,6 +766,17 @@ pub async fn update_my_companion(
     if let Some(v) = body.care_role            { s.care.role = v; }
     if let Some(v) = body.care_consent         { s.care.consent_at = if v { Some(now) } else { None }; }
     if let Some(v) = body.safety_contact_user_id { s.safety_contact_user_id = Some(v); }
+    if let Some(v) = body.guardian_ids {
+        // De-dup + drop the primary if it also appears in the extras.
+        let primary = s.safety_contact_user_id.clone();
+        let mut seen: Vec<String> = Vec::new();
+        for g in v {
+            if !g.is_empty() && Some(&g) != primary.as_ref() && !seen.contains(&g) {
+                seen.push(g);
+            }
+        }
+        s.care.guardian_ids = seen;
+    }
     s.updated_at = now;
 
     sys.store().upsert(&s)
@@ -646,6 +796,39 @@ mod tests {
     use super::*;
     use crate::companion::groups::CompanionGroupStore;
     use tempfile::tempdir;
+
+    #[test]
+    fn build_wellbeing_summarizes_engagement_within_the_window() {
+        use crate::companion::engagement_log::{EngagementEntry, EngagementLabel, EngagementLog};
+        let dir = tempdir().unwrap();
+        let log = EngagementLog::open(&dir.path().join("e.db")).unwrap();
+        let now = Utc::now();
+        let mk = |label, days_ago: i64| EngagementEntry {
+            user_id: "kid".into(), conversation_id: None, turn_id: None,
+            label, hour_of_day: 9, day_of_week: 1,
+            created_at: now - chrono::Duration::days(days_ago),
+        };
+        // Last 14d: 2 engaged + 1 distressed. Out of window: 1 engaged (30d ago).
+        log.insert(&mk(EngagementLabel::Engaged, 1)).unwrap();
+        log.insert(&mk(EngagementLabel::Distressed, 2)).unwrap();
+        log.insert(&mk(EngagementLabel::Engaged, 5)).unwrap();
+        log.insert(&mk(EngagementLabel::Engaged, 30)).unwrap();
+
+        let s = build_wellbeing(&log, "kid", 14);
+        assert_eq!(s["engaged"], 2, "the 30-day-old entry is out of the window");
+        assert_eq!(s["distressed"], 1);
+        assert_eq!(s["recent_distress_count"], 1);
+        assert_eq!(s["total"], 3);
+        assert!(s["last_active_at_ms"].is_i64());   // most recent = 1 day ago
+        assert!(s["last_distress_at_ms"].is_i64());
+
+        // A ward with no engagement data → all zero, nothing surfaced.
+        let empty = build_wellbeing(&log, "nobody", 14);
+        assert_eq!(empty["total"], 0);
+        assert_eq!(empty["recent_distress_count"], 0);
+        assert!(empty["last_active_at_ms"].is_null());
+        assert!(empty["last_distress_at_ms"].is_null());
+    }
 
     fn fresh_store() -> (tempfile::TempDir, Arc<CompanionGroupStore>) {
         let dir = tempdir().unwrap();

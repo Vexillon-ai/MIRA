@@ -1406,6 +1406,14 @@ pub struct GuardianConfig {
     #[serde(default = "default_guardian_watch_interval")]
     pub watch_interval_secs: u64,
 
+    // Family-governance: user ids permitted to approve/decline the Guardian's
+    // pending (system) actions, in addition to admins. Lets an owner delegate
+    // approval of household fixes (e.g. "restart the stuck Signal bridge") to a
+    // trusted adult without granting them full admin. Empty (default) = admins
+    // only, the prior behaviour. Admins can always approve regardless.
+    #[serde(default)]
+    pub action_approver_ids: Vec<String>,
+
  // Isolation autonomy dry-run. When `true` (default) the Guardian,
     // on detecting it cannot reach you (a configured channel's delivery
     // failed) and that a bounded fix is warranted, only **logs + audits what
@@ -1475,6 +1483,7 @@ impl Default for GuardianConfig {
         Self {
             mode: default_guardian_mode(),
             watch_interval_secs: default_guardian_watch_interval(),
+            action_approver_ids: Vec::new(),
             isolation_dry_run: true,
             isolation_grace_secs: default_guardian_isolation_grace(),
             isolation_autonomy_kinds: default_guardian_autonomy_kinds(),

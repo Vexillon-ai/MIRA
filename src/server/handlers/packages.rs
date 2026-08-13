@@ -50,6 +50,14 @@ fn reload_app_tools(registry: &McpServerRegistry, pkg_store: &PackageStore) {
         tools.set_app_tools(packages::build_app_tools(
             pkg_store, &pkgs_dir, tools.app_http(), tools.app_secrets(),
         ));
+        // FDI-2: reconcile app service containers to the new active set (start a
+        // newly-enabled app's backend, reap a disabled/uninstalled one). Blocking
+        // + potentially slow (image pull) → off the request thread.
+        if let Some(auth_db) = pkgs_dir.parent().map(|p| p.join("auth.db")) {
+            tokio::task::spawn_blocking(move || {
+                packages::apps::reconcile_app_containers_at(&auth_db);
+            });
+        }
     }
 }
 

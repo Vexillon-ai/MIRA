@@ -34,6 +34,7 @@ pub mod dispatcher;
 pub mod easter_eggs;
 pub mod engagement;
 pub mod engagement_log;
+pub mod governance;
 pub mod groups;
 pub mod persona;
 pub mod policy;

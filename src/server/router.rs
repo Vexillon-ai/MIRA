@@ -732,6 +732,16 @@ pub fn build_router(
             .route("/api/me/companion",
                    get(crate::server::handlers::companion::get_my_companion)
                    .put(crate::server::handlers::companion::update_my_companion))
+            // Guardian view — the wards this caller looks after + their wellbeing
+            // summary (Slice 6). Cross-member visibility gated by consent.
+            .route("/api/me/wards",
+                   get(crate::server::handlers::companion::get_my_wards))
+            // Member↔device ownership (admin) — bind app entities to members so a
+            // per-member protective action routes approval to their guardians.
+            .route("/api/admin/entity-ownership",
+                   get(crate::server::handlers::companion::list_entity_ownership)
+                   .put(crate::server::handlers::companion::set_entity_ownership)
+                   .delete(crate::server::handlers::companion::remove_entity_ownership))
             // On-demand check-in trigger — fire a companion check-in to the
             // caller right now (bypassing scheduler policy) and return the
             // delivery outcome. Makes proactive delivery testable. (The

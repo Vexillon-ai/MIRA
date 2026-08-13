@@ -845,6 +845,14 @@ impl GatewayBuilder {
                 &pkg_store, &data_dir.join("packages"), tools.app_http(), tools.app_secrets(),
             ));
         }
+        // FDI-2: reconcile managed app service containers (start active ones,
+        // reap orphans). Blocking + potentially slow (image pull) → off-thread.
+        {
+            let auth_db = data_dir.join("auth.db");
+            tokio::task::spawn_blocking(move || {
+                crate::packages::apps::reconcile_app_containers_at(&auth_db);
+            });
+        }
 
         // Phase B slice 2 — hand the tool registry to the named-agent
         // resolver now that it exists, so `named:<handle>` workers can run

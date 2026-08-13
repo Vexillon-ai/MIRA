@@ -1,0 +1,87 @@
+{
+  "format": "1",
+  "id": "com.mira.wazuh",
+  "name": "Wazuh Security",
+  "version": "1.0.0",
+  "description": "Run a Wazuh manager (open-source EDR/SIEM) as a MIRA-managed container and let the Guardian watch it. MIRA starts + supervises the container, polls the Wazuh API, and raises a Guardian issue event when it goes unreachable — turning a homelab security stack into something a family can actually keep running. Illustrative single-container example; a full Wazuh deployment adds an indexer + dashboard.",
+  "publisher": "MIRA",
+  "components": [
+    {
+      "type": "app",
+      "runtime": "container",
+      "capabilities": {
+        "secrets": ["api_password"],
+        "network_egress": ["${config.api_url}"]
+      },
+      "config_schema": [
+        {
+          "key": "api_url",
+          "label": "Wazuh API URL",
+          "type": "url",
+          "required": true,
+          "help": "The Wazuh manager API base, e.g. https://198.51.100.10:55000 (RFC 5737 doc IP shown; use your own LAN address)."
+        },
+        {
+          "key": "api_user",
+          "label": "Wazuh API user",
+          "type": "string",
+          "required": true,
+          "help": "Default is 'wazuh-wui'."
+        },
+        {
+          "key": "api_password",
+          "label": "Wazuh API password",
+          "type": "secret",
+          "secret": true,
+          "required": true,
+          "help": "The API password. Forwarded to the container as an env var and used to poll the API."
+        }
+      ],
+      "payload": "ui",
+      "spec": {
+        "ui": { "entry": "ui/index.html" },
+        "container": {
+          "image": "wazuh/wazuh-manager:4.9.0",
+          "memory": "2g",
+          "ports": [
+            { "host": 1514,  "container": 1514,  "public": true },
+            { "host": 1515,  "container": 1515,  "public": true },
+            { "host": 55000, "container": 55000, "public": false }
+          ],
+          "env": {
+            "API_USERNAME": "${config.api_user}",
+            "API_PASSWORD": "${config.api_password}"
+          },
+          "volumes": [
+            { "name": "ossec-data", "path": "/var/ossec/data" },
+            { "name": "ossec-logs", "path": "/var/ossec/logs" }
+          ]
+        },
+        "tools": [
+          {
+            "name": "list_agents",
+            "description": "List the endpoints (agents) enrolled with this Wazuh manager and their connection status. Use to see which family devices are being monitored.",
+            "args_schema": { "type": "object", "properties": {} },
+            "handler": {
+              "kind": "http",
+              "method": "GET",
+              "url": "${config.api_url}/agents",
+              "headers": { "Authorization": "Bearer ${config.api_password}" },
+              "response": { "select": ["id", "name", "ip", "status"], "limit": 50 }
+            }
+          }
+        ],
+        "events": [
+          { "name": "app.wazuh.unreachable", "domain": "security", "severity": "warn" }
+        ],
+        "permissions": { "emit_events": ["app.wazuh.unreachable"] },
+        "health_check": {
+          "url": "${config.api_url}/",
+          "headers": { "Authorization": "Bearer ${config.api_password}" },
+          "interval_secs": 300,
+          "emit_on_failure": "app.wazuh.unreachable"
+        }
+      }
+    }
+  ]
+}

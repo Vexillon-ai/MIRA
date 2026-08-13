@@ -119,6 +119,27 @@ impl Tool for GuardianProposeTool {
             }
         }
 
+        // control_member_device needs a structured JSON target; validate its
+        // shape early so a malformed proposal doesn't sit PENDING and fail at
+        // approval. (Ownership is verified authoritatively at approval time.)
+        if kind == GuardianActionKind::ControlMemberDevice {
+            use crate::agent::guardian_actions::MemberDeviceTarget;
+            match MemberDeviceTarget::parse(target.as_deref()) {
+                Some(t) if !t.member.trim().is_empty() && !t.entity_id.trim().is_empty()
+                    && !t.domain.trim().is_empty() && !t.service.trim().is_empty()
+                    && !t.app_id.trim().is_empty() => {}
+                _ => return Ok(ToolResult::failure(
+                    "control_member_device `target` must be a JSON object with non-empty \
+                     member, app_id, entity_id, domain and service — e.g. \
+                     {\"member\":\"<user_id>\",\"app_id\":\"com.mira.home-assistant\",\
+                     \"entity_id\":\"switch.kid_router\",\"domain\":\"switch\",\
+                     \"service\":\"turn_off\",\"note\":\"pause internet\"}. The device must \
+                     already be registered to that member (Settings → Guardian → Member devices)."
+                        .to_string(),
+                )),
+            }
+        }
+
         let id = self.store.create_pending(kind, target.as_deref(), &reason)?;
         if let Some(audit) = &self.audit {
             let _ = audit.record(guardian_agent_id(), None, AuditEvent::GuardianAction {

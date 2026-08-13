@@ -12,11 +12,13 @@ import { useAuthStore } from '@/store/authStore'
 import {
   getPresence,
   updatePresence,
+  getMyWards,
   type PresenceSettings,
   type PresenceUpdate,
   type PresenceTone,
   type PresenceMessageMix,
   type CareRole,
+  type Ward,
 } from '@/api/companion'
 import styles from './PresencePage.module.css'
 
@@ -61,6 +63,7 @@ interface FormState {
   care_role: CareRole
   care_consent: boolean
   safety_contact_user_id: string
+  guardian_ids: string[]
 }
 
 const CARE_ROLES: { value: CareRole; label: string; blurb: string }[] = [
@@ -84,6 +87,7 @@ function toForm(s: PresenceSettings): FormState {
     care_role: s.care_role,
     care_consent: s.care_consent,
     safety_contact_user_id: s.safety_contact_user_id ?? '',
+    guardian_ids: [...(s.guardian_ids ?? [])],
   }
 }
 
@@ -99,6 +103,35 @@ function relativeTime(ms: number): string {
   const days = Math.floor(hrs / 24)
   if (days < 30) return `${days}d ago`
   return new Date(ms).toLocaleDateString()
+}
+
+// A single ward's wellbeing row in the guardian view. Aggregate signals only;
+// a distress flag surfaces when the trailing window has any distress signals.
+function WardCard({ ward }: { ward: Ward }) {
+  const w = ward.wellbeing
+  const roleLabel = ward.care_role === 'child' ? 'Child'
+    : ward.care_role === 'elder' ? 'Older adult' : ''
+  const distressed = w.recent_distress_count > 0
+  return (
+    <div style={{ padding: '10px 0', borderTop: '1px solid var(--border, #2a2a2a)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <strong>{ward.ward_name}</strong>
+        {roleLabel && <span style={{ fontSize: 12, opacity: 0.7 }}>{roleLabel}</span>}
+        {distressed && (
+          <span style={{ fontSize: 12, color: '#e06c6c', fontWeight: 600 }}>
+            ⚠ {w.recent_distress_count} distress signal{w.recent_distress_count > 1 ? 's' : ''}
+            {w.last_distress_at_ms ? ` · last ${relativeTime(w.last_distress_at_ms)}` : ''}
+          </span>
+        )}
+      </div>
+      <div style={{ fontSize: 13, opacity: 0.75, marginTop: 2 }}>
+        {w.last_active_at_ms
+          ? `Last active ${relativeTime(w.last_active_at_ms)}`
+          : 'No recent activity'}
+        {w.total > 0 && ` · ${w.engaged} engaged / ${w.brief + w.declined} quieter over ${w.window_days}d`}
+      </div>
+    </div>
+  )
 }
 
 export default function PresencePage() {
@@ -117,6 +150,14 @@ export default function PresencePage() {
     () => users.filter((u) => u.id !== me?.id),
     [users, me],
   )
+
+  // People this user looks after (guardian view). Server gates visibility by
+  // role + consent, so an empty list just means "no wards".
+  const { data: wardsData } = useQuery({
+    queryKey: ['me-wards'],
+    queryFn:  getMyWards,
+  })
+  const wards = wardsData?.wards ?? []
 
   const [form, setForm] = useState<FormState | null>(null)
   const [timesError, setTimesError] = useState('')
@@ -186,6 +227,8 @@ export default function PresencePage() {
       daily_briefing_hour:    form.daily_briefing_hour,
       care_role:              form.care_role,
       care_consent:           form.care_consent,
+      // Additional guardians, minus the primary contact (it's stored separately).
+      guardian_ids:           form.guardian_ids.filter((id) => id !== form.safety_contact_user_id),
       ...(form.safety_contact_user_id
         ? { safety_contact_user_id: form.safety_contact_user_id }
         : {}),
@@ -226,6 +269,17 @@ export default function PresencePage() {
           </button>
         </div>
       </div>
+
+      {wards.length > 0 && (
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>People you look after</div>
+          <p className={styles.help}>
+            A quiet wellbeing view of those you're a guardian for — aggregate
+            signals only, never their messages. They've agreed to this arrangement.
+          </p>
+          {wards.map((w) => <WardCard key={w.ward_id} ward={w} />)}
+        </div>
+      )}
 
       {!data.enabled && (
         <div className={styles.notEnabledNote}>
@@ -467,6 +521,34 @@ export default function PresencePage() {
                   ))}
                 </select>
               </label>
+
+              {contacts.filter((u) => u.id !== form.safety_contact_user_id).length > 0 && (
+                <div className={styles.field}>
+                  <span>Also alert (additional guardians)</span>
+                  <p className={styles.help}>
+                    Everyone ticked here is notified too — e.g. both parents. Leave
+                    empty to alert just the contact above.
+                  </p>
+                  {contacts
+                    .filter((u) => u.id !== form.safety_contact_user_id)
+                    .map((u) => (
+                      <label key={u.id} className={styles.toggleLine}>
+                        {u.display_name || u.username}
+                        <span className={styles.toggleWrap}>
+                          <input
+                            type="checkbox"
+                            checked={form.guardian_ids.includes(u.id)}
+                            onChange={(e) =>
+                              set('guardian_ids', e.target.checked
+                                ? Array.from(new Set([...form.guardian_ids, u.id]))
+                                : form.guardian_ids.filter((id) => id !== u.id))
+                            }
+                          />
+                        </span>
+                      </label>
+                    ))}
+                </div>
+              )}
 
               <label className={styles.toggleLine}>
                 The person knows MIRA may alert this contact if they seem unwell or go quiet

@@ -215,9 +215,12 @@ impl SafetyFloor {
         summary: &str,
         severity: ConcernSeverity,
     ) -> EscalationOutcome {
-        // Resolve safety contact.
-        let contact = match self.resolve_contact(user_id) {
-            Some(c) => c,
+        // Resolve the ward's guardian(s) — the primary safety contact plus any
+        // additional guardians, each of whom this escalation
+        // reaches. `primary` labels the audit row.
+        let guardians = self.resolve_guardians(user_id);
+        let primary = match guardians.first() {
+            Some(p) => p.clone(),
             None => {
                 let _ = self.log.record(&NewSafetyEvent {
                     user_id: user_id.into(),
@@ -225,10 +228,10 @@ impl SafetyFloor {
                     outcome: EscalationOutcome::NoContact,
                     contact_user_id: None,
                     summary: clip(summary),
-                    note: Some("no safety contact configured".into()),
+                    note: Some("no safety contact / guardian configured".into()),
                     severity: Some(severity.as_str().into()),
                 });
-                warn!("companion safety: distress for '{user_id}' but no safety contact configured");
+                warn!("companion safety: distress for '{user_id}' but no guardian configured");
                 return EscalationOutcome::NoContact;
             }
         };
@@ -247,7 +250,7 @@ impl SafetyFloor {
                 user_id: user_id.into(),
                 kind: SafetyEventKind::Distress,
                 outcome: EscalationOutcome::Suppressed,
-                contact_user_id: Some(contact.clone()),
+                contact_user_id: Some(primary.clone()),
                 summary: clip(summary),
                 note: Some("within distress dedup window (same-or-lower severity)".into()),
                 severity: Some(severity.as_str().into()),
@@ -282,16 +285,19 @@ impl SafetyFloor {
             ),
         };
 
-        let (outcome, deliver_err) = self.deliver(&contact, &notice).await;
+        // Deliver to EVERY guardian — the escalation succeeds if any one is
+        // reached, so the loud "no one alerted" failure fires only when all are
+        // unreachable.
+        let (outcome, deliver_err) = self.deliver_to_guardians(&guardians, &notice).await;
         let outcome_str = outcome.as_str().to_string();
 
         let _ = self.log.record(&NewSafetyEvent {
             user_id: user_id.into(),
             kind: SafetyEventKind::Distress,
             outcome,
-            contact_user_id: Some(contact.clone()),
+            contact_user_id: Some(primary.clone()),
             summary: clip(summary),
-            // On failure the audit row carries the ACTUAL delivery error
+            // On failure the audit row carries the ACTUAL delivery error(s)
             // (was only in a warn! log), not just the severity — which now has
             // its own column.
             note: deliver_err.clone(),
@@ -305,15 +311,15 @@ impl SafetyFloor {
         if outcome == EscalationOutcome::DeliveryFailed {
             let detail = deliver_err.as_deref().unwrap_or("unknown delivery error");
             error!(
-                "companion SAFETY: {} distress for '{user_id}' FAILED to reach contact \
-                 '{contact}': {detail} — no one was alerted",
-                severity.as_str()
+                "companion SAFETY: {} distress for '{user_id}' FAILED to reach any of {} \
+                 guardian(s): {detail} — no one was alerted",
+                severity.as_str(), guardians.len(),
             );
             if let Some(deg) = &self.degradations {
                 deg.record(
                     "companion_safety_delivery",
                     "Companion safety escalation",
-                    "delivered to safety contact",
+                    "delivered to a safety contact / guardian",
                     "UNDELIVERED — no one alerted",
                     &crate::health::degradation::DegradationTracker::short(detail),
                     false, // transient — the next escalation may succeed
@@ -321,8 +327,9 @@ impl SafetyFloor {
             }
         } else {
             info!(
-                "companion safety: distress for '{user_id}' → \
-                 contact='{contact}', outcome={outcome_str}"
+                "companion safety: distress for '{user_id}' → {} guardian(s), \
+                 primary='{primary}', outcome={outcome_str}",
+                guardians.len(),
             );
         }
 
@@ -344,8 +351,9 @@ impl SafetyFloor {
         user_id: &str,
         count: u32,
     ) -> EscalationOutcome {
-        let contact = match self.resolve_contact(user_id) {
-            Some(c) => c,
+        let guardians = self.resolve_guardians(user_id);
+        let primary = match guardians.first() {
+            Some(p) => p.clone(),
             None => {
                 let _ = self.log.record(&NewSafetyEvent {
                     user_id: user_id.into(),
@@ -353,7 +361,7 @@ impl SafetyFloor {
                     outcome: EscalationOutcome::NoContact,
                     contact_user_id: None,
                     summary: format!("{count} consecutive missed check-ins"),
-                    note: Some("no safety contact configured".into()),
+                    note: Some("no safety contact / guardian configured".into()),
                     severity: None,
                 });
                 return EscalationOutcome::NoContact;
@@ -372,7 +380,7 @@ impl SafetyFloor {
                 user_id: user_id.into(),
                 kind: SafetyEventKind::MissedCheckin,
                 outcome: EscalationOutcome::Suppressed,
-                contact_user_id: Some(contact.clone()),
+                contact_user_id: Some(primary.clone()),
                 summary: format!("{count} consecutive missed check-ins"),
                 note: Some("within missed-checkin re-escalate window".into()),
                 severity: None,
@@ -391,20 +399,21 @@ impl SafetyFloor {
              different channel?"
         );
 
-        let (outcome, deliver_err) = self.deliver(&contact, &notice).await;
+        let (outcome, deliver_err) = self.deliver_to_guardians(&guardians, &notice).await;
         let outcome_str = outcome.as_str().to_string();
         let _ = self.log.record(&NewSafetyEvent {
             user_id: user_id.into(),
             kind: SafetyEventKind::MissedCheckin,
             outcome,
-            contact_user_id: Some(contact.clone()),
+            contact_user_id: Some(primary.clone()),
             summary: format!("{count} consecutive missed check-ins"),
             note: deliver_err,
             severity: None,
         });
         info!(
-            "companion safety: missed-checkin for '{user_id}' (n={count}) \
-             → contact='{contact}', outcome={outcome_str}"
+            "companion safety: missed-checkin for '{user_id}' (n={count}) → {} guardian(s), \
+             primary='{primary}', outcome={outcome_str}",
+            guardians.len(),
         );
 
         // also fan out via groups.
@@ -530,23 +539,43 @@ impl SafetyFloor {
     // `Some(contact_user_id)` when configured AND the contact's user
     // row still exists. Auth lookup failures fall through to `None`
     // better to log "no contact" than misroute.
-    fn resolve_contact(&self, user_id: &str) -> Option<String> {
-        let settings = self.store.get(user_id).ok().flatten()?;
-        let contact = settings.safety_contact_user_id?;
-        // Optional integrity check — confirms the contact still has
-        // an account. When auth isn't wired (tests), we just trust
-        // the configured value.
-        if let Some(auth) = &self.auth {
-            let exists = auth.get_user(&contact).ok().flatten().is_some();
-            if !exists {
-                warn!(
-                    "companion safety: configured contact '{contact}' for \
-                     user '{user_id}' no longer exists"
-                );
-                return None;
-            }
+    /// Does `id` still have an account? True when auth isn't wired (tests) — we
+    /// trust the configured value then.
+    fn contact_exists(&self, id: &str) -> bool {
+        match &self.auth {
+            Some(auth) => auth.get_user(id).ok().flatten().is_some(),
+            None => true,
         }
-        Some(contact)
+    }
+
+    /// The ward's guardian(s) — primary safety contact + additional guardians
+    /// filtered to accounts that still exist. Primary first.
+    fn resolve_guardians(&self, user_id: &str) -> Vec<String> {
+        crate::companion::governance::guardians_of(&self.store, user_id)
+            .into_iter()
+            .filter(|g| {
+                let ok = self.contact_exists(g);
+                if !ok {
+                    warn!("companion safety: guardian '{g}' for '{user_id}' no longer exists — skipping");
+                }
+                ok
+            })
+            .collect()
+    }
+
+    /// Deliver `notice` to every guardian, aggregating into one outcome:
+    /// `Delivered` if ANY guardian was reached (so the loud "no one alerted"
+    /// failure fires only when EVERY guardian is unreachable). The note carries
+    /// per-guardian delivery detail.
+    async fn deliver_to_guardians(
+        &self, guardians: &[String], notice: &str,
+    ) -> (EscalationOutcome, Option<String>) {
+        let mut results = Vec::with_capacity(guardians.len());
+        for g in guardians {
+            let (o, e) = self.deliver(g, notice).await;
+            results.push((o, e.map(|detail| format!("{g}: {detail}"))));
+        }
+        aggregate_deliveries(&results)
     }
 
     // Deliver a distress notice to `contact_user_id` across two paths:
@@ -645,6 +674,32 @@ fn combine_delivery(
     } else {
         (EscalationOutcome::DeliveryFailed, note)
     }
+}
+
+// Fold per-guardian delivery results into one escalation outcome + audit note.
+// The safety-critical invariant: `Delivered` iff **any** guardian was reached —
+// a distress signal that reaches *some* guardian is a success, so the loud
+// "no one alerted" failure fires only when EVERY guardian was unreachable. Pure
+// so the aggregate (esp. the partial-reach case a web test can't exercise) is
+// unit-tested directly.
+fn aggregate_deliveries(
+    results: &[(EscalationOutcome, Option<String>)],
+) -> (EscalationOutcome, Option<String>) {
+    let any_delivered = results.iter().any(|(o, _)| *o == EscalationOutcome::Delivered);
+    let notes: Vec<String> = results.iter().filter_map(|(_, n)| n.clone()).collect();
+    let note = if !notes.is_empty() {
+        Some(notes.join("; "))
+    } else if results.len() > 1 {
+        Some(format!("delivered to {} guardians", results.len()))
+    } else {
+        None
+    };
+    let outcome = if any_delivered {
+        EscalationOutcome::Delivered
+    } else {
+        EscalationOutcome::DeliveryFailed
+    };
+    (outcome, note)
 }
 
 // Find the contact's "Safety alerts" thread on web, or create one.
@@ -863,6 +918,130 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].outcome, EscalationOutcome::Delivered);
         assert_eq!(evs[0].contact_user_id.as_deref(), Some("david"));
+    }
+
+    #[test]
+    fn aggregate_deliveries_reached_if_any_guardian_reached() {
+        use EscalationOutcome::{Delivered, DeliveryFailed};
+        let f = |detail: &str| Some(detail.to_string());
+
+        // Single guardian, reached, no channel note → Delivered, no note.
+        assert_eq!(aggregate_deliveries(&[(Delivered, None)]), (Delivered, None));
+
+        // All reached (multi) → Delivered, count note when no per-guardian notes.
+        assert_eq!(
+            aggregate_deliveries(&[(Delivered, None), (Delivered, None)]),
+            (Delivered, Some("delivered to 2 guardians".into())),
+        );
+
+        // PARTIAL — one unreachable, one reached → still Delivered (the whole
+        // point of multi-guardian), and the note surfaces the failure.
+        let (o, note) = aggregate_deliveries(&[
+            (Delivered, None),
+            (DeliveryFailed, f("dad: signal (down) failed")),
+        ]);
+        assert_eq!(o, Delivered);
+        assert!(note.unwrap().contains("dad"));
+
+        // ALL unreachable → DeliveryFailed, note names each.
+        let (o, note) = aggregate_deliveries(&[
+            (DeliveryFailed, f("mum: x")),
+            (DeliveryFailed, f("dad: y")),
+        ]);
+        assert_eq!(o, DeliveryFailed);
+        let note = note.unwrap();
+        assert!(note.contains("mum") && note.contains("dad"));
+    }
+
+    // A ward whose guardians are `guardians[0]` (primary safety contact) plus
+    // `guardians[1..]` (additional guardians).
+    fn enable_ward_with_guardians(floor: &SafetyFloor, user_id: &str, guardians: &[&str]) {
+        let now = Utc::now();
+        let mut s = CompanionSettings::new(user_id);
+        s.enabled = true;
+        s.setup_completed_at = Some(now);
+        s.safety_contact_user_id = guardians.first().map(|g| (*g).to_string());
+        s.care.role = crate::companion::CareRole::Child;
+        s.care.guardian_ids = guardians.iter().skip(1).map(|g| (*g).to_string()).collect();
+        floor.store.upsert(&s).unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_distress_delivers_to_all_guardians() {
+        let (_dir, floor, history) = fresh_setup();
+        enable_ward_with_guardians(&floor, "alice", &["mum", "dad"]);
+        let outcome = floor
+            .handle_distress("alice", "user mentioned feeling overwhelmed", ConcernSeverity::Concerning)
+            .await;
+        assert_eq!(outcome, EscalationOutcome::Delivered);
+
+        // BOTH guardians get a "Safety alerts" thread carrying the notice.
+        for g in ["mum", "dad"] {
+            let convs = history.list_conversations(g, Some("web"), 10, 0).unwrap();
+            let conv = convs.iter()
+                .find(|c| c.title.as_deref() == Some("Safety alerts"))
+                .unwrap_or_else(|| panic!("expected Safety alerts thread for {g}"));
+            let msgs = history.get_messages(&conv.id, 10, None).unwrap();
+            assert!(msgs.iter().any(|m| m.content.contains("overwhelmed")),
+                "guardian {g} did not receive the notice");
+        }
+
+        // One incident → one audit row, labelled with the primary guardian.
+        let evs = floor.log.list_recent_for_user("alice", 10).unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].contact_user_id.as_deref(), Some("mum"));
+    }
+
+    #[tokio::test]
+    async fn handle_missed_checkins_delivers_to_all_guardians() {
+        let (_dir, floor, history) = fresh_setup();
+        enable_ward_with_guardians(&floor, "alice", &["mum", "dad"]);
+        let outcome = floor.handle_missed_checkins("alice", 3).await;
+        assert_eq!(outcome, EscalationOutcome::Delivered);
+        for g in ["mum", "dad"] {
+            let convs = history.list_conversations(g, Some("web"), 10, 0).unwrap();
+            assert!(convs.iter().any(|c| c.title.as_deref() == Some("Safety alerts")),
+                "guardian {g} got no missed-checkin thread");
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_distress_dedup_is_per_ward_not_per_guardian() {
+        let (_dir, floor, _history) = fresh_setup();
+        enable_ward_with_guardians(&floor, "alice", &["mum", "dad"]);
+        // One incident delivers to both guardians...
+        assert_eq!(
+            floor.handle_distress("alice", "s1", ConcernSeverity::Acute).await,
+            EscalationOutcome::Delivered,
+        );
+        // ...and a second same-severity signal within the window is suppressed
+        // (dedup keys on the ward, so it's one incident — not one per guardian).
+        assert_eq!(
+            floor.handle_distress("alice", "s2", ConcernSeverity::Acute).await,
+            EscalationOutcome::Suppressed,
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_distress_fails_loudly_only_when_no_guardian_reachable() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(CompanionStore::open(&dir.path().join("companion.db")).unwrap());
+        let log = Arc::new(SafetyLog::open(&dir.path().join("companion.db")).unwrap());
+        // No history store + no dispatcher → every guardian's delivery fails, so
+        // the whole escalation is DeliveryFailed (the loud path).
+        let floor = SafetyFloor {
+            log, store,
+            history: None, auth: None, notifications: None,
+            groups: None, degradations: None, dispatcher: None,
+        };
+        enable_ward_with_guardians(&floor, "alice", &["mum", "dad"]);
+        let outcome = floor.handle_distress("alice", "signal", ConcernSeverity::Acute).await;
+        assert_eq!(outcome, EscalationOutcome::DeliveryFailed);
+        let evs = floor.log.list_recent_for_user("alice", 10).unwrap();
+        assert_eq!(evs[0].outcome, EscalationOutcome::DeliveryFailed);
+        // The audit note names EACH failed guardian, not just one.
+        let note = evs[0].note.clone().unwrap_or_default();
+        assert!(note.contains("mum") && note.contains("dad"), "note should list both: {note}");
     }
 
     #[tokio::test]

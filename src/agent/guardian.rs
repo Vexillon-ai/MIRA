@@ -710,8 +710,10 @@ pub fn spawn_watch_loop(
                                     info!("MIRA-Guardian: '{}' decided during grace — autonomy skipped [id={}]", kind_s, a.id);
                                     continue;
                                 }
+                                // Member-scoped kinds are never autonomy-eligible, so
+                                // the isolation path never needs the tool registry.
                                 let res = execute_action(a.kind, a.target.as_deref(),
-                                    automations.as_ref(), channel_manager.as_ref()).await;
+                                    automations.as_ref(), channel_manager.as_ref(), None).await;
                                 auto_cooldown.insert(kind_s.clone(), now);
                                 match res {
                                     Ok(msg) => {
