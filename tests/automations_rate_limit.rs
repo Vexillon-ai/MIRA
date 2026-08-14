@@ -45,6 +45,7 @@ fn make_dispatcher(
         history:       Some(history),
         notifications: Some(bus),
         max_chain_depth: 0,
+        max_action_secs: 300,
         rate_limiter:    limiter,
         auth: None,
         signal_port: None,

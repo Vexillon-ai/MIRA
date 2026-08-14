@@ -210,6 +210,16 @@ fn enforce_writer(
         (Writer::Both, _) => Ok(()),
         (Writer::Agent, Writer::Agent) => Ok(()),
         (Writer::User, Writer::User) => Ok(()),
+        // The human is the owner of their own wiki: a user-initiated edit
+        // (PUT/append/update/delete via the UI) on an agent-authored page is
+        // always allowed — for EVERY op kind, not just delete. Without this a
+        // user cannot correct anything MIRA wrote through any supported path,
+        // and the only workaround is editing the file on disk + hand-committing,
+        // which bypasses the audit pipeline entirely. The reverse
+        // (Writer::User page, Writer::Agent op) stays blocked below — the point
+        // of the policy is to stop the agent silently overwriting the user's
+        // own pages.
+        (Writer::Agent, Writer::User) => Ok(()),
         (page, acting) => Err(WikiError::WriterPolicy {
             required: acting.as_str().to_string(),
             actual: page.as_str().to_string(),
@@ -370,6 +380,70 @@ mod tests {
             },
         );
         assert!(matches!(res, Err(WikiError::WriterPolicy { .. })));
+    }
+
+    #[test]
+    fn writer_policy_allows_user_editing_agent_page_every_op_kind() {
+        // The human owns their wiki: a user-initiated edit on an agent-authored
+        // page must be allowed for write/append/update/delete — not just delete.
+        // Regression for the bug where a user could not correct anything MIRA
+        // wrote through any supported UI path.
+        let (_dir, store) = wiki();
+        let applier = WikiApplier::new(&store);
+        let agent_prov = Provenance {
+            source: "agent".into(),
+            turn_id: Some("t0".into()),
+            conversation_id: Some("c0".into()),
+            actor: "agent".into(),
+        };
+
+        // Helper: (re)create an agent-authored page seeded with a section.
+        let seed_agent_page = |path: &WikiPath| {
+            applier.apply(
+                &WikiOp::WritePage {
+                    path: path.clone(),
+                    frontmatter: PageFrontmatter { writer: Writer::Agent, ..Default::default() },
+                    body: "## Notes\nagent text\n".into(),
+                },
+                &agent_prov,
+            ).unwrap();
+        };
+
+        // write_page — user overwrites an agent page.
+        let p = WikiPath::parse("pages/w.md").unwrap();
+        seed_agent_page(&p);
+        applier.apply(
+            &WikiOp::WritePage {
+                path: p.clone(),
+                frontmatter: PageFrontmatter { writer: Writer::Agent, ..Default::default() },
+                body: "## Notes\nuser correction\n".into(),
+            },
+            &Provenance::user_ui("u1"),
+        ).expect("user write_page on agent page must be allowed");
+
+        // append_section — user appends to an agent page.
+        let p = WikiPath::parse("pages/a.md").unwrap();
+        seed_agent_page(&p);
+        applier.apply(
+            &WikiOp::AppendSection { path: p.clone(), section: "Notes".into(), body: "user add".into() },
+            &Provenance::user_ui("u1"),
+        ).expect("user append_section on agent page must be allowed");
+
+        // update_section — user rewrites a section of an agent page.
+        let p = WikiPath::parse("pages/u.md").unwrap();
+        seed_agent_page(&p);
+        applier.apply(
+            &WikiOp::UpdateSection { path: p.clone(), section: "Notes".into(), body: "user rewrite".into() },
+            &Provenance::user_ui("u1"),
+        ).expect("user update_section on agent page must be allowed");
+
+        // delete_page — user deletes an agent page (the original reported case).
+        let p = WikiPath::parse("pages/d.md").unwrap();
+        seed_agent_page(&p);
+        applier.apply(
+            &WikiOp::DeletePage { path: p.clone() },
+            &Provenance::user_ui("u1"),
+        ).expect("user delete_page on agent page must be allowed");
     }
 
     #[test]

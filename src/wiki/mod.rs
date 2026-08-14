@@ -295,6 +295,19 @@ impl WikiSystem {
         self.audit.lock().expect("audit poisoned").list_by_status(OpStatus::Pending)
     }
 
+    /// How many times an op of `op_kind` against `target_path` has failed since
+    /// `since`. The extractor uses this to stop re-proposing a persistently
+    /// blocked write (see `count_recent_failures`).
+    pub fn recent_failure_count(
+        &self,
+        op_kind: &str,
+        target_path: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<usize> {
+        self.audit.lock().expect("audit poisoned")
+            .count_recent_failures(op_kind, target_path, since)
+    }
+
     /// Bulk-approve pending ops. When `min_confidence` is `Some(t)`, only ops
     /// whose recorded confidence is `>= t` are approved; ops with no recorded
     /// confidence (e.g. pre-existing rows, or direct writes) are skipped under

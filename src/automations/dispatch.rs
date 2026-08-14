@@ -142,6 +142,11 @@ pub struct Dispatcher {
     // Production wiring reads this from `AutomationsConfig.max_chain_depth`;
     // tests construct dispatchers directly and may set 0 to bypass.
     pub max_chain_depth: u32,
+
+    // Wall-clock ceiling (seconds) for a single action, from
+    // `AutomationsConfig.max_action_secs` (default 300). A `Prompt` action can
+    // raise it per-action via `PromptAction.max_action_secs`. Tests set 300.
+    pub max_action_secs: u64,
     // Per-user, per-channel sliding-window cap on `channel_message`
     // dispatches. `None` disables limiting (used by tests that don't
     // care about throttle behavior).
@@ -234,12 +239,17 @@ impl Dispatcher {
             action_tag, act.source_kind, act.source_id, act.user_id,
         );
 
-        // cap every action's wall-clock. `run_once` awaits dispatches
-        // sequentially, so one hung action (a stalled LLM in run_prompt, a slow
-        // tool, an unresponsive HttpPost host) would otherwise block the whole
-        // tick loop and back the event bus up into Lagged drops. On timeout the
-        // action is aborted and recorded as a failure like any other.
-        const MAX_ACTION_SECS: u64 = 300;
+        // cap every action's wall-clock so one hung action (a stalled LLM
+        // in run_prompt, a slow tool, an unresponsive HttpPost host) is aborted
+        // and recorded as a failure rather than hanging forever. The worker now
+        // spawns each action off the tick loop, so a long-but-legitimate action
+        // no longer blocks sibling schedules or the next tick — which lets this
+        // ceiling be configurable (automations.max_action_secs, default 300)
+        // and per-action-overridable for research prompts that need ~15 min.
+        let max_action_secs = match act.action {
+            Action::Prompt(p) => p.max_action_secs.unwrap_or(self.max_action_secs),
+            _                 => self.max_action_secs,
+        };
         let action_fut = async {
             match act.action {
                 Action::Internal { task, args } => {
@@ -266,11 +276,12 @@ impl Dispatcher {
             }
         };
         let result = match tokio::time::timeout(
-            Duration::from_secs(MAX_ACTION_SECS), action_fut,
+            Duration::from_secs(max_action_secs), action_fut,
         ).await {
             Ok(r)  => r,
             Err(_) => Err(MiraError::ToolError(format!(
-                "automation action exceeded {MAX_ACTION_SECS}s wall-clock and was aborted"
+                "automation action exceeded its {max_action_secs}s wall-clock ceiling and was aborted \
+                 (raise automations.max_action_secs, or set max_action_secs on the prompt action)"
             ))),
         };
 
@@ -394,6 +405,11 @@ impl Dispatcher {
             // Automation turns run a deliberate toolset (explicit whitelist or
             // the chat flow set) — don't let adaptive selection narrow it.
             tools_flow_restricted: true,
+            // Honor the action's per-schedule iteration budget. Without this the
+            // turn is capped at the global `agent.max_tool_rounds`, which a
+            // research task burns on search/fetch before it can call its
+            // wiki-write tool. `max_iterations` defaults to 10 (see types.rs).
+            max_tool_rounds_override: Some(p.max_iterations as usize),
             ..TurnContext::default()
         };
 

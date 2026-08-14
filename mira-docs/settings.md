@@ -10,6 +10,8 @@ Server-wide configuration in `mira_config.json`: LLM providers + keys, channels,
 - **Where:** Settings UI (Server tab, provider/channel/voice sections), or `mira_config.json` directly. MIRA can also read and (for admins, with confirmation) change many of these on request.
 - **Secrets are redacted.** API keys, tokens, passwords, `jwt_secret`, per-channel `hmac_key`, etc. are never shown — MIRA will tell you whether one is *set* or *unset*, but never read the value back (it would otherwise leak into chat logs, voice notes, or relayed messages). You can overwrite a secret, but you can't read it.
 - **Some changes need a restart** (Rust/embedded changes); most config edits apply live via the config watcher.
+- **Wiki review gate** — the **Settings → Wiki** tab exposes how MIRA's post-turn extractor writes to your wiki: extraction **mode** (`review`/`auto`/`off`), **minimum confidence**, **max updates per turn**, an **auto-apply threshold** (in review mode, apply confident extractions immediately and queue only the uncertain ones), and the model's own **write mode**. If MIRA's findings ever seem to go missing, they're waiting in the review queue — this is where you tune that.
+- **Automation action timeout** — `automations.max_action_secs` (default 300s) caps how long any one automation action may run; a long **research** prompt can raise its own ceiling and iteration budget. See the "Run long research automations" guide.
 
 ## 2. Per-user settings
 

@@ -167,6 +167,14 @@ pub struct PromptAction {
     pub tools_allowed:         Option<Vec<String>>,
     #[serde(default = "default_max_iter")]
     pub max_iterations:        u32,
+    // Per-action wall-clock ceiling (seconds). `None` (default) uses the global
+    // `automations.max_action_secs` (300). A multi-cycle research prompt sets a
+    // higher value (e.g. 900) because it legitimately runs many search→fetch→
+    // write rounds; the timeout lives here rather than on a schedule column
+    // because `Prompt` is the only action kind that runs long, and it rides in
+    // the serialized action payload with no DB migration.
+    #[serde(default)]
+    pub max_action_secs:       Option<u64>,
 }
 
 fn default_max_iter() -> u32 { 10 }

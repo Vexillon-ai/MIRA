@@ -25,6 +25,49 @@ impl WikiStore {
 
     pub fn root(&self) -> &Path { &self.root }
 
+    /// Directory that holds embedded page images (`<root>/assets/`). Kept
+    /// inside the wiki tree so git-sync / tarball export carry the images
+    /// alongside the markdown that references them.
+    pub fn assets_dir(&self) -> PathBuf { self.root.join("assets") }
+
+    /// Save an image as a content-addressed asset and return its wiki-relative
+    /// path (`assets/<sha256>.<ext>`). Content addressing dedupes identical
+    /// uploads and keeps filenames safe (no user-controlled path component).
+    /// `ext` is validated by the caller against an allow-list.
+    pub fn save_asset(&self, bytes: &[u8], ext: &str) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(bytes);
+        let name = format!("{:x}.{}", hash, ext);
+        let dir = self.assets_dir();
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| WikiError::Other(format!("create assets dir: {e}")))?;
+        let full = dir.join(&name);
+        if !full.exists() {
+            std::fs::write(&full, bytes)
+                .map_err(|e| WikiError::Other(format!("write asset: {e}")))?;
+        }
+        Ok(format!("assets/{name}"))
+    }
+
+    /// Read an asset by its `assets/<name>` relative path. Rejects anything
+    /// that isn't a plain filename directly under `assets/` (no traversal, no
+    /// nested dirs) so a crafted path can't escape the wiki root.
+    pub fn read_asset(&self, rel: &str) -> Result<Vec<u8>> {
+        let name = rel.strip_prefix("assets/").unwrap_or(rel);
+        // A single safe path segment: no separators, no `.` / `..`.
+        let safe = !name.is_empty()
+            && name != "."
+            && name != ".."
+            && !name.contains('/')
+            && !name.contains('\\')
+            && !name.contains("..");
+        if !safe {
+            return Err(WikiError::Other(format!("unsafe asset path: {rel}")));
+        }
+        let full = self.assets_dir().join(name);
+        std::fs::read(&full).map_err(|e| WikiError::Other(format!("read asset: {e}")))
+    }
+
     /// Read a single page.
     pub fn read_page(&self, path: &WikiPath) -> Result<WikiPage> {
         WikiPage::read(&self.root, path)
@@ -144,6 +187,25 @@ mod tests {
         assert!(names.contains(&"pages/projects/foo.md"));
         // .pending content excluded.
         assert!(!names.iter().any(|n| n.starts_with(".pending")));
+    }
+
+    #[test]
+    fn save_and_read_asset_round_trips_and_rejects_traversal() {
+        let dir = tempdir().unwrap();
+        let store = WikiStore::new(dir.path().to_path_buf());
+        let png = b"\x89PNG\r\n\x1a\n fake image bytes";
+        let rel = store.save_asset(png, "png").unwrap();
+        assert!(rel.starts_with("assets/") && rel.ends_with(".png"));
+        // Content-addressed: same bytes → same path (idempotent).
+        assert_eq!(store.save_asset(png, "png").unwrap(), rel);
+        // Round-trips by its returned relative path.
+        assert_eq!(store.read_asset(&rel).unwrap(), png);
+        // Assets are NOT enumerated as pages (only .md is).
+        assert!(!store.list_pages().unwrap().iter().any(|p| p.as_str().starts_with("assets/")));
+        // Traversal / nested paths are refused.
+        assert!(store.read_asset("assets/../profile.md").is_err());
+        assert!(store.read_asset("assets/sub/dir.png").is_err());
+        assert!(store.read_asset("../secret").is_err());
     }
 
     #[test]

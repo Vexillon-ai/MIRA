@@ -33,6 +33,7 @@ fn make_worker(store: Arc<AutomationsStore>, dir: &TempDir) -> Arc<Worker> {
         history:       None,
         notifications: None,
         max_chain_depth: 0,
+        max_action_secs: 300,
         rate_limiter: None,
         auth: None,
         signal_port: None,

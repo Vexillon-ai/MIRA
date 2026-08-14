@@ -294,6 +294,161 @@
   resize: none;
 }
 
+/* ── View / edit toggle ─────────────────────────────────────────── */
+.viewToggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  margin-right: 4px;
+}
+.viewToggleBtn {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  cursor: pointer;
+}
+.viewToggleBtn + .viewToggleBtn { border-left: 1px solid var(--border); }
+.viewToggleBtn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.viewToggleBtn[data-active="true"] {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* ── Rendered-view + edit panes ─────────────────────────────────── */
+.viewPane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 24px;
+  background: var(--bg-base);
+}
+
+.editPane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-base);
+}
+
+.editToolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 24px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.toolbarBtn {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.toolbarBtn:hover { background: var(--bg-hover); }
+.toolbarBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+.toolbarHint { font-size: 11px; color: var(--text-muted); }
+
+.editSplit {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.editSplit .bodyTextarea {
+  flex: 1 1 50%;
+  border-right: 1px solid var(--border-subtle);
+}
+.previewPane {
+  flex: 1 1 50%;
+  min-width: 0;
+  overflow: auto;
+  padding: 16px 24px;
+  background: var(--bg-base);
+}
+@media (max-width: 900px) {
+  /* Stack the editor over the preview on narrow screens. */
+  .editSplit { flex-direction: column; }
+  .editSplit .bodyTextarea { border-right: none; border-bottom: 1px solid var(--border-subtle); }
+}
+
+/* ── Rendered markdown typography ───────────────────────────────── */
+.rendered {
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.65;
+  max-width: 900px;
+}
+.rendered > :first-child { margin-top: 0; }
+.rendered h1, .rendered h2, .rendered h3, .rendered h4 {
+  line-height: 1.3;
+  margin: 1.4em 0 0.5em;
+  font-weight: 650;
+}
+.rendered h1 { font-size: 1.6em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.25em; }
+.rendered h2 { font-size: 1.32em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.2em; }
+.rendered h3 { font-size: 1.14em; }
+.rendered h4 { font-size: 1em; color: var(--text-muted); }
+.rendered p { margin: 0.6em 0; }
+.rendered a { color: var(--accent); text-decoration: none; }
+.rendered a:hover { text-decoration: underline; }
+.rendered ul, .rendered ol { margin: 0.6em 0; padding-left: 1.5em; }
+.rendered li { margin: 0.25em 0; }
+.rendered blockquote {
+  margin: 0.8em 0;
+  padding: 0.2em 1em;
+  border-left: 3px solid var(--accent);
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+.rendered code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.rendered pre {
+  margin: 0.8em 0;
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+.rendered pre code { background: none; border: none; padding: 0; font-size: 0.85em; }
+.rendered img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  margin: 0.6em 0;
+  display: block;
+}
+.rendered table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  font-size: 0.92em;
+  display: block;
+  overflow-x: auto;
+}
+.rendered th, .rendered td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+.rendered th { background: var(--bg-elevated); font-weight: 600; }
+.rendered hr { border: none; border-top: 1px solid var(--border-subtle); margin: 1.2em 0; }
+
 .editorFooter {
   display: flex;
   justify-content: space-between;

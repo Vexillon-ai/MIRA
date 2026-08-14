@@ -108,6 +108,12 @@ pub struct TurnContext {
     // supplies its own date — notably the benchmark harness, which injects a
     // fixed "(Today is …)" and must not be contradicted by real-now.
     pub suppress_time_context:  bool,
+    // Per-turn override for the tool-loop round cap. `None` (default) uses the
+    // global `agent.max_tool_rounds`. Automation prompt actions set this from
+    // `PromptAction.max_iterations` so a research task can be granted more
+    // search→fetch→write rounds than a chat turn — without this, a long task
+    // spends the global cap on searches and never reaches its wiki-write call.
+    pub max_tool_rounds_override: Option<usize>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1353,7 +1359,7 @@ impl AgentCore {
             &mut messages,
             &options,
             &self.tool_mode,
-            self.max_tool_rounds,
+            context.max_tool_rounds_override.unwrap_or(self.max_tool_rounds),
             tx,
             allowed_for_turn,
             &context.inject_tool_args,

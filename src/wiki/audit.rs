@@ -152,6 +152,27 @@ impl WikiAuditDb {
         Ok(out)
     }
 
+    /// Count how many times an op of this kind against this exact target path
+    /// has been recorded `failed` since `since`. Used by the extractor to stop
+    /// re-proposing a write that keeps getting blocked (e.g. an agent op on a
+    /// user-owned page) — without this, the same blocked write is retried every
+    /// turn indefinitely, spamming the audit DB and never succeeding.
+    pub fn count_recent_failures(
+        &self,
+        op_kind: &str,
+        target_path: &str,
+        since: DateTime<Utc>,
+    ) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM wiki_audit
+              WHERE status = 'failed' AND op_kind = ?1 AND target_path = ?2
+                AND created_at >= ?3",
+            params![op_kind, target_path, since.to_rfc3339()],
+            |row| row.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
     pub fn list_recent(&self, since: DateTime<Utc>, limit: usize) -> Result<Vec<WikiOpEnvelope>> {
         let mut stmt = self.conn.prepare(
             "SELECT op_id, scope, user_id, op_json, provenance, status, failure,
@@ -262,6 +283,39 @@ mod tests {
         let back = db.get(&op_id).unwrap().unwrap();
         assert_eq!(back.status, OpStatus::Applied);
         assert!(back.applied_at.is_some());
+    }
+
+    #[test]
+    fn count_recent_failures_scopes_to_kind_path_and_status() {
+        let dir = tempdir().unwrap();
+        let db = WikiAuditDb::open(&dir.path().join("wiki_u_fail.db")).unwrap();
+        let mk = || WikiOpEnvelope::new(
+            WikiScope::User("u4".into()),
+            WikiOp::AppendSection {
+                path: crate::wiki::WikiPath::parse("pages/companion/family.md").unwrap(),
+                section: "Notes".into(),
+                body: "x".into(),
+            },
+            Provenance::from_turn("extractor", "t", "c"),
+        );
+        // Two blocked appends to the same page → counted.
+        let (e1, e2) = (mk(), mk());
+        db.insert(&e1).unwrap(); db.mark_failed(&e1.op_id, "writer policy").unwrap();
+        db.insert(&e2).unwrap(); db.mark_failed(&e2.op_id, "writer policy").unwrap();
+        // A pending (not failed) op to the same page → not counted.
+        let e3 = mk(); db.insert(&e3).unwrap();
+
+        let since = Utc::now() - chrono::Duration::days(1);
+        assert_eq!(
+            db.count_recent_failures("append_section", "pages/companion/family.md", since).unwrap(),
+            2, "only the two failed appends count",
+        );
+        // Different op kind or path → 0 (the suppression is per (kind, path)).
+        assert_eq!(db.count_recent_failures("write_page", "pages/companion/family.md", since).unwrap(), 0);
+        assert_eq!(db.count_recent_failures("append_section", "pages/other.md", since).unwrap(), 0);
+        // A window that starts in the future excludes everything.
+        let future = Utc::now() + chrono::Duration::days(1);
+        assert_eq!(db.count_recent_failures("append_section", "pages/companion/family.md", future).unwrap(), 0);
     }
 
     #[test]

@@ -174,6 +174,8 @@ pub async fn dispatch_inbound(
         conversation_id:   Some(conv.id.clone()),
         // Email turns use a deliberate per-account allow-list — don't adapt it.
         tools_flow_restricted: true,
+        // Use the global tool-round cap.
+        max_tool_rounds_override: None,
     };
 
     // ── Run the agent ──────────────────────────────────────────────

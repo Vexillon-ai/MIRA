@@ -31,6 +31,7 @@ fn make_dispatcher(store: Arc<AutomationsStore>, data_dir: &TempDir) -> Arc<Disp
         history:       None,
         notifications: None,
         max_chain_depth: 0,
+        max_action_secs: 300,
         rate_limiter: None,
         auth: None,
         signal_port: None,
@@ -210,6 +211,7 @@ async fn unknown_internal_task_records_failure() {
         prompt: "x".into(),
         tools_allowed: None,
         max_iterations: 1,
+        max_action_secs: None,
     });
 }
 
@@ -238,6 +240,7 @@ async fn prompt_action_records_failure_until_slice2() {
             prompt: "hello".into(),
             tools_allowed: None,
             max_iterations: 1,
+            max_action_secs: None,
         }),
         expires_at:  None,
         status:      None,

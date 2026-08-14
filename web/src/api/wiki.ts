@@ -147,6 +147,20 @@ export const wikiApi = {
   /** Slice H — save a conversation as a wiki page. */
   saveThread: (conversation_id: string, opts?: { path?: string; title?: string; max_messages?: number }) =>
     api.post<OpView>('/api/wiki/save-thread', { conversation_id, ...opts }).then((r) => r.data),
+
+  /** Upload an image into the wiki; returns its embeddable `assets/…` path. */
+  uploadAsset: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post<AssetUploaded>('/api/wiki/asset', fd).then((r) => r.data)
+  },
+
+  /** Resolve an `assets/…` path to a servable URL for the user wiki. */
+  assetUrl: (path: string) => `/api/wiki/asset?path=${encodeURIComponent(path)}`,
+}
+
+export interface AssetUploaded {
+  path: string
 }
 
 // ── Git + import / export (Slice G) ──────────────────────────────────────────
@@ -235,5 +249,13 @@ export const wikiAdminApi = {
 
   reloadPrompt: () =>
     api.post<AdminReloadResponse>('/api/admin/wiki/reload-prompt').then((r) => r.data),
+
+  uploadAsset: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post<AssetUploaded>('/api/admin/wiki/asset', fd).then((r) => r.data)
+  },
+
+  assetUrl: (path: string) => `/api/admin/wiki/asset?path=${encodeURIComponent(path)}`,
 }
 

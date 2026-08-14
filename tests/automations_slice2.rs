@@ -35,6 +35,7 @@ fn make_dispatcher(store: Arc<AutomationsStore>, data_dir: &TempDir) -> Arc<Disp
         history:       None,
         notifications: None,
         max_chain_depth: 0,
+        max_action_secs: 300,
         rate_limiter: None,
         auth: None,
         signal_port: None,

@@ -741,6 +741,8 @@ fn build_onboarding_turn_context(
         // safety floor on (a distressed user mid-onboarding must still be met).
         suppress_safety_floor:  false,
         suppress_time_context:  false,
+        // Use the global tool-round cap.
+        max_tool_rounds_override: None,
     }
 }
 

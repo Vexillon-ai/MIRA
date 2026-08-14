@@ -687,6 +687,10 @@ pub fn build_router(
             // Slice H — save a chat thread as a wiki page.
             .route("/api/wiki/save-thread",
                    post(crate::server::handlers::wiki::save_thread))
+            // Embedded page images (per-user wiki).
+            .route("/api/wiki/asset",
+                   get(crate::server::handlers::wiki::get_wiki_asset)
+                   .post(crate::server::handlers::wiki::upload_wiki_asset))
             // System wiki (Slice F) — admin-only. Edits to persona.md
             // hot-reload the runtime system prompt, no restart needed.
             .route("/api/admin/wiki/pages",
@@ -703,6 +707,9 @@ pub fn build_router(
                    get(crate::server::handlers::wiki::admin_list_recent_ops))
             .route("/api/admin/wiki/reload-prompt",
                    post(crate::server::handlers::wiki::admin_reload_prompt))
+            .route("/api/admin/wiki/asset",
+                   get(crate::server::handlers::wiki::admin_get_wiki_asset)
+                   .post(crate::server::handlers::wiki::admin_upload_wiki_asset))
             // Companion mode — group-based family bridge.
             // Admin endpoints configure which groups relay companion
             // signals + per-member flags; user endpoints let each

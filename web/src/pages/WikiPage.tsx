@@ -3,11 +3,14 @@
 import { useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  BookOpen, Check, FileText, Inbox, Pencil, Plus, RefreshCw, Search, Settings2, Tag, Trash2, User as UserIcon, X,
+  BookOpen, Check, Eye, FileText, ImagePlus, Inbox, Pencil, Plus, RefreshCw, Search, Settings2, Tag, Trash2, User as UserIcon, X,
 } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import toast from 'react-hot-toast'
 import { useRef } from 'react'
+import ReactMarkdown, { type Components } from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import rehypeHighlight from 'rehype-highlight'
 import {
   wikiApi, wikiAdminApi, wikiGitApi,
   type OpView, type PageDetail, type WikiWriter, type GitStatus,
@@ -30,10 +33,60 @@ interface ScopedApi {
   putPage:      typeof wikiApi.putPage
   deletePage:   typeof wikiApi.deletePage
   listRecent:   typeof wikiApi.listRecent
+  uploadAsset:  typeof wikiApi.uploadAsset
+  assetUrl:     typeof wikiApi.assetUrl
 }
 
 function apiFor(scope: WikiScope): ScopedApi {
   return scope === 'system' ? wikiAdminApi : wikiApi
+}
+
+// ── Rich markdown renderer for wiki pages ─────────────────────────────────────
+
+/**
+ * URL policy for rendered wiki pages. Wiki bodies are markdown authored by the
+ * user OR extracted by the agent, so we allow only known-safe URL shapes:
+ * - a wiki-relative `assets/…` image (resolved to the scope's asset endpoint),
+ * - our same-origin asset/artifact endpoints,
+ * - absolute http(s) / mailto / tel.
+ * Everything else is dropped (react-markdown never renders raw HTML, and we do
+ * NOT add rehype-raw, so this + the built-in escaping is the whole attack
+ * surface). `data:` URIs are intentionally refused.
+ */
+function makeWikiUrlTransform(assetUrl: (path: string) => string) {
+  return (url: string): string => {
+    if (url.startsWith('assets/')) return assetUrl(url)
+    if (url.startsWith('/api/wiki/asset') || url.startsWith('/api/admin/wiki/asset')) return url
+    if (url.startsWith('/api/artifacts/')) return url
+    if (/^(https?:|mailto:|tel:)/.test(url)) return url
+    return ''
+  }
+}
+
+const WikiMarkdownLink: Components['a'] = ({ href, children, node: _node, ...props }) => (
+  <a href={href} target="_blank" rel="noreferrer noopener" {...props}>{children}</a>
+)
+
+function WikiMarkdown({ body, assetUrl }: { body: string; assetUrl: (path: string) => string }) {
+  const urlTransform = useMemo(() => makeWikiUrlTransform(assetUrl), [assetUrl])
+  if (!body.trim()) {
+    return <div className={styles.emptyHint}>This page is empty.</div>
+  }
+  return (
+    <div className={styles.rendered}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeHighlight]}
+        urlTransform={urlTransform}
+        components={{
+          a: WikiMarkdownLink,
+          img: ({ node: _node, ...props }) => <img loading="lazy" {...props} />,
+        }}
+      >
+        {body}
+      </ReactMarkdown>
+    </div>
+  )
 }
 
 function tabLabel(tab: Tab, count: number | null) {
@@ -265,6 +318,11 @@ function PageEditor({ qc, scope, mode, path, onClose, onSaved, onDeleted }: Edit
   const [writer, setWriter] = useState<WikiWriter>('user')
   const [body, setBody] = useState('')
   const [editingMeta, setEditingMeta] = useState(false)
+  // Existing pages open in rendered "view" mode; new pages open in "edit".
+  const [viewMode, setViewMode] = useState<'view' | 'edit'>(isEdit ? 'view' : 'edit')
+  const bodyRef = useRef<HTMLTextAreaElement>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
+  const [uploading, setUploading] = useState(false)
 
   // Hydrate state when the page loads.
   useMemo(() => {
@@ -312,6 +370,45 @@ function PageEditor({ qc, scope, mode, path, onClose, onSaved, onDeleted }: Edit
       toast.error(msg ?? 'Delete failed')
     },
   })
+
+  // Insert markdown at the textarea caret (falls back to appending).
+  const insertAtCursor = (snippet: string) => {
+    const el = bodyRef.current
+    if (!el) { setBody((b) => b + snippet); return }
+    const start = el.selectionStart ?? body.length
+    const end = el.selectionEnd ?? body.length
+    setBody(body.slice(0, start) + snippet + body.slice(end))
+    requestAnimationFrame(() => {
+      el.focus()
+      const pos = start + snippet.length
+      el.setSelectionRange(pos, pos)
+    })
+  }
+
+  const uploadImage = async (file: File) => {
+    if (!file.type.startsWith('image/')) { toast.error('Only image files can be embedded'); return }
+    setUploading(true)
+    try {
+      const { path } = await scopedApi.uploadAsset(file)
+      const alt = file.name.replace(/\.[^.]+$/, '') || 'image'
+      insertAtCursor(`\n![${alt}](${path})\n`)
+      toast.success('Image inserted')
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
+      toast.error(msg ?? 'Image upload failed')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const onBodyPaste = (e: React.ClipboardEvent) => {
+    const img = Array.from(e.clipboardData.files).find((f) => f.type.startsWith('image/'))
+    if (img) { e.preventDefault(); void uploadImage(img) }
+  }
+  const onBodyDrop = (e: React.DragEvent) => {
+    const img = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith('image/'))
+    if (img) { e.preventDefault(); void uploadImage(img) }
+  }
 
   if (isEdit && isLoading) return <div className={styles.emptyHint}>Loading page…</div>
 
@@ -368,6 +465,24 @@ function PageEditor({ qc, scope, mode, path, onClose, onSaved, onDeleted }: Edit
         </div>
 
         <div className={styles.editorActions}>
+          <div className={styles.viewToggle} role="tablist" aria-label="View or edit">
+            <button
+              className={styles.viewToggleBtn}
+              data-active={viewMode === 'view'}
+              onClick={() => setViewMode('view')}
+              title="Rendered view"
+            >
+              <Eye size={12} /> View
+            </button>
+            <button
+              className={styles.viewToggleBtn}
+              data-active={viewMode === 'edit'}
+              onClick={() => setViewMode('edit')}
+              title="Edit markdown"
+            >
+              <Pencil size={12} /> Edit
+            </button>
+          </div>
           {isEdit && !editingMeta && (
             <button className={styles.iconBtn} onClick={() => setEditingMeta(true)} title="Edit metadata">
               <Pencil size={13} />
@@ -391,12 +506,50 @@ function PageEditor({ qc, scope, mode, path, onClose, onSaved, onDeleted }: Edit
         </div>
       </div>
 
-      <textarea
-        className={styles.bodyTextarea}
-        placeholder="# Markdown body…"
-        value={body}
-        onChange={(e) => setBody(e.target.value)}
-      />
+      {viewMode === 'view' ? (
+        <div className={styles.viewPane}>
+          <WikiMarkdown body={body} assetUrl={scopedApi.assetUrl} />
+        </div>
+      ) : (
+        <div className={styles.editPane}>
+          <div className={styles.editToolbar}>
+            <button
+              className={styles.toolbarBtn}
+              onClick={() => fileRef.current?.click()}
+              disabled={uploading}
+              title="Insert an image (or paste / drop one into the editor)"
+            >
+              <ImagePlus size={13} /> {uploading ? 'Uploading…' : 'Insert image'}
+            </button>
+            <span className={styles.toolbarHint}>Markdown · paste or drop an image to embed it</span>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) void uploadImage(f)
+                e.target.value = ''
+              }}
+            />
+          </div>
+          <div className={styles.editSplit}>
+            <textarea
+              ref={bodyRef}
+              className={styles.bodyTextarea}
+              placeholder="# Markdown body…"
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              onPaste={onBodyPaste}
+              onDrop={onBodyDrop}
+            />
+            <div className={styles.previewPane}>
+              <WikiMarkdown body={body} assetUrl={scopedApi.assetUrl} />
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className={styles.editorFooter}>
         {page?.provenance && page.provenance.length > 0 && (

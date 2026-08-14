@@ -169,7 +169,11 @@ fn action_schema() -> Value {
             "max_iterations": {
                 "type": "integer",
                 "default": 10,
-                "description": "[kind=prompt] Max tool-loop rounds. Default 10."
+                "description": "[kind=prompt] Max tool-loop rounds for the fired turn. Default 10. Raise for research tasks that need many search→fetch→write rounds before they can call their wiki-write tool."
+            },
+            "max_action_secs": {
+                "type": "integer",
+                "description": "[kind=prompt] Optional wall-clock ceiling (seconds) for this action, overriding the global automations.max_action_secs (300). Set higher (e.g. 900) for a multi-cycle research task that legitimately runs ~15 min."
             },
 
             // ── Action::ToolCall fields ──────────────────────────────

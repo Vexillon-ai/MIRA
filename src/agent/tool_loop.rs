@@ -1822,6 +1822,69 @@ Nice to meet you!
         assert_eq!(content, "degraded reply");
     }
 
+    #[tokio::test]
+    async fn max_rounds_caps_the_number_of_tool_rounds() {
+        // Guards the automations iteration budget. PromptAction.max_iterations
+        // flows (via TurnContext.max_tool_rounds_override) into this max_rounds
+        // param, so a research task granted N rounds gets exactly N
+        // search→fetch→write rounds before the loop forces a final reply. This
+        // is the fix for "does searches, never writes": a global 8-round cap was
+        // spent on web_search/web_fetch before the wiki-write call could happen.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Emits a tool call (unique args per round, so cross-round dedup never
+        // suppresses it) for as long as the loop offers tools; answers plainly
+        // once the loop drops tools for its final nudge.
+        struct LoopingProvider { tool_rounds: AtomicUsize }
+        #[async_trait::async_trait]
+        impl ModelProvider for LoopingProvider {
+            fn name(&self) -> &str { "looping" }
+            async fn generate(&self, _msgs: &[ChatMessage], opts: &GenerationOptions)
+                -> Result<GenerationResponse, MiraError>
+            {
+                let tool_calls = if opts.tools.is_some() {
+                    let n = self.tool_rounds.fetch_add(1, Ordering::SeqCst);
+                    Some(vec![crate::types::ToolCall::new(
+                        "noop", serde_json::json!({ "round": n }),
+                    )])
+                } else {
+                    None
+                };
+                Ok(GenerationResponse {
+                    content:     if tool_calls.is_some() { String::new() } else { "final answer".into() },
+                    tool_calls,
+                    reasoning:   None,
+                    usage:       TokenUsage::default(),
+                    provider_id: ProviderId::Local("looping".into()),
+                    model_name:  "looping".into(),
+                    fallback:    None,
+                })
+            }
+            async fn health_check(&self) -> bool { true }
+        }
+
+        let looping = Arc::new(LoopingProvider { tool_rounds: AtomicUsize::new(0) });
+        let provider: Arc<dyn ModelProvider> = looping.clone();
+        let tools = Arc::new(registry_with(StubTool { name: "noop", reply: ToolResult::success("{}") }));
+        let mut messages = vec![ChatMessage::user("do multi-round research")];
+        let opts = GenerationOptions::default();
+        let (tx, mut rx) = mpsc::channel(64);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        const N: usize = 3;
+        let (content, _usage) = run_tool_loop(
+            &provider, &tools, &mut messages, &opts, &ToolMode::Auto, N, &tx,
+        ).await.expect("loop must degrade to a final reply, not error");
+        drop(tx);
+        let _ = drain.await;
+
+        assert_eq!(content, "final answer");
+        assert_eq!(
+            looping.tool_rounds.load(Ordering::SeqCst), N,
+            "loop must run exactly max_rounds={N} tool rounds before the final reply",
+        );
+    }
+
     fn engineless_registry() -> Arc<ToolRegistry> {
         Arc::new(ToolRegistry::new())
     }

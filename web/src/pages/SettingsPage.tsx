@@ -3,7 +3,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload, Trash2, Wrench, RotateCcw, Loader2, Calendar as CalendarIcon, RefreshCw, Shield, ShieldAlert, Volume2, ChevronDown, Bell, Image as ImageIcon } from 'lucide-react'
+import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload, Trash2, Wrench, RotateCcw, Loader2, Calendar as CalendarIcon, RefreshCw, Shield, ShieldAlert, Volume2, ChevronDown, Bell, Image as ImageIcon, BookText } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { api } from '@/api/client'
 import UpdatesCard from '@/components/UpdatesCard'
@@ -124,6 +124,17 @@ interface Config {
       day_lag_days?:          number
       max_messages?:          number
       max_chars_per_message?: number
+    }
+  }
+  wiki?: {
+    auto_extract?: {
+      mode?:             'review' | 'auto' | 'off'
+      min_confidence?:   number
+      max_ops_per_turn?: number
+      auto_apply_above?: number | null
+    }
+    agent_tools?: {
+      write_mode?: 'review' | 'auto' | 'off'
     }
   }
   server?: {
@@ -334,7 +345,7 @@ function setPath(obj: Config, path: string, value: unknown): Config {
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
-type TabId = 'appearance' | 'providers' | 'agent' | 'tools' | 'sandbox' | 'channels' | 'memory' | 'calendar' | 'voice' | 'image' | 'notifications' | 'guardian' | 'server' | 'advanced'
+type TabId = 'appearance' | 'providers' | 'agent' | 'tools' | 'sandbox' | 'channels' | 'memory' | 'wiki' | 'calendar' | 'voice' | 'image' | 'notifications' | 'guardian' | 'server' | 'advanced'
 
 const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: 'appearance', label: 'Appearance', icon: <Palette size={14} /> },
@@ -344,6 +355,7 @@ const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: 'sandbox',    label: 'Sandbox',    icon: <Shield size={14} />  },
   { id: 'channels',   label: 'Channels',   icon: <Radio size={14} />   },
   { id: 'memory',     label: 'Memory',     icon: <Database size={14} />},
+  { id: 'wiki',       label: 'Wiki',       icon: <BookText size={14} /> },
   { id: 'calendar',   label: 'Calendar',   icon: <CalendarIcon size={14} /> },
   { id: 'voice',      label: 'Voice',      icon: <Volume2 size={14} /> },
   { id: 'image',      label: 'Image & Video', icon: <ImageIcon size={14} /> },
@@ -1048,6 +1060,9 @@ export default function SettingsPage() {
         {tab === 'memory' && (
           <MemoryTab set={set} str={str} num={num} bool={bool} draft={draft} />
         )}
+        {tab === 'wiki' && (
+          <WikiTab set={set} str={str} num={num} draft={draft} />
+        )}
         {tab === 'calendar' && (
           <CalendarTab set={set} str={str} num={num} bool={bool} isAdmin={isAdmin} />
         )}
@@ -1751,6 +1766,80 @@ function AppearanceAgentSection() {
 }
 
 // ── Agent tab ─────────────────────────────────────────────────────────────────
+
+function WikiTab({
+  set, str, num, draft,
+}: {
+  set: (p: string, v: unknown) => void
+  str: (p: string, fb?: string) => string
+  num: (p: string, fb?: number) => number
+  draft: Config
+}) {
+  // `auto_apply_above` is null (review every write) or a threshold (auto-apply
+  // writes at/above it). We surface that as a toggle + a threshold field so the
+  // null state is discoverable rather than a bare number the user must clear.
+  const autoApply = draft.wiki?.auto_extract?.auto_apply_above
+  const autoApplyEnabled = typeof autoApply === 'number'
+  return (
+    <div className={styles.tabBody}>
+      <Section title="Auto-extraction & review gate">
+        <p className={styles.sectionDesc}>
+          After each conversation, MIRA's extractor proposes updates to your wiki
+          (new facts, project notes, people). This is the gate that decides
+          whether those proposals apply immediately or wait in a review queue for
+          your approval — so if MIRA's findings ever seem to "vanish", this is
+          where they're waiting.
+        </p>
+        <Field label="Extraction mode" desc="'Review' (recommended) queues every proposed write for your approval — MIRA never silently rewrites your wiki. 'Auto' applies proposals immediately. 'Off' turns extraction off entirely (pages you write by hand still feed chat).">
+          <SelectInput
+            value={str('wiki.auto_extract.mode', 'review')}
+            onChange={(v) => set('wiki.auto_extract.mode', v)}
+            options={[
+              { value: 'review', label: 'Review (recommended)' },
+              { value: 'auto',   label: 'Auto-apply' },
+              { value: 'off',    label: 'Off' },
+            ]}
+          />
+        </Field>
+        <Field label="Minimum confidence" desc="Extractor candidates scoring below this [0–1] are dropped before they reach the queue. Default 0.6.">
+          <NumberInput value={num('wiki.auto_extract.min_confidence', 0.6)} onChange={(v) => set('wiki.auto_extract.min_confidence', v)} min={0} max={1} step={0.05} />
+        </Field>
+        <Field label="Max updates per turn" desc="Cap on how many wiki updates the extractor may propose per conversation turn, so the wiki doesn't get noisy on busy days. Default 3.">
+          <NumberInput value={num('wiki.auto_extract.max_ops_per_turn', 3)} onChange={(v) => set('wiki.auto_extract.max_ops_per_turn', v)} min={1} max={50} />
+        </Field>
+        <Field label="Auto-apply confident writes" desc="In Review mode, apply high-confidence extractions immediately and queue only the uncertain ones — the middle ground between reviewing everything and trusting everything. Turn OFF to review every single write.">
+          <Toggle
+            value={autoApplyEnabled}
+            onChange={(on) => set('wiki.auto_extract.auto_apply_above', on ? 0.7 : null)}
+          />
+        </Field>
+        {autoApplyEnabled && (
+          <Field label="Auto-apply threshold" desc="In Review mode, extractions scoring at or above this [0–1] apply immediately; everything below still waits for review. Default 0.7.">
+            <NumberInput value={num('wiki.auto_extract.auto_apply_above', 0.7)} onChange={(v) => set('wiki.auto_extract.auto_apply_above', v)} min={0} max={1} step={0.05} />
+          </Field>
+        )}
+      </Section>
+      <Section title="Agent wiki writes">
+        <p className={styles.sectionDesc}>
+          Controls the model's own wiki-write tool (distinct from the post-turn
+          extractor above). Search and read are always available; this gates only
+          writes.
+        </p>
+        <Field label="Write mode" desc="'Review' queues the model's wiki writes for your approval, 'Auto' applies them immediately, 'Off' makes the wiki read-only to the model.">
+          <SelectInput
+            value={str('wiki.agent_tools.write_mode', 'review')}
+            onChange={(v) => set('wiki.agent_tools.write_mode', v)}
+            options={[
+              { value: 'review', label: 'Review (recommended)' },
+              { value: 'auto',   label: 'Auto-apply' },
+              { value: 'off',    label: 'Off (read-only)' },
+            ]}
+          />
+        </Field>
+      </Section>
+    </div>
+  )
+}
 
 function AgentTab({
   set, str, num, bool, isAdmin,

@@ -356,10 +356,13 @@ pub struct WikiAutoExtractConfig {
     pub max_ops_per_turn: usize,
     /// In `mode="review"`, ops with extractor confidence at or above this
     /// threshold are applied immediately (skip the review queue); the rest
-    /// still land as pending. `None` (default) preserves the old behaviour —
-    /// every extracted op waits for review. Ignored when `mode` is `"auto"`
-    /// (everything applies) or `"off"` (nothing extracts).
-    #[serde(default)]
+    /// still land as pending. Defaults to `0.7` — confident extractions apply
+    /// while uncertain ones still queue, so the review queue shrinks to the
+    /// genuinely doubtful ops instead of gating every write. An explicit `null`
+    /// restores the old "review everything" behaviour (existing configs that
+    /// wrote `null` are unaffected — the default only applies when the key is
+    /// absent). Ignored when `mode` is `"auto"` (everything applies) or `"off"`.
+    #[serde(default = "default_wiki_auto_apply_above")]
     pub auto_apply_above: Option<f32>,
 }
 
@@ -369,7 +372,7 @@ impl Default for WikiAutoExtractConfig {
             mode: default_wiki_extract_mode(),
             min_confidence: default_wiki_min_confidence(),
             max_ops_per_turn: default_wiki_max_ops_per_turn(),
-            auto_apply_above: None,
+            auto_apply_above: default_wiki_auto_apply_above(),
         }
     }
 }
@@ -377,6 +380,7 @@ impl Default for WikiAutoExtractConfig {
 fn default_wiki_extract_mode() -> String { "review".to_string() }
 fn default_wiki_min_confidence() -> f32 { 0.6 }
 fn default_wiki_max_ops_per_turn() -> usize { 3 }
+fn default_wiki_auto_apply_above() -> Option<f32> { Some(0.7) }
 
 // ── Provider configs ─────────────────────────────────────────────────────────
 
@@ -3367,6 +3371,16 @@ pub struct AutomationsConfig {
     #[serde(default = "default_max_chain_depth")]
     pub max_chain_depth: u32,
 
+    // Wall-clock ceiling (seconds) on a single automation action before the
+    // dispatcher aborts it and records a failure. Default 300. A `Prompt`
+    // action can raise its own ceiling via `PromptAction.max_action_secs` (a
+    // multi-cycle research task legitimately needs ~15 min of search→fetch→
+    // write); this is the fallback for every action kind that doesn't set one.
+    // Actions run off the tick loop (spawned), so a long one no longer blocks
+    // sibling schedules or the next tick — see automations::worker.
+    #[serde(default = "default_max_action_secs")]
+    pub max_action_secs: u64,
+
     // Per-channel cap on `channel_message` actions per minute, scoped to
     // the row's owning user. Spam guard for both user-authored and
     // agent-authored automations. Map keys are channel ids
@@ -3393,6 +3407,7 @@ impl Default for AutomationsConfig {
             agent_creates_pending:    true,
             agent_rationale_required: true,
             max_chain_depth:          default_max_chain_depth(),
+            max_action_secs:          default_max_action_secs(),
             channel_rate_limits:      default_channel_rate_limits(),
             watchdog:                 WatchdogConfig::default(),
         }
@@ -3542,6 +3557,7 @@ fn default_quota_schedules()  -> usize { 50 }
 fn default_quota_webhooks()   -> usize { 20 }
 fn default_quota_event_subs() -> usize { 50 }
 fn default_max_chain_depth()  -> u32   { 5  }
+fn default_max_action_secs()  -> u64   { 300 }
 
 // ── Default helpers ───────────────────────────────────────────────────────────
 

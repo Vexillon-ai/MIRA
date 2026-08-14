@@ -270,7 +270,32 @@ pub async fn run_wiki_extraction(
     let auto_all = cfg.mode.eq_ignore_ascii_case("auto");
     let mut applied = 0usize;
     let mut pending = 0usize;
+    let mut suppressed = 0usize;
+    // Stop re-proposing a write that has already been blocked this many times
+    // for the same (op_kind, target_path) within the window. The extractor is
+    // stateless per turn, so without this it re-proposes the same blocked op
+    // (e.g. an agent write to a user-owned page) every turn forever — the audit
+    // DB showed 14 identical blocked appends to one page over two weeks. The
+    // last `SUPPRESS_AFTER` failures stay in the audit DB (surfaced via
+    // /api/wiki/ops with their failure reason) so the user can still see it.
+    const SUPPRESS_AFTER: usize = 3;
+    let window_start = chrono::Utc::now() - chrono::Duration::days(14);
     for (op, confidence) in ops {
+        let (op_kind, target_path) = (op.kind().to_string(), op.target_path().to_string());
+        // Skip an op whose (kind, target) keeps getting blocked — re-proposing
+        // it would only fail again and spam the audit trail.
+        match wiki.recent_failure_count(&op_kind, &target_path, window_start) {
+            Ok(n) if n >= SUPPRESS_AFTER => {
+                suppressed += 1;
+                debug!(
+                    "wiki post_hook: suppressing {op_kind} on '{target_path}' \
+                     ({n} prior failures ≥ {SUPPRESS_AFTER}) for {user_id}"
+                );
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) => warn!("wiki post_hook: failure-count lookup failed (non-fatal): {e}"),
+        }
         let prov = Provenance::from_turn("extractor", &turn_id, &conversation_id);
         let auto = auto_all
             || cfg.auto_apply_above.is_some_and(|t| confidence >= t);
@@ -285,10 +310,10 @@ pub async fn run_wiki_extraction(
             Err(e) => warn!("wiki post_hook: submit failed: {e}"),
         }
     }
-    if applied + pending > 0 {
+    if applied + pending + suppressed > 0 {
         info!(
-            "wiki post_hook: user='{}' mode='{}' auto_apply_above={:?} applied={} pending={}",
-            user_id, cfg.mode, cfg.auto_apply_above, applied, pending
+            "wiki post_hook: user='{}' mode='{}' auto_apply_above={:?} applied={} pending={} suppressed={}",
+            user_id, cfg.mode, cfg.auto_apply_above, applied, pending, suppressed
         );
     }
 }
@@ -324,6 +349,57 @@ mod tests {
             ).unwrap();
         }
         (dir, wiki)
+    }
+
+    #[tokio::test]
+    async fn blocked_agent_writes_accumulate_a_suppression_signal() {
+        // End-to-end for item 5: an extractor (agent) write to a user-owned
+        // page is blocked by writer policy and recorded as `failed`. After
+        // enough identical blocks, recent_failure_count crosses the extractor's
+        // suppression threshold, so the op stops being re-proposed — the fix
+        // for the 14 identical blocked appends to one page over two weeks.
+        let (_dir, wiki) = wiki_with(&[]).await;
+        // Seed a USER-owned page (default frontmatter writer is `Both`, which
+        // would allow the agent write — the block only happens on a user page).
+        wiki.submit_and_apply(
+            WikiOp::WritePage {
+                path: WikiPath::parse("pages/companion/family.md").unwrap(),
+                frontmatter: PageFrontmatter {
+                    writer: crate::wiki::frontmatter::Writer::User,
+                    ..Default::default()
+                },
+                body: "# Family\n## Notes\nuser content\n".into(),
+            },
+            Provenance::user_ui("u1"),
+        ).unwrap();
+
+        let window = chrono::Utc::now() - chrono::Duration::days(14);
+        // No failures yet.
+        assert_eq!(
+            wiki.recent_failure_count("append_section", "pages/companion/family.md", window).unwrap(),
+            0,
+        );
+
+        // Three agent appends to the user-owned page — each blocked + recorded.
+        for _ in 0..3 {
+            let res = wiki.submit_and_apply_conf(
+                WikiOp::AppendSection {
+                    path: WikiPath::parse("pages/companion/family.md").unwrap(),
+                    section: "Notes".into(),
+                    body: "agent-derived note".into(),
+                },
+                Provenance::from_turn("extractor", "t", "c"),
+                Some(0.9),
+            );
+            assert!(res.is_err(), "agent write to a user page must be blocked");
+        }
+
+        // The suppression signal now reads 3 (≥ the extractor's SUPPRESS_AFTER),
+        // so run_wiki_extraction would skip re-proposing this op.
+        assert_eq!(
+            wiki.recent_failure_count("append_section", "pages/companion/family.md", window).unwrap(),
+            3,
+        );
     }
 
     #[tokio::test]

@@ -1127,6 +1127,11 @@
           "type": "integer",
           "minimum": 1
         },
+        "max_action_secs": {
+          "description": "Wall-clock ceiling in seconds on a single automation action before it is aborted and recorded as a failure. Default 300. A prompt action can raise its own ceiling with max_action_secs on the action; this is the fallback for actions that don't set one. Raise it for long multi-cycle research automations that need roughly 15 minutes of search, fetch and write per run. Actions run off the tick loop, so a long one does not delay other schedules.",
+          "type": "integer",
+          "minimum": 1
+        },
         "channel_rate_limits": {
           "description": "Per-channel cap on channel_message actions per minute, scoped to the row's owning user. Keys are channel ids ('web', 'signal', 'telegram', 'email'); the special key '*' is the fallback. A value of 0 disables the limit for that channel.",
           "type": "object",
@@ -1887,7 +1892,7 @@
               "minimum": 1
             },
             "auto_apply_above": {
-              "description": "In mode='review', ops with extractor confidence at or above this threshold [0.0, 1.0] are applied immediately instead of waiting in the review queue; lower-confidence ops still land as pending. Omit/null (default) to require review for every extracted op. Ignored when mode is 'auto' or 'off'.",
+              "description": "In mode='review', ops with extractor confidence at or above this threshold [0.0, 1.0] are applied immediately instead of waiting in the review queue; lower-confidence ops still land as pending. Defaults to 0.7 so confident extractions apply while uncertain ones still queue. Set to null to require review for every extracted op (the old behaviour; configs that already wrote null keep it). Ignored when mode is 'auto' or 'off'.",
               "type": ["number", "null"],
               "minimum": 0.0,
               "maximum": 1.0

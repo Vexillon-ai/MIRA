@@ -1542,6 +1542,7 @@ impl GatewayBuilder {
                         history:       history.clone(),
                         notifications: Some(Arc::clone(&notification_bus)),
                         max_chain_depth: config.automations.max_chain_depth,
+                        max_action_secs: config.automations.max_action_secs,
                         rate_limiter:    Some(rate_limiter),
                         // Outbound bridge — Signal delivery for `Action::Prompt`
                         // and `Action::ChannelMessage` with channel=signal. The

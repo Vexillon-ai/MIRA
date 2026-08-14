@@ -57,7 +57,15 @@ impl Worker {
             ticker.tick().await;
             loop {
                 ticker.tick().await;
-                self.run_once().await;
+                // Spawn the pass OFF the tick loop so one long-running action
+                // (a multi-cycle research prompt that legitimately runs ~15 min)
+                // cannot delay the next tick. Overlapping passes are safe:
+                // `claim_due` atomically NUL-marks each claimed row's
+                // `next_run_at`, so a later pass never re-claims a row whose
+                // action is still in flight. The handle is intentionally
+                // dropped (detached) — outcomes are persisted inside run_once.
+                let me = Arc::clone(&self);
+                tokio::spawn(async move { me.run_once().await; });
             }
         })
     }
@@ -132,7 +140,7 @@ impl Worker {
     // One pass: claim due rows, run them, persist outcomes. Public so
     // tests and `/api/automations/{id}/run-now` can drive a
     // tick without waiting on the timer.
-    pub async fn run_once(&self) {
+    pub async fn run_once(self: &Arc<Self>) {
         let now = Utc::now().timestamp();
         let due = match self.store.claim_due(now, PER_TICK_LIMIT) {
             Ok(rows) => rows,
@@ -141,8 +149,21 @@ impl Worker {
         if due.is_empty() { return; }
         debug!("automations: claimed {} due schedule(s)", due.len());
 
+        // Run the claimed rows CONCURRENTLY, not sequentially: a single slow
+        // action must not delay its siblings in the same batch. `claim_due`
+        // already NUL-marked each row's next_run_at, so none can be
+        // double-claimed while in flight; run_one restores next_run_at when it
+        // finishes. We await the whole set, so callers (tests, the tick pass)
+        // still observe every outcome before returning.
+        let mut set = tokio::task::JoinSet::new();
         for sched in due {
-            self.run_one(sched, now).await;
+            let me = Arc::clone(self);
+            set.spawn(async move { me.run_one(sched, now).await; });
+        }
+        while let Some(res) = set.join_next().await {
+            if let Err(e) = res {
+                warn!("automations: run_one task failed to join: {e}");
+            }
         }
     }
 

@@ -1069,6 +1069,134 @@ pub async fn import_tarball(
     }))
 }
 
+// ── Page image assets (embedded graphics) ────────────────────────────────────
+//
+// Images embedded in a page live in the wiki's own `assets/` dir (git-portable),
+// content-addressed. Pages reference them with a wiki-relative
+// `![alt](assets/<sha>.<ext>)` markdown link; the web UI's renderer resolves
+// that to the matching GET endpoint for the page's scope, so the stored markdown
+// stays portable and the same image is served for user and system wikis alike.
+
+/// 10 MiB ceiling on an embedded image. Wikis are meant to stay lightweight;
+/// this fits screenshots/diagrams while stopping someone stuffing a video in.
+const WIKI_ASSET_MAX_BYTES: usize = 10 * 1024 * 1024;
+
+#[derive(Debug, Serialize)]
+pub struct AssetUploaded {
+    /// Wiki-relative path to embed, e.g. `assets/<sha>.png`.
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AssetQuery {
+    pub path: String,
+}
+
+/// Pull one image field out of a multipart upload and validate it. Returns the
+/// bytes + a normalised extension, or an error response. SVG is deliberately
+/// excluded (it can carry script) — same allow-list as avatar uploads.
+async fn read_image_field(
+    mut multipart: Multipart,
+) -> Result<(Vec<u8>, &'static str), (StatusCode, Json<serde_json::Value>)> {
+    let field = match multipart.next_field().await {
+        Ok(Some(f)) => f,
+        Ok(None)    => return Err(err(StatusCode::BAD_REQUEST, "no file field")),
+        Err(e)      => return Err(err(StatusCode::BAD_REQUEST, format!("multipart error: {e}"))),
+    };
+    let ct = field.content_type().map(|s| s.to_owned()).unwrap_or_default();
+    let bytes = field.bytes().await
+        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("read error: {e}")))?;
+    if bytes.len() > WIKI_ASSET_MAX_BYTES {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "image exceeds 10 MiB"));
+    }
+    let ext = match ct.as_str() {
+        "image/png"                => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp"               => "webp",
+        "image/gif"                => "gif",
+        _ => return Err(err(StatusCode::UNSUPPORTED_MEDIA_TYPE, "use png, jpeg, webp, or gif")),
+    };
+    Ok((bytes.to_vec(), ext))
+}
+
+fn asset_content_type(ext: &str) -> &'static str {
+    match ext {
+        "png"          => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp"         => "image/webp",
+        "gif"          => "image/gif",
+        _              => "application/octet-stream",
+    }
+}
+
+/// Serve an `assets/<name>` image out of a wiki. `read_asset` enforces that the
+/// path is a single safe segment under `assets/` (no traversal). Served
+/// `nosniff` + long-cache-immutable (content-addressed names never change).
+fn serve_wiki_asset(wiki: &WikiSystem, rel: &str) -> axum::response::Response {
+    match wiki.store().read_asset(rel) {
+        Ok(bytes) => {
+            let ext = rel.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE,
+                HeaderValue::from_static(asset_content_type(&ext)));
+            headers.insert(header::CACHE_CONTROL,
+                HeaderValue::from_static("private, max-age=31536000, immutable"));
+            headers.insert(header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"));
+            (headers, Body::from(bytes)).into_response()
+        }
+        Err(_) => err(StatusCode::NOT_FOUND, "asset not found").into_response(),
+    }
+}
+
+/// POST /api/wiki/asset — upload an image into the caller's wiki.
+pub async fn upload_wiki_asset(
+    AuthUser(me): AuthUser,
+    Extension(agent): Extension<Arc<AgentCore>>,
+    multipart: Multipart,
+) -> axum::response::Response {
+    let wiki = match user_wiki(&agent, &me.id) { Ok(w) => w, Err(e) => return e.into_response() };
+    let (bytes, ext) = match read_image_field(multipart).await { Ok(v) => v, Err(e) => return e.into_response() };
+    match wiki.store().save_asset(&bytes, ext) {
+        Ok(path) => Json(AssetUploaded { path }).into_response(),
+        Err(e)   => err(StatusCode::INTERNAL_SERVER_ERROR, format!("save asset: {e}")).into_response(),
+    }
+}
+
+/// GET /api/wiki/asset?path=assets/<name> — serve an image from the caller's wiki.
+pub async fn get_wiki_asset(
+    AuthUser(me): AuthUser,
+    Extension(agent): Extension<Arc<AgentCore>>,
+    Query(q): Query<AssetQuery>,
+) -> axum::response::Response {
+    let wiki = match user_wiki(&agent, &me.id) { Ok(w) => w, Err(e) => return e.into_response() };
+    serve_wiki_asset(&wiki, &q.path)
+}
+
+/// POST /api/admin/wiki/asset — upload an image into the system wiki (admin).
+pub async fn admin_upload_wiki_asset(
+    _admin: AdminUser,
+    Extension(agent): Extension<Arc<AgentCore>>,
+    multipart: Multipart,
+) -> axum::response::Response {
+    let wiki = match system_wiki(&agent) { Ok(w) => w, Err(e) => return e.into_response() };
+    let (bytes, ext) = match read_image_field(multipart).await { Ok(v) => v, Err(e) => return e.into_response() };
+    match wiki.store().save_asset(&bytes, ext) {
+        Ok(path) => Json(AssetUploaded { path }).into_response(),
+        Err(e)   => err(StatusCode::INTERNAL_SERVER_ERROR, format!("save asset: {e}")).into_response(),
+    }
+}
+
+/// GET /api/admin/wiki/asset?path=assets/<name> — serve a system-wiki image (admin).
+pub async fn admin_get_wiki_asset(
+    _admin: AdminUser,
+    Extension(agent): Extension<Arc<AgentCore>>,
+    Query(q): Query<AssetQuery>,
+) -> axum::response::Response {
+    let wiki = match system_wiki(&agent) { Ok(w) => w, Err(e) => return e.into_response() };
+    serve_wiki_asset(&wiki, &q.path)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
