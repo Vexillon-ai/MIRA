@@ -384,6 +384,17 @@ pub struct EnableCompanionRequest {
     pub briefing_hour: Option<u8>,
 }
 
+/// Resolve the effective safety contact for an enable request. An explicit,
+/// non-blank contact in the request takes precedence; otherwise fall back to
+/// one already persisted on the user's row. `None` only when neither is set.
+fn effective_safety_contact(requested: Option<&str>, existing: Option<&str>) -> Option<String> {
+    requested
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| existing.map(String::from))
+}
+
 pub async fn enable_companion(
     AuthUser(me):     AuthUser,
     Extension(agent): Extension<Arc<AgentCore>>,
@@ -394,14 +405,21 @@ pub async fn enable_companion(
         "companion feature not enabled on this server",
     ))?;
 
-    // Normalise the safety contact: blank → None.
-    let safety: Option<String> = body.safety_contact_user_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    // Resolve the effective safety contact: an explicit one in this request
+    // wins, but otherwise fall back to one already persisted on the row (e.g.
+    // set via a prior PUT /api/me/companion). Without this fallback a two-step
+    // "save the contact, then enable" flow — exactly what the setup wizard does
+    // — would be rejected even though the contact is on file, and passing None
+    // to `enable()` would additionally *wipe* the stored contact.
+    let existing = sys.store().get(&me.id)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("load: {e}")))?;
+    let safety: Option<String> = effective_safety_contact(
+        body.safety_contact_user_id.as_deref(),
+        existing.as_ref().and_then(|s| s.safety_contact_user_id.as_deref()),
+    );
 
-    // Mirror `companion_enable`: a non-admin must name a safety contact.
+    // Mirror `companion_enable`: a non-admin must have a safety contact — from
+    // this request or already on file.
     if safety.is_none() && me.role != crate::auth::Role::Admin {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -811,6 +829,33 @@ mod tests {
     use super::*;
     use crate::companion::groups::CompanionGroupStore;
     use tempfile::tempdir;
+
+    #[test]
+    fn effective_safety_contact_prefers_request_then_falls_back_to_stored() {
+        // Explicit request contact wins over a stored one.
+        assert_eq!(
+            effective_safety_contact(Some("new"), Some("old")).as_deref(),
+            Some("new"),
+        );
+        // Omitted request → fall back to the stored contact (the bug: enabling
+        // right after a PUT that set the contact must not be rejected).
+        assert_eq!(
+            effective_safety_contact(None, Some("old")).as_deref(),
+            Some("old"),
+        );
+        // Blank/whitespace request is treated as omitted → falls back.
+        assert_eq!(
+            effective_safety_contact(Some("   "), Some("old")).as_deref(),
+            Some("old"),
+        );
+        // Request contact is trimmed.
+        assert_eq!(
+            effective_safety_contact(Some("  who  "), None).as_deref(),
+            Some("who"),
+        );
+        // Neither set → None (a non-admin is then correctly rejected).
+        assert_eq!(effective_safety_contact(None, None), None);
+    }
 
     #[test]
     fn build_wellbeing_summarizes_engagement_within_the_window() {
