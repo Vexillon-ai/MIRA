@@ -438,6 +438,35 @@ impl CompanionSystem {
         if let Some(ack) = update.care_consent_ack {
             settings.care.consent_at = if ack { Some(now) } else { None };
         }
+        // Additional guardians beyond the primary contact. A distress escalation
+        // reaches all of them, so validate each the same way as the primary
+        // (real user, not self), then de-dup and drop any that equal the
+        // primary. `Some([])` clears the extras; `None` leaves them untouched.
+        if let Some(ids) = update.guardian_ids {
+            let primary = settings.safety_contact_user_id.clone();
+            let mut cleaned: Vec<String> = Vec::new();
+            for g in ids {
+                if g.is_empty() || g == user_id {
+                    if g == user_id {
+                        return Err(CompanionError::SelfSafetyContact);
+                    }
+                    continue;
+                }
+                if Some(&g) == primary.as_ref() || cleaned.contains(&g) {
+                    continue;
+                }
+                if let Some(auth) = &self.auth {
+                    let exists = auth.get_user(&g)
+                        .map_err(|e| CompanionError::Invalid(format!("auth lookup: {e}")))?
+                        .is_some();
+                    if !exists {
+                        return Err(CompanionError::UnknownSafetyContact(g));
+                    }
+                }
+                cleaned.push(g);
+            }
+            settings.care.guardian_ids = cleaned;
+        }
         settings.updated_at = now;
         self.store.upsert(&settings)?;
         Ok(settings)
@@ -461,6 +490,11 @@ pub struct CompanionUpdate {
     // disclosure acknowledgement.
     pub care_role: Option<CareRole>,
     pub care_consent_ack: Option<bool>,
+    // Additional guardians beyond the primary safety contact; a distress
+    // escalation reaches all of them. `Some([])` clears them, `None` leaves
+    // them untouched. Each is validated (real user, not self) and de-duped
+    // against the primary.
+    pub guardian_ids: Option<Vec<String>>,
 }
 
 // ── Internals ────────────────────────────────────────────────────────────────
@@ -803,6 +837,45 @@ mod tests {
         sys.enable("alice", Some("david")).unwrap();
         let err = sys.configure("alice", CompanionUpdate {
             safety_contact_user_id: Some("alice".into()),
+            ..Default::default()
+        }).unwrap_err();
+        assert!(matches!(err, CompanionError::SelfSafetyContact));
+    }
+
+    #[test]
+    fn configure_sets_dedups_and_clears_extra_guardians() {
+        let (_dir, sys) = fresh_system();
+        sys.enable("alice", Some("david")).unwrap();
+
+        // Set two extras; the primary ("david") and a duplicate are dropped.
+        let s = sys.configure("alice", CompanionUpdate {
+            guardian_ids: Some(vec![
+                "sarah".into(), "david".into(), "sarah".into(), "mom".into(),
+            ]),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(s.care.guardian_ids, vec!["sarah".to_string(), "mom".to_string()]);
+
+        // guardians_of() merges primary + extras (primary first, deduped).
+        assert_eq!(
+            crate::companion::governance::guardians_of(sys.store(), "alice"),
+            vec!["david".to_string(), "sarah".to_string(), "mom".to_string()],
+        );
+
+        // Some([]) clears the extras; None (default) would leave them.
+        let cleared = sys.configure("alice", CompanionUpdate {
+            guardian_ids: Some(vec![]),
+            ..Default::default()
+        }).unwrap();
+        assert!(cleared.care.guardian_ids.is_empty());
+    }
+
+    #[test]
+    fn configure_refuses_self_as_extra_guardian() {
+        let (_dir, sys) = fresh_system();
+        sys.enable("alice", Some("david")).unwrap();
+        let err = sys.configure("alice", CompanionUpdate {
+            guardian_ids: Some(vec!["bob".into(), "alice".into()]),
             ..Default::default()
         }).unwrap_err();
         assert!(matches!(err, CompanionError::SelfSafetyContact));

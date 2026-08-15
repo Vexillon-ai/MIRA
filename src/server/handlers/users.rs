@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Json, Multipart, Path},
+    extract::{Json, Multipart, Path, Query},
     http::StatusCode,
     response::IntoResponse,
     Extension,
@@ -139,6 +139,66 @@ pub async fn list_users(
         Ok(users) => axum::Json(
             users.into_iter().map(UserResponse::from).collect::<Vec<_>>()
         ).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+// ── GET /api/users/search ───────────────────────────────────────────────────
+
+/// Minimum query length before we return matches. A shorter (or empty) query
+/// yields an empty list, so the endpoint can't be used to trivially enumerate
+/// the whole user directory one character at a time.
+const USER_SEARCH_MIN_QUERY: usize = 2;
+
+/// Cap on results returned by the picker.
+const USER_SEARCH_LIMIT: usize = 15;
+
+#[derive(Deserialize)]
+pub struct UserSearchQuery {
+    #[serde(default)]
+    pub q: String,
+}
+
+/// Slim projection for the typeahead user-picker. Deliberately carries only
+/// `id`/`username`/`display_name` — no email, role, activity, or profile
+/// fields — so any authenticated user can resolve a name to an id (e.g. to
+/// choose a safety contact) without exposing the directory's private
+/// attributes. This is a lookup, not a profile endpoint.
+#[derive(Serialize)]
+pub struct UserSearchResult {
+    pub id:           String,
+    pub username:     String,
+    pub display_name: Option<String>,
+}
+
+pub async fn search_users(
+    AuthUser(caller): AuthUser,
+    Extension(auth): Extension<Arc<LocalAuthService>>,
+    Query(params): Query<UserSearchQuery>,
+) -> impl IntoResponse {
+    let query = params.q.trim();
+    // Too-short queries return an empty array rather than an error, so a
+    // typeahead client can call on every keystroke without special-casing.
+    if query.chars().count() < USER_SEARCH_MIN_QUERY {
+        return axum::Json(Vec::<UserSearchResult>::new()).into_response();
+    }
+
+    // Fetch one extra so dropping the caller's own row can't leave a full
+    // page one short of the intended cap.
+    match auth.search_users(query, USER_SEARCH_LIMIT + 1) {
+        Ok(rows) => {
+            let results: Vec<UserSearchResult> = rows
+                .into_iter()
+                .filter(|(id, _, _)| id != &caller.id)
+                .take(USER_SEARCH_LIMIT)
+                .map(|(id, username, display_name)| UserSearchResult {
+                    id,
+                    username,
+                    display_name,
+                })
+                .collect();
+            axum::Json(results).into_response()
+        }
         Err(e) => err_resp(e),
     }
 }

@@ -516,6 +516,52 @@ impl AuthDb {
         Ok(users)
     }
 
+    /// Case-insensitive substring search over `username` and `display_name`
+    /// for the lightweight user-picker (`GET /api/users/search`). Returns at
+    /// most `limit` `(id, username, display_name)` tuples ordered by username;
+    /// only active accounts are considered (a deactivated user isn't a valid
+    /// pick for e.g. a safety contact). `%` and `_` in `query` are escaped so
+    /// they match literally rather than as LIKE wildcards.
+    pub fn search_users(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, Option<String>)>, MiraError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, username, display_name FROM users \
+                 WHERE is_active = 1 AND \
+                   (username LIKE ?1 ESCAPE '\\' OR display_name LIKE ?1 ESCAPE '\\') \
+                 ORDER BY username ASC LIMIT ?2",
+            )
+            .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
+
+        // Escape LIKE metacharacters so a query of "50%" or "a_b" matches the
+        // literal text rather than expanding as a wildcard pattern.
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{}%", escaped);
+
+        let rows = stmt
+            .query_map(params![pattern, limit as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| MiraError::DatabaseError(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
     pub fn update_user(
         &self,
         id:                &str,
@@ -1140,6 +1186,73 @@ mod profile_tests {
         ).unwrap();
         drop(conn);
         (dir, db)
+    }
+
+    /// Insert a users row with an explicit username/display_name/active flag
+    /// for search tests.
+    fn insert_named_user(
+        db: &AuthDb,
+        id: &str,
+        username: &str,
+        display_name: Option<&str>,
+        is_active: bool,
+    ) {
+        let conn = db.conn.lock().unwrap();
+        let now = AuthDb::now_ms();
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, password_hash, role, is_active, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'x', 'user', ?4, ?5, ?5)",
+            params![id, username, display_name, is_active as i64, now],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn search_users_matches_username_and_display_name_case_insensitively() {
+        let dir = tempdir().unwrap();
+        let db = AuthDb::open(&dir.path().join("auth.db")).unwrap();
+        insert_named_user(&db, "u1", "alice", Some("Alice Anderson"), true);
+        insert_named_user(&db, "u2", "bob", Some("Bob Baker"), true);
+        insert_named_user(&db, "u3", "carol", Some("Carol the Alicorn"), true);
+
+        // Substring, case-insensitive, hits both the username ("alice") and a
+        // display_name that contains "alic" ("Alicorn").
+        let hits = db.search_users("ALIC", 10).unwrap();
+        let ids: Vec<&str> = hits.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert!(ids.contains(&"u1"));
+        assert!(ids.contains(&"u3"));
+        assert!(!ids.contains(&"u2"));
+    }
+
+    #[test]
+    fn search_users_excludes_inactive_and_respects_limit() {
+        let dir = tempdir().unwrap();
+        let db = AuthDb::open(&dir.path().join("auth.db")).unwrap();
+        insert_named_user(&db, "u1", "sam-one", None, true);
+        insert_named_user(&db, "u2", "sam-two", None, true);
+        insert_named_user(&db, "u3", "sam-gone", None, false); // deactivated
+
+        // Deactivated accounts are never returned.
+        let all = db.search_users("sam", 10).unwrap();
+        let ids: Vec<&str> = all.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["u1", "u2"]); // ordered by username, u3 excluded
+
+        // Limit is honoured.
+        assert_eq!(db.search_users("sam", 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_users_treats_like_wildcards_literally() {
+        let dir = tempdir().unwrap();
+        let db = AuthDb::open(&dir.path().join("auth.db")).unwrap();
+        insert_named_user(&db, "u1", "fifty", Some("Fifty Cent"), true);
+        insert_named_user(&db, "u2", "50%off", Some("Discount Dan"), true);
+
+        // "%" must match literally, not as a wildcard — otherwise this query
+        // would also match "fifty".
+        let hits = db.search_users("50%", 10).unwrap();
+        let ids: Vec<&str> = hits.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["u2"]);
     }
 
     #[test]

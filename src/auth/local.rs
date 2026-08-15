@@ -213,6 +213,16 @@ impl LocalAuthService {
         self.db.list_users()
     }
 
+    /// Lightweight name → id lookup for the user-picker. See
+    /// [`AuthDb::search_users`].
+    pub fn search_users(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, Option<String>)>, MiraError> {
+        self.db.search_users(query, limit)
+    }
+
     pub fn create_user(&self, req: NewUser) -> Result<User, MiraError> {
         let hash = Self::hash_password(&req.password)?;
         self.db.create_user(req, hash)

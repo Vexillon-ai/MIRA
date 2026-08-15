@@ -109,14 +109,21 @@ It's built on four principles:
 
 On the Presence page, pick who Presence is for:
 
-- **Just me** — a companion for yourself; no one else is alerted (the default).
+- **Just me** — a companion for yourself. No one gets an ongoing *wellbeing
+  view* of you, but your **safety contact** is still alerted in a genuine
+  emergency (distress or a run of unanswered check-ins) — the care network isn't
+  only for children and older adults, and an ordinary adult can absolutely want
+  people to turn to when something's wrong. This is the default.
 - **A child** — a guardian is alerted if their child seems to be struggling;
   MIRA keeps a gentle, age-aware tone.
 - **An older adult** — a contact is alerted on silence or signs of distress — a
   light-touch wellbeing check for someone living more independently.
 
-For a child or older-adult role, choose the **contact to alert** and confirm the
-person has been told. How serious a signal is tunes the message: an *acute*
+The child and older-adult roles additionally expose a quiet **wellbeing view** to
+the guardian (aggregate engagement over a trailing window — never the person's
+messages), gated on the person having been told. The *Just me* role never exposes
+that view; it's the framing/consent that differs, not whether a contact is
+reached in an emergency. How serious a signal is tunes the message: an *acute*
 signal (mentions of self-harm, or acute physical symptoms) sends an urgent
 heads-up and shows the person crisis resources prominently; a *concerning* one
 (a low mood, loneliness) sends a softer "you might want to check in".
@@ -125,7 +132,13 @@ heads-up and shows the person crisis resources prominently; a *concerning* one
 
 When you configure check-ins, set a **safety contact**: the person MIRA notifies
 if check-ins go unanswered (three in a row over 48 hours) or if a message reads
-as distress. (Choosing a care role above sets this same contact.)
+as distress. (Choosing a care role above sets this same contact.) Pick them by
+**searching for their name** — you don't need to know their internal user id.
+
+You can name **more than one** contact — for example both parents of a child, or
+two adult children looking after an older parent. A distress or missed-check-in
+alert reaches **all** of them, and it counts as delivered if it reaches any one,
+so a single unreachable contact never silences the alert.
 
 The safety contact is a hard prerequisite for ordinary user accounts — you
 can't enable companion check-ins without one — because a feature that holds

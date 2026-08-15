@@ -91,7 +91,7 @@ use crate::server::handlers::{
     tts::{download_voice as tts_download_voice, speak as tts_speak, speak_stream as tts_speak_stream, status as tts_status, voices as tts_voices},
     users::{
         change_password, create_user, delete_avatar, delete_user, get_user, list_users,
-        reset_password, update_user_full, upload_avatar, AvatarDir,
+        reset_password, search_users, update_user_full, upload_avatar, AvatarDir,
     },
     triggers::{
         approve_sub, create_sub, delete_sub, get_sub, list_event_names, list_subs,
@@ -605,8 +605,12 @@ pub fn build_router(
                 post(upload_agent_avatar).put(set_agent_avatar).delete(delete_agent_avatar),
             )
             .route("/api/agent/appearance", get(get_agent_appearance))
-            // Users (admin only)
+            // Users (admin only, except the name→id search below)
             .route("/api/users",               get(list_users).post(create_user))
+            // Authenticated (non-admin) name→id lookup for pickers, e.g. the
+            // care-network safety-contact chooser. Registered before the
+            // `{id}` route so "search" isn't captured as a user id.
+            .route("/api/users/search",        get(search_users))
             .route("/api/users/{id}",          get(get_user).put(update_user_full).delete(delete_user))
             .route("/api/users/{id}/password",        post(change_password))
             .route("/api/users/{id}/reset-password",  post(reset_password))

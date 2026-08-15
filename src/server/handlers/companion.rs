@@ -725,6 +725,21 @@ pub async fn update_my_companion(
             return Err(err(StatusCode::BAD_REQUEST, "safety contact is not a known user"));
         }
     }
+    // Extra guardians must each be a real, different user too — an escalation
+    // reaches all of them, so a bad id here would silently shrink the net.
+    if let Some(ids) = body.guardian_ids.as_ref() {
+        for g in ids.iter().filter(|g| !g.is_empty()) {
+            if g == &me.id {
+                return Err(err(StatusCode::BAD_REQUEST, "a guardian cannot be yourself"));
+            }
+            let exists = auth.get_user(g)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("auth lookup: {e}")))?
+                .is_some();
+            if !exists {
+                return Err(err(StatusCode::BAD_REQUEST, format!("guardian '{g}' is not a known user")));
+            }
+        }
+    }
 
     let now = Utc::now();
     // Start from existing settings, or a fresh disabled row.
