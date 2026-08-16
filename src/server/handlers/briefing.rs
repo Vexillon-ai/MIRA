@@ -6,7 +6,8 @@
 //!
 //! `GET    /api/me/briefing`           — current config (enabled / hour / last fire)
 //! `PATCH  /api/me/briefing`           — toggle + change hour
-//! `POST   /api/me/briefing/send-now`  — fire on demand for testing
+//! `POST   /api/me/briefing/send-now`  — fire on demand (async; returns 202,
+//!                                        delivers on the companion channel)
 //!
 //! Available only when the companion system opened cleanly. When
 //! companion isn't installed (channel-only / minimal builds) these
@@ -18,7 +19,7 @@ use axum::{Extension, Json};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::json;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::agent::AgentCore;
 use crate::auth::AuthUser;
@@ -107,13 +108,23 @@ pub async fn patch_briefing(
     })))
 }
 
-/// Fire a briefing on demand. Used for testing — bypasses the
-/// once-per-day guard and the local-hour gate. Channel routing /
-/// content gathering is identical to the scheduled path.
+/// Hard ceiling on a single on-demand briefing generation+delivery so a hung
+/// provider call can't leak a background task forever. Generous — a briefing
+/// gathers recall/context and can be a slow LLM turn — but bounded.
+const BRIEFING_GEN_TIMEOUT_SECS: u64 = 180;
+
+/// Fire a briefing on demand (bypasses the once-per-day guard and local-hour
+/// gate). Generation is a full LLM turn with recall/context gathering, which
+/// routinely exceeds a mobile client's read timeout (~30s), so this **does not
+/// block on it**: it validates that companion is installed, kicks generation +
+/// delivery off in the background, and returns `202 Accepted` immediately. The
+/// briefing then lands on the user's companion channel (push / messaging / web)
+/// when ready — identical to a scheduled briefing, which the scheduler already
+/// runs off-thread. Outcome + failures are logged, not returned synchronously.
 pub async fn send_briefing_now(
     AuthUser(me):     AuthUser,
     Extension(agent): Extension<Arc<AgentCore>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
     let _sys = agent.companion().ok_or_else(|| err(
         StatusCode::SERVICE_UNAVAILABLE,
         "companion not enabled on this server",
@@ -122,27 +133,38 @@ pub async fn send_briefing_now(
         StatusCode::SERVICE_UNAVAILABLE,
         "companion dispatcher not installed (scheduler didn't spawn — usually means \
          the history store failed at boot; check server logs)",
-    ))?;
-    match dispatcher.send_briefing(&me.id).await {
-        Ok(DispatchOutcome::Sent { conversation_id, channel, chars, .. }) => Ok(Json(json!({
-            "status":          "sent",
-            "channel":         channel,
-            "chars":           chars,
-            "conversation_id": conversation_id,
-        }))),
-        Ok(DispatchOutcome::SkippedNoChannel) => Err(err(
-            StatusCode::CONFLICT,
-            "no channel resolved — configure a preferred companion channel (Signal / Telegram / web)",
-        )),
-        Ok(DispatchOutcome::Failed(msg)) => Err(err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("briefing failed: {msg}"),
-        )),
-        Err(e) => Err(err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("send_briefing error: {e}"),
-        )),
-    }
+    ))?.clone();
+
+    let user_id = me.id.clone();
+    let username = me.username.clone();
+    tokio::spawn(async move {
+        let fut = dispatcher.send_briefing(&user_id);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(BRIEFING_GEN_TIMEOUT_SECS), fut,
+        ).await {
+            Ok(Ok(DispatchOutcome::Sent { channel, chars, conversation_id, .. })) => info!(
+                user = %username,
+                "on-demand briefing delivered on '{channel}' ({chars} chars, conv={conversation_id})",
+            ),
+            Ok(Ok(DispatchOutcome::SkippedNoChannel)) => warn!(
+                user = %username,
+                "on-demand briefing skipped — no channel resolved (configure a preferred companion channel)",
+            ),
+            Ok(Ok(DispatchOutcome::Failed(msg))) => warn!(
+                user = %username, "on-demand briefing failed to deliver: {msg}",
+            ),
+            Ok(Err(e)) => warn!(user = %username, "on-demand briefing generation error: {e}"),
+            Err(_)     => warn!(
+                user = %username,
+                "on-demand briefing timed out after {BRIEFING_GEN_TIMEOUT_SECS}s — abandoned",
+            ),
+        }
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(json!({
+        "status": "accepted",
+        "detail": "briefing is being generated; it will arrive on your companion channel shortly",
+    }))))
 }
 
 fn err(s: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {

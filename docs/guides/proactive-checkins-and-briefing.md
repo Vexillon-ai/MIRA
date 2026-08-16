@@ -205,7 +205,10 @@ You don't have to wait for the next scheduled moment to confirm everything
 works. Under **Settings → Notifications** there are two test buttons:
 
 - **Send a check-in now** — fires a companion check-in immediately.
-- **Send a briefing now** — builds and sends today's briefing immediately.
+- **Send a briefing now** — starts building today's briefing and delivers it on
+  your channel when it's ready. Because a briefing is a full generation pass, the
+  button returns right away and the briefing follows a few moments later (it
+  doesn't block while it's written) — so it won't hang the app on a slow model.
 
 Use these to confirm the message actually reaches your chosen channel before
 relying on the schedule.

@@ -60,11 +60,15 @@ export default function DailyBriefingSettings() {
     },
   })
 
-  const sendNowMut = useMutation<{ data: { channel: string; chars: number } }, unknown, void>({
+  // Generation is a full LLM turn, so the server accepts the request (202) and
+  // delivers the briefing on the companion channel when ready — no synchronous
+  // channel/chars to report here.
+  const sendNowMut = useMutation<{ data: { status?: string; detail?: string } }, unknown, void>({
     mutationFn: () => api.post('/api/me/briefing/send-now'),
     onSuccess:  (r) => {
       qc.invalidateQueries({ queryKey: ['daily-briefing'] })
-      toast.success(`Briefing sent on ${r.data?.channel ?? '?'} (${r.data?.chars ?? '?'} chars).`)
+      toast.success(r.data?.detail
+        ?? 'Briefing is being generated — it will arrive on your companion channel shortly.')
     },
     onError: (e: unknown) => {
       const m = (e as { response?: { data?: { error?: string } } })?.response?.data?.error
