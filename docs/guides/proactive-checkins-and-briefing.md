@@ -31,7 +31,11 @@ you tend to reply, and backs off when you're brief or busy.
 1. Go to **Settings → Notifications** and **enable companion mode** for your
    account.
 2. **Choose a preferred channel** for the check-ins (for example Telegram or
-   Signal). This is where the proactive messages will arrive.
+   Signal). This is where the proactive messages will arrive. If you leave it
+   unset, MIRA uses whichever surface you last talked to it on — including the
+   **web app** or the **native mobile app**, which both receive check-ins and
+   the morning briefing as **push notifications** (register a device under
+   Settings → Notifications so a check-in can actually reach you there).
 3. **Set your quiet hours** — the windows when MIRA must never message you (for
    example overnight, or during a regular nap). MIRA respects these absolutely;
    it won't reach out inside a quiet window no matter what.

@@ -456,11 +456,16 @@ impl CompanionDispatcher {
         // preferred channel didn't actually deliver. Earlier the
         // dispatcher logged the failure and still returned Sent — the
         // UI then claimed "✅ sent" even though Tarek's phone never
-        // saw the message. Found in the real incident:
-        // https://wiki/competitive-research-and-roadmap (Q1.6 follow-up).
+        // saw the message. Found via a real delivery-failure incident.
         let mut delivery_error: Option<String> = None;
         match channel.as_str() {
-            "web" => { /* delivery happens via the bus event below */ }
+            // The native mobile app receives proactive messages as push
+            // notifications, not an account-backed send — the bus event below
+            // fans out to the user's FCM device tokens + Web Push subscriptions
+            // via `spawn_bus_forwarder`, exactly like the web channel. So both
+            // are delivered by that event; confirmation (a registered push
+            // subscription) is checked further down.
+            c if is_bus_delivered_channel(c) => { /* delivery happens via the bus event below */ }
             "signal" => {
                 if let Err(e) = self.deliver_signal(user_id, &assistant_text).await {
                     warn!("companion dispatch: signal delivery failed for '{user_id}': {e}");
@@ -578,7 +583,12 @@ impl CompanionDispatcher {
         // cadence (`mark_checkin` above ran) but must NOT count toward the
         // missed-check-in counter — otherwise a web-only user with no tab and no
         // push falsely escalates for messages they never received.
-        let delivery_confirmed = if channel == "web" {
+        // Web and mobile both land only in history + a fire-and-forget bus
+        // event (fanned out to push by the forwarder); we can only *confirm*
+        // they reached the user when a push subscription is registered. For
+        // mobile that subscription is the sole delivery path, so the same
+        // gate applies. SSE-tab liveness isn't trackable on the broadcast bus.
+        let delivery_confirmed = if is_bus_delivered_channel(&channel) {
             match self.web_push.as_ref() {
                 Some(wp) => wp.list_for_user(user_id).map(|v| !v.is_empty()).unwrap_or(true),
                 None     => true, // push not wired → preserve prior behaviour
@@ -732,7 +742,9 @@ impl CompanionDispatcher {
         // Channel delivery — same honest-outcome handling as check-ins.
         let mut delivery_error: Option<String> = None;
         match channel.as_str() {
-            "web" => { /* delivery via the bus event below */ }
+            // Web + native mobile: delivered via the bus event below (the
+            // forwarder fans it out to Web Push + FCM device tokens).
+            c if is_bus_delivered_channel(c) => { /* delivery via the bus event below */ }
             "signal" => {
                 if let Err(e) = self.deliver_signal(user_id, &assistant_text).await {
                     warn!("companion briefing: signal delivery failed for '{user_id}': {e}");
@@ -911,8 +923,7 @@ impl CompanionDispatcher {
         // external_user_id=None). Without the filter, the most-recently-
         // touched thread wins → which is often the bot's own thread →
         // no chat_id → silent delivery failure that we then misreport as
-        // a success. Found in the real incident:
-        // https://wiki/competitive-research-and-roadmap (Q1.6 follow-up).
+        // a success. Found via a real delivery-failure incident.
         let convs = self.history.list_conversations(user_id, Some("telegram"), 50, 0)
             .map_err(|e| MiraError::ConfigError(format!("list_conversations: {e}")))?;
         let chat_id_str = convs.into_iter()
@@ -1379,6 +1390,17 @@ impl CompanionDispatcher {
 
 // ── Internals ────────────────────────────────────────────────────────────────
 
+/// Channels whose proactive delivery happens via the NotificationBus event
+/// (fanned out to Web Push + FCM device tokens by `spawn_bus_forwarder`) rather
+/// than an account-backed outbound send. `web` (browser tab + Web Push) and
+/// `mobile` (native app + FCM) both work this way, so neither needs a per-
+/// channel `deliver_*` bridge; their delivery is confirmed by the presence of a
+/// registered push subscription. Single source of truth for the two dispatch
+/// match arms and the confirmation gate.
+fn is_bus_delivered_channel(channel: &str) -> bool {
+    matches!(channel, "web" | "mobile")
+}
+
 // Resolve the channel for a check-in: try each entry in
 // `preferred_channels` in order; fall through to the most-recent
 // channel the user has actually used (per history); fall back to
@@ -1676,6 +1698,23 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = HistoryStore::open(&dir.path().join("history.db")).unwrap();
         (dir, Arc::new(store))
+    }
+
+    #[test]
+    fn bus_delivered_channels_are_web_and_mobile() {
+        // Both the native mobile app (FCM) and the web tab (Web Push) deliver
+        // proactive messages via the bus forwarder, so neither is treated as a
+        // "not implemented" account-backed channel. This is the fix for mobile
+        // check-in/briefing delivery returning "mobile: outbound not implemented".
+        assert!(is_bus_delivered_channel("web"));
+        assert!(is_bus_delivered_channel("mobile"));
+        // Account-backed messaging channels are NOT bus-delivered — they route
+        // through their own deliver_* bridge.
+        assert!(!is_bus_delivered_channel("signal"));
+        assert!(!is_bus_delivered_channel("telegram"));
+        assert!(!is_bus_delivered_channel("email"));
+        assert!(!is_bus_delivered_channel("external:nextcloud"));
+        assert!(!is_bus_delivered_channel("tui"));
     }
 
     #[test]
