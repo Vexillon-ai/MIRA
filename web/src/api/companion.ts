@@ -38,7 +38,7 @@ export interface PresenceTone {
 }
 
 /** Care-net role: who the monitored person is. Tunes escalation framing + tone. */
-export type CareRole = 'standard' | 'child' | 'elder'
+export type CareRole = 'standard' | 'child' | 'elder' | 'adult'
 
 /** Which kinds of proactive messages MIRA is allowed to send. */
 export interface PresenceMessageMix {

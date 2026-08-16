@@ -531,6 +531,7 @@ impl SafetyFloor {
         match self.store.get(user_id).ok().flatten().map(|s| s.care.role) {
             Some(crate::companion::CareRole::Child) => " (your child)",
             Some(crate::companion::CareRole::Elder) => " (someone you're a care contact for)",
+            Some(crate::companion::CareRole::Adult) => " (someone you support)",
             _ => "",
         }
     }

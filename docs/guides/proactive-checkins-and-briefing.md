@@ -118,6 +118,12 @@ On the Presence page, pick who Presence is for:
   emergency (distress or a run of unanswered check-ins) — the care network isn't
   only for children and older adults, and an ordinary adult can absolutely want
   people to turn to when something's wrong. This is the default.
+- **An adult who needs support** — for a grown-up who *wants* someone actively
+  looking out for them: recovery, a chronic condition, living alone, a hard
+  stretch. Like the child/older-adult roles, a care contact is alerted on
+  distress or silence **and** — once you've been told and have consented — can
+  see your aggregate **wellbeing view**. The difference is tone: it's a peer
+  arrangement, no age framing.
 - **A child** — a guardian is alerted if their child seems to be struggling;
   MIRA keeps a gentle, age-aware tone.
 - **An older adult** — a contact is alerted on silence or signs of distress — a

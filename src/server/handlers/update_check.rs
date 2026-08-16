@@ -81,9 +81,15 @@ pub async fn update_check(
 
     let cfg: Arc<MiraConfig> = cfg_arc.get().await;
     let current = env!("CARGO_PKG_VERSION").to_string();
+    // The configured release source, credential-stripped, so the admin Updates
+    // card can show exactly where checks go (read-only transparency) — and a
+    // misconfigured source is visible at a glance instead of only in the logs.
+    let source = redact_url_userinfo(&cfg.server.update_check.source_url).into_owned();
 
     if !cfg.server.update_check.enabled || cfg.server.update_check.source_url.is_empty() {
-        let mut body = json!({ "enabled": false, "current": current, "newer_available": false });
+        let mut body = json!({
+            "enabled": false, "current": current, "newer_available": false, "source": source,
+        });
         merge(&mut body, upgrade_capabilities());
         return (StatusCode::OK, Json(body));
     }
@@ -99,7 +105,7 @@ pub async fn update_check(
                 .map(|age| age < cfg.server.update_check.refresh_interval())
                 .unwrap_or(false);
             if fresh {
-                return (StatusCode::OK, Json(with_meta(c.body, c.checked_at, true)));
+                return (StatusCode::OK, Json(with_meta(c.body, c.checked_at, true, &source)));
             }
         }
     }
@@ -111,9 +117,17 @@ pub async fn update_check(
             if let Ok(mut g) = cache().lock() {
                 *g = Some(Cached { body: body.clone(), checked_at: now });
             }
-            (StatusCode::OK, Json(with_meta(body, now, false)))
+            (StatusCode::OK, Json(with_meta(body, now, false, &source)))
         }
-        Err((status, err)) => (status, Json(err)),
+        // Surface the source + enabled state alongside the error so the admin
+        // card can render "enabled, but the source failed: <hint>".
+        Err((status, mut err)) => {
+            if let Some(obj) = err.as_object_mut() {
+                obj.insert("source".into(), json!(source));
+                obj.insert("enabled".into(), json!(true));
+            }
+            (status, Json(err))
+        }
     }
 }
 
@@ -121,10 +135,11 @@ pub async fn update_check(
 /// can render "checked N ago" and decide which action (upgrade / guidance) to
 /// show. Capabilities are computed live (never cached) since they're cheap and
 /// reflect the current host.
-fn with_meta(mut body: serde_json::Value, checked_at: chrono::DateTime<chrono::Utc>, from_cache: bool) -> serde_json::Value {
+fn with_meta(mut body: serde_json::Value, checked_at: chrono::DateTime<chrono::Utc>, from_cache: bool, source: &str) -> serde_json::Value {
     if let Some(obj) = body.as_object_mut() {
         obj.insert("last_checked".into(), json!(checked_at.to_rfc3339()));
         obj.insert("from_cache".into(), json!(from_cache));
+        obj.insert("source".into(), json!(source));
     }
     merge(&mut body, upgrade_capabilities());
     body
@@ -260,8 +275,29 @@ async fn fetch_upstream(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        warn!("update_check: upstream returned {status}: {body}");
-        return Err((StatusCode::BAD_GATEWAY, json!({ "error": format!("upstream HTTP {status}") })));
+        let url = redact_url_userinfo(&cfg.server.update_check.source_url);
+        // The most common misconfig: `source_url` points at a *private* repo.
+        // GitLab and GitHub both return 404 (GitLab literally says
+        // "Project Not Found") to an unauthenticated caller, and the update
+        // checker sends no repo token by design — it targets a PUBLIC releases
+        // API. Make the cause + remedy obvious rather than echoing a bare 404.
+        let hint = match status.as_u16() {
+            404 => " — this looks unreachable or private. `server.update_check.source_url` \
+                     must point at a PUBLIC releases API; a private GitHub/GitLab repo returns \
+                     404 to an unauthenticated request. The default is \
+                     https://api.github.com/repos/Vexillon-ai/MIRA/releases",
+            401 | 403 => " — this source requires authentication. The update checker targets a \
+                          PUBLIC releases API and sends no token; point `server.update_check.source_url` \
+                          at a public feed (default: https://api.github.com/repos/Vexillon-ai/MIRA/releases)",
+            _ => "",
+        };
+        warn!(
+            "update_check: source '{url}' returned {status}{hint} (body: {})",
+            body.chars().take(200).collect::<String>(),
+        );
+        return Err((StatusCode::BAD_GATEWAY, json!({
+            "error": format!("update source returned HTTP {status}{hint}"),
+        })));
     }
     let releases: Vec<ReleaseEntry> = resp.json().await
         .map_err(|e| (StatusCode::BAD_GATEWAY, json!({ "error": format!("upstream parse: {e}") })))?;
@@ -287,6 +323,23 @@ async fn fetch_upstream(
         "description":     latest.description,
         "newer_available": newer,
     }))
+}
+
+/// Strip `user:pass@` (or `token@`) from a URL's authority so a credential
+/// embedded in `source_url` never reaches logs or the caller-facing error.
+/// Only rewrites when the `@` sits in the authority (before the first path
+/// slash); leaves ordinary URLs untouched.
+fn redact_url_userinfo(url: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(scheme_end) = url.find("://") {
+        let after = &url[scheme_end + 3..];
+        let path_start = after.find('/').unwrap_or(after.len());
+        if let Some(at) = after[..path_start].find('@') {
+            return std::borrow::Cow::Owned(format!(
+                "{}://<redacted>@{}", &url[..scheme_end], &after[at + 1..],
+            ));
+        }
+    }
+    std::borrow::Cow::Borrowed(url)
 }
 
 /// Best-effort background refresh used by the frequency-gated auto-check task,
@@ -376,6 +429,28 @@ fn compare_versions(current: &str, latest: &str) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redact_url_userinfo_strips_credentials_only_in_authority() {
+        // Token embedded in the authority is redacted.
+        assert_eq!(
+            redact_url_userinfo("https://glpat-secret@gitlab.example.com/api/v4/projects/1/releases"),
+            "https://<redacted>@gitlab.example.com/api/v4/projects/1/releases",
+        );
+        assert_eq!(
+            redact_url_userinfo("https://user:pass@host/x"),
+            "https://<redacted>@host/x",
+        );
+        // Ordinary URLs are untouched, including an `@` that appears in the path.
+        assert_eq!(
+            redact_url_userinfo("https://api.github.com/repos/Vexillon-ai/MIRA/releases"),
+            "https://api.github.com/repos/Vexillon-ai/MIRA/releases",
+        );
+        assert_eq!(
+            redact_url_userinfo("https://host/path/@handle"),
+            "https://host/path/@handle",
+        );
+    }
 
     #[test]
     fn semver_compare_works_on_normal_releases() {

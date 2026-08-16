@@ -148,6 +148,12 @@ pub enum CareRole {
     /// confused/erratic replies are weighted more heavily toward a heads-up to
     /// the responsible contact.
     Elder,
+    /// An adult who wants someone looking out for them — recovery, a chronic
+    /// condition, living alone, a hard stretch. Monitored like child/elder (a
+    /// care contact is alerted on distress/silence and, once the person has
+    /// consented, can see their wellbeing summary) but with no age framing and a
+    /// peer, non-paternalistic tone.
+    Adult,
 }
 
 impl CareRole {
@@ -155,7 +161,12 @@ impl CareRole {
     /// MIRA should disclose the arrangement and apply care-net escalation.
     pub fn is_monitored(&self) -> bool { !matches!(self, CareRole::Standard) }
     pub fn as_str(&self) -> &'static str {
-        match self { CareRole::Standard => "standard", CareRole::Child => "child", CareRole::Elder => "elder" }
+        match self {
+            CareRole::Standard => "standard",
+            CareRole::Child    => "child",
+            CareRole::Elder    => "elder",
+            CareRole::Adult    => "adult",
+        }
     }
 }
 
@@ -906,6 +917,24 @@ mod tests {
         assert_eq!(back.care.role, CareRole::Child);
         assert!(back.care.role.is_monitored());
         assert!(back.care.consent_at.is_some());
+    }
+
+    #[test]
+    fn supported_adult_role_is_monitored_and_round_trips() {
+        let (_dir, store) = fresh_store();
+        // The "an adult who needs support" role is monitored (a care contact
+        // watches over them) like child/elder — so disclosure + the wellbeing
+        // view gate apply — and it serialises as "adult".
+        assert!(CareRole::Adult.is_monitored());
+        assert_eq!(CareRole::Adult.as_str(), "adult");
+
+        let mut s = sample("alex");
+        s.care.role = CareRole::Adult;
+        s.care.consent_at = Some(Utc::now());
+        store.upsert(&s).unwrap();
+        let back = store.get("alex").unwrap().unwrap();
+        assert_eq!(back.care.role, CareRole::Adult);
+        assert!(back.care.role.is_monitored());
     }
 
     #[test]

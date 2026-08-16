@@ -67,7 +67,8 @@ interface FormState {
 }
 
 const CARE_ROLES: { value: CareRole; label: string; blurb: string }[] = [
-  { value: 'standard', label: 'Just me', blurb: 'A companion for myself — no one else is alerted.' },
+  { value: 'standard', label: 'Just me', blurb: 'A companion for myself. No one gets an ongoing view of how I\'m doing, but my safety contact is still alerted if I\'m in genuine distress or go quiet.' },
+  { value: 'adult',    label: 'An adult who needs support', blurb: 'Someone looks out for me — recovery, a health condition, living alone, a hard stretch. A care contact is alerted on distress or silence and, once I\'ve been told and consented, can see my wellbeing summary. Peer tone, no age framing.' },
   { value: 'child',    label: 'A child', blurb: 'A guardian is alerted if their child seems to be struggling. Gentle, age-aware tone.' },
   { value: 'elder',    label: 'An older adult', blurb: 'A contact is alerted on silence or signs of distress — a light-touch wellbeing check.' },
 ]
@@ -110,7 +111,8 @@ function relativeTime(ms: number): string {
 function WardCard({ ward }: { ward: Ward }) {
   const w = ward.wellbeing
   const roleLabel = ward.care_role === 'child' ? 'Child'
-    : ward.care_role === 'elder' ? 'Older adult' : ''
+    : ward.care_role === 'elder' ? 'Older adult'
+    : ward.care_role === 'adult' ? 'Adult (supported)' : ''
   const distressed = w.recent_distress_count > 0
   return (
     <div style={{ padding: '10px 0', borderTop: '1px solid var(--border, #2a2a2a)' }}>

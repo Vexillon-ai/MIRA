@@ -25,6 +25,8 @@ interface UpdateInfo {
   host_kind?:        string
   can_self_upgrade?: boolean
   upgrade_guidance?: string | null
+  /** Credential-stripped release source URL checks go to (read-only). */
+  source?:           string
 }
 interface RollbackInfo {
   current:   string
@@ -60,6 +62,9 @@ export default function UpdatesCard() {
   const checkNow = useMutation({
     mutationFn: () => api.get('/api/admin/update-check?force=true').then((r) => r.data),
     onSuccess:  (d) => { qc.setQueryData(['update-check'], d); setMsg(null) },
+    // A misconfigured source returns a non-2xx with a helpful error+source; make
+    // it visible instead of failing silently.
+    onError:    (e: any) => setMsg(e?.response?.data?.error ?? 'Update check failed — see server logs.'),
   })
   // After an upgrade/rollback kicks off, wait for the server to restart onto a
   // new version and reload the page automatically — no manual "Reload" click.
@@ -82,6 +87,10 @@ export default function UpdatesCard() {
   })
 
   const d = info.data
+  // On a misconfigured/unreachable source the endpoint returns a non-2xx whose
+  // body still carries the (credential-stripped) source + a diagnostic error.
+  const errData = (info.error as any)?.response?.data as { error?: string; source?: string } | undefined
+  const source = d?.source ?? errData?.source
   const snaps = rb.data?.snapshots ?? []
   // Only offer a rollback to a version OTHER than the one we're running.
   const rollbackTarget = snaps.find((s) => s.version !== d?.current)
@@ -90,10 +99,19 @@ export default function UpdatesCard() {
     <div className={styles.card}>
       <div className={styles.status}>
         {info.isLoading ? 'Checking…'
+          : info.isError ? <><b>Update check failed.</b> <span className={styles.dim}>{errData?.error ?? 'The release source was unreachable.'}</span></>
           : d?.enabled === false ? <>Automatic checks are off. Current version <b>v{d?.current}</b>.</>
           : d?.newer_available ? <><b>Update available: v{d.latest}</b> — you're on v{d.current}. <span className={styles.dim}>· checked {ago(d.last_checked)}</span></>
           : <>You're up to date — <b>v{d?.current}</b>. <span className={styles.dim}>· checked {ago(d?.last_checked)}</span></>}
       </div>
+
+      {/* Read-only transparency: exactly where update checks go. Editing stays a
+          deliberate config action (server.update_check.source_url). */}
+      {source && (
+        <div className={styles.dim} style={{ fontSize: 12, marginTop: 2, wordBreak: 'break-all' }}>
+          Source: {source}
+        </div>
+      )}
 
       <div className={styles.actions}>
         <button className={styles.btn} onClick={() => checkNow.mutate()} disabled={checkNow.isPending}>

@@ -597,7 +597,7 @@
               "type": "boolean"
             },
             "source_url": {
-              "description": "Releases API URL to check. Defaults to the public MIRA GitHub project (Vexillon-ai/MIRA); forks should override with their own GitHub / GitLab releases endpoint. Empty string disables (same as enabled=false).",
+              "description": "Releases API URL to check. Must be a PUBLIC releases API: the checker sends no repository token, so a private GitHub/GitLab repo returns 404 (GitLab: 'Project Not Found') and the check fails. Defaults to the public MIRA GitHub project (Vexillon-ai/MIRA); forks should override with their own public GitHub / GitLab releases endpoint. The configured source is shown (credential-stripped) on the admin Updates card. Empty string disables (same as enabled=false).",
               "type": "string"
             },
             "frequency": {
