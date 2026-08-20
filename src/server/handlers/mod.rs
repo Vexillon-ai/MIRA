@@ -55,6 +55,6 @@ pub mod wiki;
 pub mod workflows;
 pub mod wsl;
 
-pub use health::health_handler;
+pub use health::{livez_handler, readyz_handler, ReadinessCache};
 pub use signal::{signal_handler, SignalState};
 pub use telegram::{telegram_handler, TelegramState};

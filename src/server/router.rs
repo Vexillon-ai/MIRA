@@ -75,7 +75,7 @@ use crate::server::handlers::{
         list_my_groups, remove_member as remove_group_member,
         set_group_capabilities, set_user_capabilities, update_group,
     },
-    health_handler, signal_handler, telegram_handler, SignalState, TelegramState,
+    livez_handler, readyz_handler, ReadinessCache, signal_handler, telegram_handler, SignalState, TelegramState,
     logs::{get_log_level, logs_stream, set_log_level},
     memory::{create_memory, delete_memory, get_memory, list_memory, search_memory, supersede_memory},
     notifications::notifications_stream,
@@ -440,8 +440,20 @@ pub fn build_router(
         }
     }
 
+    // Machine health probes are split by audience (see the /health-split doc):
+    //   /livez  — pure liveness, no dependency I/O (sentinel, supervisor, TUI,
+    //             mobile reachability).
+    //   /readyz — provider-reachable readiness, cached (load balancers).
+    // `/health` is intentionally NOT a server route: it falls through to the SPA
+    // so the admin System Health page renders on a hard navigation.
+    let readiness = ReadinessCache::new(
+        Arc::clone(&agent_core),
+        std::time::Duration::from_secs(config.server.readiness_cache_ttl_secs),
+    );
+
     let mut router = Router::new()
-        .route("/health", get(health_handler).with_state(Arc::clone(&agent_core)))
+        .route("/livez", get(livez_handler))
+        .route("/readyz", get(readyz_handler).with_state(readiness))
         .nest_service("/avatars", ServeDir::new(avatar_dir.as_path()))
         .route(
             "/webhook/telegram/{account_id}",
@@ -1625,11 +1637,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_route_returns_200() {
+    async fn livez_route_returns_200() {
+        let app = test_router().await;
+        let req = Request::builder().uri("/livez").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // `/health` must NOT be a server route: it has to fall through to the SPA so
+    // the admin System Health page renders on a hard navigation. A test router
+    // with no SPA fallback mounted therefore 404s it — proving no server handler
+    // shadows the client route. (The disjointness guard lives in
+    // `spa_route_does_not_shadow_a_server_route`.)
+    #[tokio::test]
+    async fn health_is_not_a_server_route() {
         let app = test_router().await;
         let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.status(), 404);
+    }
+
+    /// Regression guard for the *class* of bug the `/health` split fixed: any
+    /// axum route whose path exactly equals a concrete SPA client route silently
+    /// shadows that page on hard navigation (axum's explicit route wins over the
+    /// SPA fallback), and only for users who type the URL / refresh / deep-link.
+    /// Assert the two path sets are disjoint so the next page named after an
+    /// endpoint can't reintroduce it. Parsed from source so it can't drift.
+    #[test]
+    fn spa_route_does_not_shadow_a_server_route() {
+        const APP_TSX: &str = include_str!("../../web/src/App.tsx");
+        const ROUTER_RS: &str = include_str!("router.rs");
+
+        // Concrete SPA client routes: `<Route path="/x">`, dropping the catch-all
+        // `*` and dynamic (`:param`) routes — neither can equal a static path.
+        fn spa_routes(src: &str) -> Vec<String> {
+            src.split("path=\"")
+                .skip(1)
+                .filter_map(|s| s.split('"').next())
+                .filter(|p| p.starts_with('/') && !p.contains(':') && !p.contains('*'))
+                .map(str::to_string)
+                .collect()
+        }
+
+        // Server route / nest_service paths, dropping any with a `{param}`
+        // capture (can't equal a static SPA path).
+        fn server_paths(src: &str) -> std::collections::HashSet<String> {
+            let mut out = std::collections::HashSet::new();
+            for marker in [".route(\"", ".nest_service(\""] {
+                for seg in src.split(marker).skip(1) {
+                    if let Some(p) = seg.split('"').next() {
+                        if p.starts_with('/') && !p.contains('{') {
+                            out.insert(p.to_string());
+                        }
+                    }
+                }
+            }
+            out
+        }
+
+        let spa = spa_routes(APP_TSX);
+        assert!(
+            spa.iter().any(|p| p == "/health"),
+            "sanity: App.tsx should still define /health as an SPA client route"
+        );
+        let server = server_paths(ROUTER_RS);
+
+        let collisions: Vec<&String> = spa.iter().filter(|p| server.contains(*p)).collect();
+        assert!(
+            collisions.is_empty(),
+            "server route(s) shadow SPA client route(s) on hard navigation: {collisions:?} \
+             — give the machine endpoint a distinct path (see the /health split)."
+        );
     }
 
     #[tokio::test]

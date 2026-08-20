@@ -57,7 +57,7 @@ impl TuiBackend for ServerBackend {
     async fn health_check(&self) -> bool {
         match self
             .client
-            .get(self.url("/health"))
+            .get(self.url("/livez"))
             .timeout(Duration::from_secs(3))
             .send()
             .await

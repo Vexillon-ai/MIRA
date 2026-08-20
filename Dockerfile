@@ -118,14 +118,14 @@ WORKDIR /data
 EXPOSE 8080
 
 # Liveness, not readiness. `/api/status` is auth-gated (always 401 → forever
-# "unhealthy"), and `/health` is provider-gated (503 until the LLM endpoint is
-# reachable — which a just-installed or localhost-only container often isn't yet).
-# Treat the container as healthy whenever the HTTP server answers `/health` at
-# all: 200 (provider ready) OR 503 (up, provider not yet reachable). Only a
-# refused/absent connection — i.e. the server isn't serving — is unhealthy.
+# "unhealthy"). Probe `/livez` — the dependency-free liveness route (0.339.0
+# health-endpoint split) that returns 200 whenever the HTTP server is serving,
+# without a provider round-trip. This is exactly the container's health question
+# ("is MIRA up?"), so a plain 200 check is correct: readiness (provider reachable)
+# lives on the separate `/readyz`, which a just-installed or localhost-only
+# container often can't satisfy yet and which is not what a HEALTHCHECK wants.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health) \
-   && { [ "$code" = 200 ] || [ "$code" = 503 ]; }
+  CMD curl -fsS -o /dev/null http://127.0.0.1:8080/livez
 
 # tini stays PID 1 (clean signal handling); the entrypoint script adds first-run
 # onboarding, then execs the CMD (or a `docker compose run` subcommand).

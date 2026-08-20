@@ -47,7 +47,7 @@ pub use rate_limit::RateLimitLayer;
 pub struct SecurityConfig {
     /// Master API auth token (Bearer). `None` = auth disabled (dev only).
     pub auth_token:      Option<String>,
-    /// Routes that bypass Bearer auth entirely (e.g. `"/health"`).
+    /// Routes that bypass Bearer auth entirely (e.g. `"/livez"`, `"/readyz"`).
     pub public_routes:   Vec<&'static str>,
     /// Max requests per minute, per client IP.
     pub rate_limit_rpm:  u32,
@@ -71,7 +71,8 @@ impl SecurityConfig {
             // public so a stale / revoked token doesn't permanently
             // block the user from clearing it.
             public_routes:   vec![
-                "/health",
+                "/livez",
+                "/readyz",
                 "/avatars/*",
                 "/api/artifacts/*",
                 "/api/auth/login",
@@ -127,7 +128,8 @@ impl Default for SecurityConfig {
             // public so a stale / revoked token doesn't permanently
             // block the user from clearing it.
             public_routes:   vec![
-                "/health",
+                "/livez",
+                "/readyz",
                 "/avatars/*",
                 "/api/artifacts/*",
                 "/api/auth/login",

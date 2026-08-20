@@ -23,7 +23,7 @@ use axum::{
     Extension, Json,
 };
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::auth::AuthUser;
 use crate::auth::models::Role;
@@ -82,9 +82,16 @@ fn can_write(user_id: &str, role: &Role, sched: &Schedule) -> bool {
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
 
-// Request shape for POST /api/schedules. We don't accept `user_id` from the
-// caller — it's always the authenticated user (admins use ?user_id= on
-// list endpoints; create-on-behalf-of can land in a later slice if needed).
+// Request shape for POST /api/schedules. `user_id` is the create-on-behalf-of
+// hook: omitted (the common case) the schedule is owned by the authenticated
+// caller; set to another user's id it provisions the schedule *for* that user
+// and is **admin-only** (403 otherwise). This mirrors the update path's authz
+// (`can_write` already lets an admin modify any user's row) and is needed for
+// host/admin tokens — e.g. `local.token` authenticates as the built-in `admin`
+// account, so a schedule whose action reads the human user's per-user wiki must
+// be owned by that user, not by `admin`. The created row keeps
+// `OwnerKind::User`; the acting admin is recorded in the audit log separately
+// from the owner.
 #[derive(Debug, Deserialize)]
 pub struct CreateScheduleRequest {
     pub name:                String,
@@ -100,6 +107,11 @@ pub struct CreateScheduleRequest {
     pub action:              Action,
     #[serde(default)]
     pub expires_at:          Option<i64>,
+    // Admin-only: create this schedule owned by another user. `None` (default)
+    // or the caller's own id → owned by the caller. A different id from a
+    // non-admin is rejected with 403.
+    #[serde(default)]
+    pub user_id:             Option<String>,
 }
 
 fn default_tz() -> String { "UTC".to_string() }
@@ -235,15 +247,40 @@ pub async fn create_schedule(
     if let Err(e) = validate_create(&req) {
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
+    // Create-on-behalf-of: an admin may set `user_id` to provision a schedule
+    // owned by another user; anyone else may only create for themselves. The
+    // quota gate below then applies to the *owner*, not the acting admin.
+    let owner_id = match req.user_id.as_deref() {
+        Some(uid) if uid != user.id => {
+            if !is_admin(&user.role) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "only admins can create a schedule on behalf of another user",
+                ).into_response();
+            }
+            uid.to_string()
+        }
+        _ => user.id.clone(),
+    };
     let status_override = match gate_create_schedule(
-        &store, &config.automations, &user.id,
+        &store, &config.automations, &owner_id,
         OwnerKind::User, req.rationale.as_deref(),
     ) {
         Ok(v)  => v,
         Err(e) => return gate_err_response(e),
     };
+    // Owner vs. actor: the row is owned by `owner_id`, but when an admin created
+    // it for someone else, record who actually acted (distinct from the owner).
+    if owner_id != user.id {
+        info!(
+            acting_admin = %user.id,
+            owner = %owner_id,
+            schedule_name = %req.name,
+            "schedule created on behalf of another user",
+        );
+    }
     let new = NewSchedule {
-        user_id:     user.id.clone(),
+        user_id:     owner_id,
         owner_kind:  OwnerKind::User,
         name:        req.name,
         description: req.description,

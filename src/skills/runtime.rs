@@ -161,7 +161,33 @@ impl Tool for SkillTool {
                 })
             }
             ToolSpec::Builtin { r#impl } => {
-                self.dispatcher.invoke_builtin(r#impl, call.args).await
+                // Forward the handler-injected context (`_user_id`,
+                // `_conversation_id`, `_channel`, `_user_tz`, …) from the outer,
+                // trusted envelope onto the inner args the model supplied, so
+                // user-scoped builtins (wiki, memory, calendar) reached *through
+                // a skill wrapper* still see the caller's identity. Without this
+                // the inner `call.args` is all the builtin gets and every
+                // `require_user_id` check fails.
+                //
+                // SECURITY: the outer values are injected by the chat handler and
+                // MUST win over anything the model placed inside `args` — a model
+                // must never be able to spoof `_user_id` by putting it in the
+                // object it controls. We only forward `_`-prefixed keys (the
+                // reserved injected-context namespace), never model-facing args.
+                let mut inner = call.args;
+                if !inner.is_object() {
+                    // Malformed (non-object) model args — start a fresh object so
+                    // the injected context still reaches the builtin.
+                    inner = serde_json::Value::Object(serde_json::Map::new());
+                }
+                if let (Some(outer), Some(inner_obj)) = (args.as_object(), inner.as_object_mut()) {
+                    for (key, value) in outer {
+                        if key.starts_with('_') {
+                            inner_obj.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+                self.dispatcher.invoke_builtin(r#impl, inner).await
             }
             ToolSpec::Executable { .. } => {
                 // Deferred: needs the sandbox bind-mount mapping (see
@@ -501,6 +527,70 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "web_fetch");
         assert_eq!(calls[0].1.pointer("/url").and_then(|v| v.as_str()), Some("https://example.com/"));
+    }
+
+    #[tokio::test]
+    async fn builtin_tool_receives_injected_context_from_outer_envelope() {
+        // A user-scoped builtin reached through a skill wrapper must still see
+        // the handler-injected `_user_id` (et al) — otherwise every
+        // `require_user_id` builtin (wiki, memory, calendar) fails when routed
+        // via a skill. The keys live on the OUTER envelope; the model only
+        // controls the inner `args`.
+        let dir = TempDir::new().unwrap();
+        let dispatcher = MockDispatcher::new(&[("wiki_read", "page body")]);
+        let skill = make_skill(
+            "com.example.wiki",
+            vec![("read", ToolSpec::Builtin { r#impl: "wiki_read".into() })],
+            dir.path().to_path_buf(),
+        );
+        let tool = SkillTool::new(skill, dispatcher.clone());
+
+        tool.execute(json!({
+            "tool": "read",
+            "args": { "path": "pages/notes.md" },
+            "_user_id": "685532cc",
+            "_conversation_id": "conv-1",
+            "_channel": "web",
+            "_user_tz": "Europe/London",
+        })).await.unwrap();
+
+        let calls = dispatcher.calls();
+        let forwarded = &calls[0].1;
+        // Model-supplied arg survives …
+        assert_eq!(forwarded.pointer("/path").and_then(|v| v.as_str()), Some("pages/notes.md"));
+        // … and every injected context key is forwarded.
+        assert_eq!(forwarded.pointer("/_user_id").and_then(|v| v.as_str()), Some("685532cc"));
+        assert_eq!(forwarded.pointer("/_conversation_id").and_then(|v| v.as_str()), Some("conv-1"));
+        assert_eq!(forwarded.pointer("/_channel").and_then(|v| v.as_str()), Some("web"));
+        assert_eq!(forwarded.pointer("/_user_tz").and_then(|v| v.as_str()), Some("Europe/London"));
+    }
+
+    #[tokio::test]
+    async fn model_supplied_user_id_cannot_override_injected_one() {
+        // SECURITY: a model must not be able to spoof its identity by placing
+        // `_user_id` inside the inner `args` it controls. The trusted, outer,
+        // handler-injected value wins.
+        let dir = TempDir::new().unwrap();
+        let dispatcher = MockDispatcher::new(&[("wiki_read", "ok")]);
+        let skill = make_skill(
+            "com.example.wiki",
+            vec![("read", ToolSpec::Builtin { r#impl: "wiki_read".into() })],
+            dir.path().to_path_buf(),
+        );
+        let tool = SkillTool::new(skill, dispatcher.clone());
+
+        tool.execute(json!({
+            "tool": "read",
+            "args": { "path": "pages/notes.md", "_user_id": "attacker-spoofed" },
+            "_user_id": "685532cc-trusted",
+        })).await.unwrap();
+
+        let calls = dispatcher.calls();
+        assert_eq!(
+            calls[0].1.pointer("/_user_id").and_then(|v| v.as_str()),
+            Some("685532cc-trusted"),
+            "outer (handler-injected) _user_id must win over the model-supplied one",
+        );
     }
 
     #[tokio::test]

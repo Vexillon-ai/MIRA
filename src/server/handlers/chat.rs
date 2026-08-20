@@ -1046,6 +1046,23 @@ fn sanitize_auto_title(raw: &str) -> Option<String> {
 }
 
 fn clean_title_line(line: &str) -> Option<String> {
+    // A line that carries markdown bold (`**…**`) or opens with an ordered-list
+    // marker (`1.`, `2)`) is a reliable tell that the model answered the *meta*
+    // question — it emitted its reasoning scaffolding ("1. **Analyze User
+    // Input:**", "**Generate Title:**") instead of a title. Reject the whole
+    // line so the caller keeps scanning (or falls back) rather than persisting
+    // the scaffolding as the conversation's name.
+    if line.contains("**") {
+        return None;
+    }
+    {
+        let t = line.trim_start();
+        let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits > 0 && t[digits..].starts_with(['.', ')']) {
+            return None;
+        }
+    }
+
     let stripped = line
         .trim_start_matches(|c: char| matches!(c, '*' | '-' | '•' | '#' | '>' | '·' | '–' | '—'))
         .trim()
@@ -1138,6 +1155,26 @@ mod auto_title_tests {
     #[test]
     fn skips_bulleted_preamble_to_reach_real_title() {
         let raw = "Here are the rules:\n- short\n- descriptive\n\nWeekend Trip Planning";
+        assert_eq!(
+            sanitize_auto_title(raw).as_deref(),
+            Some("Weekend Trip Planning"),
+        );
+    }
+
+    #[test]
+    fn rejects_numbered_bold_reasoning_scaffold() {
+        // The exact live failure: the model emitted its own step-list ("1.
+        // **Analyze User Input:**") as the title. Both the ordered-list marker
+        // and the markdown bold are meta-answer tells → reject, don't persist.
+        assert!(sanitize_auto_title("1.  **Analyze User Input:**").is_none());
+        assert!(sanitize_auto_title("2) Generate a Title").is_none());
+        assert!(sanitize_auto_title("**Generate Title:** something").is_none());
+    }
+
+    #[test]
+    fn reaches_real_title_below_numbered_bold_scaffold() {
+        // Scaffolding lines are skipped bottom-up until a clean title is found.
+        let raw = "1. **Analyze the message**\n2. **Compose a title**\nWeekend Trip Planning";
         assert_eq!(
             sanitize_auto_title(raw).as_deref(),
             Some("Weekend Trip Planning"),

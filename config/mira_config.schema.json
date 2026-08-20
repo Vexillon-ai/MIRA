@@ -566,6 +566,11 @@
           "type": "integer",
           "minimum": 1
         },
+        "readiness_cache_ttl_secs": {
+          "description": "Short TTL (seconds) the `/readyz` readiness probe caches its provider-reachability verdict for. The verdict is refreshed out of band (serve-stale-while-revalidate), so however many load balancers probe in a tight loop, at most one provider round-trip is in flight per window and no probe blocks on the provider. 0 disables caching (every probe checks the provider inline). Default 30.",
+          "type": "integer",
+          "minimum": 0
+        },
         "display_name": {
           "description": "Human-readable label for this instance (e.g. 'Tarek's MIRA'), shown by the mobile app and returned in the device-pairing payload and /api/status. Null falls back to the hostname.",
           "type": [

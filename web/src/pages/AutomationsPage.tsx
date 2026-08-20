@@ -225,6 +225,10 @@ interface EditorDraft {
   prompt:        string
   conversationStrategy: 'existing' | 'new' | 'named'
   conversationName: string
+  // 0.334.0 knobs (Advanced): tool-round budget per run, and a per-action
+  // wall-clock ceiling in seconds (0 = use the global `automations.max_action_secs`).
+  maxIterations:  number
+  maxActionSecs:  number
 }
 
 function blankDraft(): EditorDraft {
@@ -244,6 +248,8 @@ function blankDraft(): EditorDraft {
     prompt:        '',
     conversationStrategy: 'named',
     conversationName: '',
+    maxIterations:  10,
+    maxActionSecs:  0,
   }
 }
 
@@ -277,6 +283,8 @@ function draftFromSchedule(s: Schedule): EditorDraft {
     d.prompt               = s.action.prompt
     d.conversationStrategy = s.action.conversation_strategy
     d.conversationName     = s.action.conversation_name ?? ''
+    d.maxIterations        = s.action.max_iterations ?? 10
+    d.maxActionSecs        = s.action.max_action_secs ?? 0
   }
   return d
 }
@@ -294,7 +302,9 @@ function buildAction(d: EditorDraft): Action {
     conversation_name:     d.conversationName || null,
     channel:               d.channel,
     prompt:                d.prompt,
-    max_iterations:        10,
+    max_iterations:        d.maxIterations,
+    // 0 → omit so the server falls back to the global `automations.max_action_secs`.
+    ...(d.maxActionSecs > 0 ? { max_action_secs: d.maxActionSecs } : {}),
   }
 }
 
@@ -1092,6 +1102,21 @@ function EditorModal({
 
   const update = (patch: Partial<EditorDraft>) => setDraft({ ...draft, ...patch })
 
+  // A schedule that repeats more often than daily should default to a fresh
+  // conversation per run: `named` funnels every run into one thread and, over
+  // dozens of runs, blows the model's context budget. Flip named→new the moment
+  // the interval turns sub-daily. An explicit later choice of `named` is
+  // respected (this only fires on the sub-daily transition) but is still warned
+  // about in the form below.
+  const subDaily = draft.triggerKind === 'interval' && draft.intervalSecs > 0 && draft.intervalSecs < 86_400
+  useEffect(() => {
+    if (subDaily && draft.conversationStrategy === 'named') {
+      update({ conversationStrategy: 'new' })
+    }
+    // Fires on the sub-daily transition only; a later explicit `named` is kept.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subDaily])
+
   return (
     <div className={styles.modalBackdrop} onClick={onClose}>
       <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -1291,6 +1316,15 @@ function EditorModal({
           </div>
         </div>
 
+        {draft.conversationStrategy === 'named' && draft.triggerKind !== 'one_off' && (
+          <p className={styles.formHint}>
+            ⚠️ This automation repeats, and <strong>Named</strong> funnels every run
+            into a single conversation — over many runs that exhausts the model's
+            context budget. Use <strong>Always new</strong> unless you specifically
+            want one growing thread.
+          </p>
+        )}
+
         {draft.conversationStrategy === 'existing' ? (
           <p className={styles.formHint}>
             This schedule reuses a specific conversation by id. Switch to
@@ -1316,6 +1350,39 @@ function EditorModal({
             placeholder="Summarize today's calendar and any unread notes."
           />
         </div>
+
+        <details className={styles.formField}>
+          <summary>Advanced</summary>
+          <div className={styles.formField}>
+            <label>Iteration budget (tool rounds per run)</label>
+            <input
+              type="number"
+              min={1}
+              max={100}
+              value={draft.maxIterations}
+              onChange={(e) => update({ maxIterations: Math.max(1, parseInt(e.target.value || '10', 10)) })}
+            />
+            <p className={styles.formHint}>
+              How many tool rounds one run may take. A research cycle that searches,
+              fetches and then writes needs ~20+; the default is 10.
+            </p>
+          </div>
+          <div className={styles.formField}>
+            <label>Time ceiling (seconds — 0 uses the server default)</label>
+            <input
+              type="number"
+              min={0}
+              max={7200}
+              value={draft.maxActionSecs}
+              onChange={(e) => update({ maxActionSecs: Math.max(0, parseInt(e.target.value || '0', 10)) })}
+            />
+            <p className={styles.formHint}>
+              Wall-clock abort for one run. 0 uses the server default
+              (<code>automations.max_action_secs</code>, 300s); a long multi-cycle
+              research prompt wants ~900.
+            </p>
+          </div>
+        </details>
 
         <div className={styles.modalActions}>
           <div />

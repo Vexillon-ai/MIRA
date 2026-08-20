@@ -37,7 +37,13 @@ export interface PromptAction {
   channel:               string
   prompt:                string
   tools_allowed?:        string[] | null
+  // How many tool rounds one run may take. A research cycle that searches,
+  // fetches and then writes needs ~20+; the default is 10.
   max_iterations?:       number
+  // Per-action wall-clock ceiling (seconds). Omitted/undefined uses the global
+  // `automations.max_action_secs` (300). A multi-cycle research prompt sets a
+  // higher value (e.g. 900).
+  max_action_secs?:      number
 }
 
 export type Action =

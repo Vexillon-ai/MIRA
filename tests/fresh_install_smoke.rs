@@ -108,9 +108,11 @@ async fn fresh_default_install_boots_and_serves() {
     // wiring panics or the config can't build, this fails — catching the
     // startup-crash class that bricked 0.272.0–0.272.2.
     let (app, _dir) = fresh_default_router();
-    let req  = Request::builder().uri("/health").body(Body::empty()).unwrap();
+    // `/livez` is the dependency-free liveness probe (0.339.0 health-endpoint
+    // split); `/health` is now the SPA System Health page, not a server route.
+    let req  = Request::builder().uri("/livez").body(Body::empty()).unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "fresh default install must serve /health");
+    assert_eq!(resp.status(), StatusCode::OK, "fresh default install must serve /livez");
 }
 
 #[tokio::test]

@@ -127,7 +127,7 @@ where
         // The protected surface is `/api/*`. Everything else — static SPA
         // assets (/favicon.svg, /assets/*, /manifest.json), the SPA's deep
         // links served from index.html (/, /login, /chat/*, /wiki/*), and
-        // public mount points like /health — is unauthenticated by
+        // public mount points like /livez and /readyz — is unauthenticated by
         // default. Without this, setting `server.auth_token` 401s every
         // browser request for a static file and silently relies on the
         // browser's HTTP cache to keep the UI alive — the next JS bundle
@@ -251,8 +251,8 @@ mod tests {
 
     #[tokio::test]
     async fn public_route_passes_without_token() {
-        let layer = AuthLayer::new(Some("secret".to_string()), vec!["/health"]);
-        let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
+        let layer = AuthLayer::new(Some("secret".to_string()), vec!["/livez"]);
+        let req = Request::builder().uri("/livez").body(Body::empty()).unwrap();
         assert_eq!(run(layer, req).await, 200);
     }
 

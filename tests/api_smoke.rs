@@ -99,9 +99,12 @@ fn smoke_router() -> (axum::Router, TempDir) {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn health_returns_200() {
+async fn livez_returns_200() {
+    // `/livez` is the dependency-free liveness probe (0.339.0 health-endpoint
+    // split). `/health` is no longer a server route — it falls through to the
+    // SPA System Health page — so the machine liveness smoke targets `/livez`.
     let (app, _dir) = smoke_router();
-    let req  = Request::builder().uri("/health").body(Body::empty()).unwrap();
+    let req  = Request::builder().uri("/livez").body(Body::empty()).unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }

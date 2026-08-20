@@ -958,7 +958,18 @@ pub struct ServerConfig {
     // model confabulating a browser-open it cannot perform.
     #[serde(default)]
     pub web_apps: WebAppsConfig,
+
+    // Short TTL (seconds) the `/readyz` readiness probe caches its
+    // provider-reachability verdict for. The verdict is refreshed out of band
+    // (serve-stale-while-revalidate), so however many load balancers probe in a
+    // tight loop, at most one provider round-trip is in flight per window and no
+    // probe blocks on the provider. 0 = no caching (every probe checks inline).
+    // Default 30.
+    #[serde(default = "default_readiness_cache_ttl")]
+    pub readiness_cache_ttl_secs: u64,
 }
+
+fn default_readiness_cache_ttl() -> u64 { 30 }
 
 /// Serve web apps/games that MIRA's coding agent builds. Each app is served
 /// at `http://<task_id>.<host_suffix>:<port>/`, a distinct browser origin from
@@ -1091,6 +1102,7 @@ impl Default for ServerConfig {
             remote_url:           None,
             update_check:         UpdateCheckConfig::default(),
             web_apps:             WebAppsConfig::default(),
+            readiness_cache_ttl_secs: default_readiness_cache_ttl(),
         }
     }
 }
@@ -1511,7 +1523,7 @@ fn default_guardian_autonomy_kinds() -> Vec<String> { vec!["rerun_audit".to_owne
 fn default_guardian_provision_model() -> String { "qwen2.5:3b-instruct".to_owned() }
 
 /// The out-of-process Guardian liveness sentinel (`mira guardian-watch`). A
-/// separate supervised process that probes MIRA's `/health` and, if MIRA is
+/// separate supervised process that probes MIRA's `/livez` and, if MIRA is
 /// unreachable for a sustained window, delivers a DIRECT web-push alarm to the
 /// household (cold from the shared data dir — no dependency on the down MIRA).
 /// Observe-and-alarm only in this increment.
@@ -1529,8 +1541,9 @@ pub struct GuardianProcessConfig {
     #[serde(default = "default_sentinel_down_after")]
     pub down_after_failures: u32,
     // Explicit liveness URL to probe. Empty/absent = derive
-    // `http://127.0.0.1:<server.port>/health` (the unauthenticated readiness
-    // route). Override for a non-default bind / reverse-proxy.
+    // `http://127.0.0.1:<server.port>/livez` (the unauthenticated,
+    // dependency-free liveness route). Override for a non-default bind /
+    // reverse-proxy.
     #[serde(default)]
     pub probe_url: Option<String>,
     // The user id whose registered push devices receive the "MIRA is down"
@@ -3937,6 +3950,10 @@ impl MiraConfig {
         // config it wrote itself. Safe: every stripped key had no reader.
         strip_removed_keys(&mut json_value);
 
+        // Rewrite a sentinel probe_url pointing at the retired /health endpoint
+        // to /livez (0.339.0 health-endpoint split). Idempotent.
+        migrate_probe_url_health_to_livez(&mut json_value);
+
         // Validate against embedded schema
         if let Err(errors) = validate_config_json(&json_value) {
             let joined = errors.join("\n");
@@ -4940,6 +4957,32 @@ fn strip_removed_keys(v: &mut serde_json::Value) {
     drop_key(v, &["server", "max_connections"]);
 }
 
+/// Rewrite a `guardian.process.probe_url` that points at the retired `/health`
+/// machine endpoint to `/livez` (0.339.0). The sentinel only ever wanted
+/// *liveness*, and `/health` is no longer a server route — it now falls through
+/// to the SPA, so an unmigrated config would probe a full HTML page every 30s.
+/// That still counts as "alive" under the any-response rule, so it fails
+/// silently and wastefully rather than loudly; rewrite it so existing installs
+/// keep probing a real liveness endpoint. Only an *exact* `/health` path is
+/// rewritten — scheme, host, port and query are preserved, and any other path is
+/// left untouched (the operator meant it).
+fn migrate_probe_url_health_to_livez(v: &mut serde_json::Value) {
+    let Some(url_val) = v
+        .get_mut("guardian")
+        .and_then(|g| g.get_mut("process"))
+        .and_then(|p| p.get_mut("probe_url"))
+    else {
+        return;
+    };
+    let Some(raw) = url_val.as_str() else { return };
+    if let Ok(mut parsed) = url::Url::parse(raw) {
+        if parsed.path() == "/health" {
+            parsed.set_path("/livez");
+            *url_val = serde_json::Value::String(parsed.to_string());
+        }
+    }
+}
+
 impl Default for SystemEmailConfig {
     // Manual (not derived) so `Default` matches the serde defaults: a derived
     // Default gives smtp_port = 0 (violates the schema's `minimum: 1`) and
@@ -5008,6 +5051,33 @@ mod tests {
         assert!(v["memory"].get("share_across_channels").is_none());
         assert!(v["channels"]["signal"].get("socket_path").is_none());
         assert!(v["server"].get("max_connections").is_none());
+    }
+
+    #[test]
+    fn probe_url_health_is_migrated_to_livez() {
+        // An exact `/health` path is rewritten to `/livez`, preserving
+        // scheme/host/port; anything else is left alone.
+        let mut v = serde_json::json!({
+            "guardian": { "process": { "probe_url": "http://localhost:8387/health" } }
+        });
+        migrate_probe_url_health_to_livez(&mut v);
+        assert_eq!(v["guardian"]["process"]["probe_url"], "http://localhost:8387/livez");
+
+        // A non-/health path the operator set on purpose is untouched.
+        let mut custom = serde_json::json!({
+            "guardian": { "process": { "probe_url": "http://proxy.example/mira/health-check" } }
+        });
+        migrate_probe_url_health_to_livez(&mut custom);
+        assert_eq!(custom["guardian"]["process"]["probe_url"], "http://proxy.example/mira/health-check");
+
+        // Absent probe_url → no-op (no panic, key stays absent).
+        let mut empty = serde_json::json!({ "guardian": { "process": {} } });
+        migrate_probe_url_health_to_livez(&mut empty);
+        assert!(empty["guardian"]["process"].get("probe_url").is_none());
+
+        // Idempotent: re-running on an already-migrated value changes nothing.
+        migrate_probe_url_health_to_livez(&mut v);
+        assert_eq!(v["guardian"]["process"]["probe_url"], "http://localhost:8387/livez");
     }
 
     #[test]

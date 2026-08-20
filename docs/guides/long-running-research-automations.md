@@ -42,6 +42,10 @@ For real research, give it room:
 A good rule of thumb: enough rounds for several search/read cycles **plus** the
 write at the end — 20–30 is reasonable for a focused slice.
 
+You can also set it directly in the UI: open the schedule on the **Automations**
+page, expand the **Advanced** section of the editor, and set **Iteration budget
+(tool rounds per run)**.
+
 ## Limit 2 — the action timeout (`max_action_secs`)
 
 Every automation action has a wall-clock ceiling so a hung job can't run forever.
@@ -56,7 +60,8 @@ Two ways to fix it:
   > "Give that research task a **15-minute** timeout."
 
   MIRA sets `max_action_secs: 900` on the action. Other automations keep the
-  default.
+  default. In the UI, the same field is **Time ceiling (seconds)** under the
+  editor's **Advanced** section — leave it `0` to use the global default.
 - **Globally (admin):** raise `automations.max_action_secs` in
   **Settings** (or `mira_config.json`) if most of your automations run long.
 
@@ -97,4 +102,8 @@ with their reason, so you can see what it wanted to add and where.
 - [ ] Prompt tells MIRA to **write to the wiki before** summarising.
 - [ ] **Iteration budget** raised (e.g. 24) so it has rounds to search *and* write.
 - [ ] **Timeout** raised (e.g. 15 min) so it isn't cut off mid-run.
+- [ ] For automations that repeat **more often than daily**, the conversation
+      mode is **Always new** (not Named) — otherwise every run piles into one
+      thread and eventually exhausts the model's context. The editor defaults
+      sub-daily schedules to *new* and warns if you switch back to *named*.
 - [ ] **Review gate** set the way you want — queued for approval, or auto-applied.

@@ -10,8 +10,10 @@
 //! to confirm MIRA is alive and, if it isn't, raise a **direct** alarm to the
 //! household — without routing through the (down) MIRA.
 //!
-//! It probes MIRA's unauthenticated `/health` endpoint on an interval. **Any**
-//! HTTP response — even a 5xx (provider-down but process-up) — counts as alive;
+//! It probes MIRA's unauthenticated `/livez` liveness endpoint on an interval.
+//! `/livez` is dependency-free (no provider round-trip), so a busy or wedged
+//! provider can't make a healthy MIRA look down — the sentinel only ever wanted
+//! liveness, not readiness. **Any** HTTP response — even a 5xx — counts as alive;
 //! only a transport error (connection refused / timeout) counts as down. After
 //! `down_after_failures` consecutive misses it declares MIRA down and delivers a
 //! web-push alarm, opened **cold** from the shared data dir (`web_push_vapid.key`
@@ -81,15 +83,15 @@ impl SentinelState {
 }
 
 /// The liveness URL to probe: the explicit `guardian.process.probe_url` if set,
-/// else `http://127.0.0.1:<server.port>/health` (the unauthenticated readiness
-/// route). Loopback, not `server.host`, since the sentinel is co-located and a
-/// `0.0.0.0` bind isn't a dialable address.
+/// else `http://127.0.0.1:<server.port>/livez` (the unauthenticated,
+/// dependency-free liveness route). Loopback, not `server.host`, since the
+/// sentinel is co-located and a `0.0.0.0` bind isn't a dialable address.
 pub fn probe_url(config: &MiraConfig) -> String {
     config.guardian.process.probe_url.as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| format!("http://127.0.0.1:{}/health", config.server.port))
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}/livez", config.server.port))
 }
 
 /// One liveness probe. ANY HTTP response (incl. 5xx) means the process is up;
@@ -784,11 +786,11 @@ mod tests {
     fn triage_prompt_includes_context_and_handles_empty() {
         let p = triage_prompt(
             "Its last health check 2h ago showed Red: db.integrity.", 3,
-            "http://127.0.0.1:8087/health",
+            "http://127.0.0.1:8087/livez",
         );
         assert!(p.contains("MIRA-Guardian"), "{p}");
         assert!(p.contains("3 consecutive"));
-        assert!(p.contains("http://127.0.0.1:8087/health"));
+        assert!(p.contains("http://127.0.0.1:8087/livez"));
         assert!(p.contains("db.integrity"));
         // The model is offered the read-only diagnostic tools.
         assert!(p.contains("guardian_inspect") && p.contains("mira_help"));
@@ -870,13 +872,13 @@ mod tests {
     }
 
     #[test]
-    fn probe_url_defaults_to_loopback_health() {
+    fn probe_url_defaults_to_loopback_livez() {
         let mut c = MiraConfig::default();
         c.server.port = 8087;
-        assert_eq!(probe_url(&c), "http://127.0.0.1:8087/health");
+        assert_eq!(probe_url(&c), "http://127.0.0.1:8087/livez");
         // Explicit override wins; blank is ignored.
         c.guardian.process.probe_url = Some("   ".into());
-        assert_eq!(probe_url(&c), "http://127.0.0.1:8087/health");
+        assert_eq!(probe_url(&c), "http://127.0.0.1:8087/livez");
         c.guardian.process.probe_url = Some("http://mira.local:9000/healthz".into());
         assert_eq!(probe_url(&c), "http://mira.local:9000/healthz");
     }

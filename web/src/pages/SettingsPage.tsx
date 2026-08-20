@@ -2326,7 +2326,7 @@ function GuardianTab({
           The Guardian's watch loop runs <em>inside</em> MIRA, so it can't catch
           the one failure that matters most — <strong>MIRA itself going down</strong>.
           The optional <strong>liveness sentinel</strong> is a separate process
-          (<code>mira guardian-watch</code>) that probes MIRA's <code>/health</code>
+          (<code>mira guardian-watch</code>) that probes MIRA's <code>/livez</code>
           and, if MIRA is unreachable for a sustained window, sends a
           <strong> direct web-push alarm</strong> to your device — no dependency on
           the down MIRA. Observe-and-alarm only. <strong>Enabling it here
@@ -2341,7 +2341,7 @@ function GuardianTab({
         <Field label="Sentinel owns health watch" desc="When on, the sentinel also triages non-green health while MIRA is up (surfacing through MIRA), and MIRA's in-process watch loop stands down so the two don't double-alert. Off = the in-process loop owns health triage and the sentinel watches only liveness. Requires the sentinel enabled + running.">
           <Toggle value={bool('guardian.process.owns_watch', false)} onChange={(v) => set('guardian.process.owns_watch', v)} />
         </Field>
-        <Field label="Probe interval (seconds)" desc="How often the sentinel probes MIRA's /health. Minimum 5; default 30.">
+        <Field label="Probe interval (seconds)" desc="How often the sentinel probes MIRA's /livez. Minimum 5; default 30.">
           <NumberInput value={num('guardian.process.probe_interval_secs', 30)} onChange={(v) => set('guardian.process.probe_interval_secs', v)} min={5} max={3600} />
         </Field>
         <Field label="Down after N misses" desc="Consecutive failed probes before declaring MIRA down and alarming. Default 3 — high enough that a normal restart (which recovers within a window) doesn't alarm.">
@@ -2350,8 +2350,8 @@ function GuardianTab({
         <Field label="Alarm push recipient (user id)" desc="Whose registered push devices get the 'MIRA is down' alarm. Leave empty and the sentinel only logs (no push). Set it to the household admin so a phone actually buzzes.">
           <TextInput value={str('guardian.process.notify_user_id', '')} onChange={(v) => set('guardian.process.notify_user_id', v)} placeholder="(user id)" mono />
         </Field>
-        <Field label="Probe URL (optional)" desc="Override the liveness URL. Empty = http://127.0.0.1:<server port>/health. Set for a non-default bind or reverse proxy.">
-          <TextInput value={str('guardian.process.probe_url', '')} onChange={(v) => set('guardian.process.probe_url', v)} placeholder="http://127.0.0.1:8087/health" mono />
+        <Field label="Probe URL (optional)" desc="Override the liveness URL. Empty = http://127.0.0.1:<server port>/livez. Set for a non-default bind or reverse proxy.">
+          <TextInput value={str('guardian.process.probe_url', '')} onChange={(v) => set('guardian.process.probe_url', v)} placeholder="http://127.0.0.1:8087/livez" mono />
         </Field>
         <Field label="Sentinel log file (optional)" desc="Where the sentinel writes its logs. Empty = share MIRA's main log file (Advanced → Logging → File) so both processes' lines land together. Set a path to give the sentinel its own file (easier to read, especially while MIRA is down). Restart the sentinel after changing.">
           <TextInput value={str('guardian.process.log_file', '')} onChange={(v) => set('guardian.process.log_file', v)} placeholder="(share MIRA's log file)" mono />
