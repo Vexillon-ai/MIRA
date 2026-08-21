@@ -9,7 +9,7 @@ import {
   MessagesSquare, Brain, BookOpen, Server, Wifi, Search,
   Activity, FileText, Radio, Users2, Calendar, Bot, Boxes, Network,
   ScrollText, ShieldCheck, HeartPulse, Plug, Mail, Package, BotMessageSquare, Workflow,
-  Sparkles, LayoutGrid,
+  Sparkles, LayoutGrid, SlidersHorizontal,
 } from 'lucide-react'
 import { conversationsApi } from '@/api/conversations'
 import { useAuthStore } from '@/store/authStore'
@@ -205,6 +205,7 @@ export default function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         <NavItem to="/mcp"           icon={<Plug size={15} />}            label="MCP"       collapsed={sidebarCollapsed} />
         <NavItem to="/email"         icon={<Mail size={15} />}            label="Email"     collapsed={sidebarCollapsed} />
         <NavItem to="/presence"      icon={<Sparkles size={15} />}        label="Presence"  collapsed={sidebarCollapsed} />
+        <NavItem to="/preferences"   icon={<SlidersHorizontal size={15} />} label="Preferences" collapsed={sidebarCollapsed} />
 
         {user?.role === 'admin' && (
           <>

@@ -37,7 +37,7 @@ Two independent settings on a Telegram account:
 - Pick a voice (e.g. Kokoro `af_heart`, `bf_emma`). Enable Kokoro for natural local speech.
 
 ## Pair the mobile app
-- In the web UI go to **Settings → Notifications → Pair a mobile device** and click **Show pairing code**. Open the MIRA app on your phone and scan the QR — it configures the server URL and signs you in with no password to type. The code is single-use and expires in ~2 minutes; click **Regenerate** if it lapses. The panel flips to "✓ Paired" once the phone claims it.
+- In the web UI go to **My Preferences → Notifications & devices → Pair a mobile device** and click **Show pairing code** (My Preferences is in the sidebar and open to **every** user — you don't need to be an admin). Open the MIRA app on your phone and scan the QR — it configures the server URL and signs you in with no password to type. The code is single-use and expires in ~2 minutes; click **Regenerate** if it lapses. The panel flips to "✓ Paired" once the phone claims it.
 - The QR is only ever drawn in your authenticated browser; the pairing secret is stored hashed and consumed on first use.
 
 ## Send mobile push via Firebase (FCM)

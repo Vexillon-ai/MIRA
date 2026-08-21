@@ -13,7 +13,9 @@ admins, turning on push delivery to the app via Firebase Cloud Messaging
 
 ## Pair a device
 
-1. In the web UI, open **Settings → Notifications**.
+1. In the web UI, open **My Preferences → Notifications & devices** (the
+   Preferences link is in the sidebar and available to **every** user — you do
+   not need to be an admin).
 2. Under **Pair a mobile device**, click **Show pairing code**. A QR code
    appears with a countdown.
 3. Open the MIRA app on your phone and scan it.

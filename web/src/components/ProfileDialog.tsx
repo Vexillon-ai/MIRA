@@ -8,67 +8,13 @@ import toast from 'react-hot-toast'
 import { api } from '@/api/client'
 import { onboardingApi, onboardingErrorMessage } from '@/api/onboarding'
 import { useAuthStore } from '@/store/authStore'
-import type {
-  ChannelDescriptor, ChannelVoicePrefs, User, VoicePrefsMap,
-  VoiceResponsePolicy,
-} from '@/api/types'
+import type { User } from '@/api/types'
 import Avatar, { AVATAR_PRESETS } from './Avatar'
-import VoiceIdPicker from './VoiceIdPicker'
 import styles from './ProfileDialog.module.css'
 
 interface Props {
   open: boolean
   onClose: () => void
-}
-
-/// Apply a partial change to one channel's prefs, dropping the entry entirely
-/// when it ends up fully inheriting (no policy + no voice id). This keeps the
-/// stored map canonical so the dirty check doesn't flap on no-op edits.
-function updatePref(
-  map: VoicePrefsMap,
-  channel: string,
-  patch: Partial<ChannelVoicePrefs>,
-): VoicePrefsMap {
-  const next: ChannelVoicePrefs = { ...(map[channel] ?? {}), ...patch }
-  const empty =
-    (next.response_policy === null || next.response_policy === undefined) &&
-    (next.voice_id === null || next.voice_id === undefined ||
-     (typeof next.voice_id === 'string' && next.voice_id.trim() === ''))
-  const out = { ...map }
-  if (empty) delete out[channel]
-  else        out[channel] = next
-  return out
-}
-
-function normaliseVoicePrefs(map: VoicePrefsMap): VoicePrefsMap {
-  const out: VoicePrefsMap = {}
-  for (const [k, v] of Object.entries(map)) {
-    const trimmedVoice =
-      typeof v.voice_id === 'string' ? v.voice_id.trim() : v.voice_id
-    const entry: ChannelVoicePrefs = {}
-    if (v.response_policy) entry.response_policy = v.response_policy
-    if (typeof trimmedVoice === 'string' && trimmedVoice !== '') {
-      entry.voice_id = trimmedVoice
-    }
-    if (entry.response_policy || entry.voice_id) out[k] = entry
-  }
-  return out
-}
-
-function voicePrefsEqual(a: VoicePrefsMap, b: VoicePrefsMap): boolean {
-  const na = normaliseVoicePrefs(a)
-  const nb = normaliseVoicePrefs(b)
-  const ka = Object.keys(na).sort()
-  const kb = Object.keys(nb).sort()
-  if (ka.length !== kb.length) return false
-  for (let i = 0; i < ka.length; i++) {
-    if (ka[i] !== kb[i]) return false
-    const ea = na[ka[i]]
-    const eb = nb[kb[i]]
-    if ((ea.response_policy ?? null) !== (eb.response_policy ?? null)) return false
-    if ((ea.voice_id        ?? null) !== (eb.voice_id        ?? null)) return false
-  }
-  return true
 }
 
 export default function ProfileDialog({ open, onClose }: Props) {
@@ -82,7 +28,6 @@ export default function ProfileDialog({ open, onClose }: Props) {
   const [email, setEmail]             = useState('')
   const [phone, setPhone]             = useState('')
   const [preferredContact, setPreferredContact] = useState('')
-  const [voicePrefs, setVoicePrefs]   = useState<VoicePrefsMap>({})
   const [newPw, setNewPw]             = useState('')
   const [confirmPw, setConfirmPw]     = useState('')
   const [pwError, setPwError]         = useState('')
@@ -94,7 +39,6 @@ export default function ProfileDialog({ open, onClose }: Props) {
     setEmail(user.email ?? '')
     setPhone(user.phone ?? '')
     setPreferredContact(user.preferred_contact ?? '')
-    setVoicePrefs(user.voice_prefs ?? {})
     setNewPw('')
     setConfirmPw('')
     setPwError('')
@@ -114,7 +58,6 @@ export default function ProfileDialog({ open, onClose }: Props) {
       email: string | null
       phone: string | null
       preferred_contact: string | null
-      voice_prefs: VoicePrefsMap
     }) => {
       if (!user) throw new Error('No user')
       const r = await api.put<User>(`/api/users/${user.id}`, body)
@@ -189,18 +132,6 @@ export default function ProfileDialog({ open, onClose }: Props) {
     onError: () => toast.error('Could not remove avatar'),
   })
 
-  // ── Voice channels ────────────────────────────────────────────────────────
-  // Per-channel prefs grid is driven off the registry so plugin channels show
-  // up automatically. Stale time is generous because the set rarely changes
-  // within a session — adding a plugin channel needs a server restart anyway.
-  const { data: channels } = useQuery({
-    queryKey: ['channels'],
-    queryFn:  async () => (await api.get<ChannelDescriptor[]>('/api/channels')).data,
-    enabled:  open && !!user,
-    staleTime: 5 * 60_000,
-    refetchOnWindowFocus: false,
-  })
-
   // ── Onboarding revisit ────────────────────────────────────────────────────
 
   const { data: onbState } = useQuery({
@@ -250,8 +181,7 @@ export default function ProfileDialog({ open, onClose }: Props) {
     (displayName      || '') !== (user.display_name      ?? '') ||
     (email            || '') !== (user.email             ?? '') ||
     (phone            || '') !== (user.phone             ?? '') ||
-    (preferredContact || '') !== (user.preferred_contact ?? '') ||
-    !voicePrefsEqual(voicePrefs, user.voice_prefs ?? {})
+    (preferredContact || '') !== (user.preferred_contact ?? '')
 
   const currentPresetKey = user.avatar?.startsWith('preset:')
     ? user.avatar.slice('preset:'.length)
@@ -264,7 +194,6 @@ export default function ProfileDialog({ open, onClose }: Props) {
       email:             email.trim()       || null,
       phone:             phone.trim()       || null,
       preferred_contact: preferredContact   || null,
-      voice_prefs:       normaliseVoicePrefs(voicePrefs),
     })
   }
 
@@ -418,53 +347,6 @@ export default function ProfileDialog({ open, onClose }: Props) {
                 <Check size={14} />
                 {profileMut.isPending ? 'Saving…' : 'Save changes'}
               </button>
-            </div>
-          </section>
-
-          {/* Voice preferences */}
-          <section className={styles.section}>
-            <h3 className={styles.sectionTitle}>Voice per channel</h3>
-            <p className={styles.onbHint}>
-              Override how the assistant replies on each channel. Anything
-              left as <em>Inherit</em> follows the server-wide default.
-            </p>
-            <div className={styles.groupList}>
-              {(channels ?? []).filter((c) => c.supports_voice).map((ch) => {
-                const entry  = voicePrefs[ch.id] ?? {}
-                const policy = entry.response_policy ?? ''
-                const vid    = entry.voice_id ?? ''
-                return (
-                  <div key={ch.id} className={styles.voiceRow}>
-                    <div className={styles.voiceLabel}>{ch.display_name}</div>
-                    <select
-                      className={styles.input}
-                      aria-label={`${ch.display_name} response policy`}
-                      value={policy}
-                      onChange={(e) => {
-                        const v = e.target.value as VoiceResponsePolicy | ''
-                        setVoicePrefs((m) => updatePref(m, ch.id, {
-                          response_policy: v === '' ? null : v,
-                        }))
-                      }}
-                    >
-                      <option value="">Inherit</option>
-                      <option value="always">Always</option>
-                      <option value="on_voice_input">On voice input</option>
-                      <option value="never">Never</option>
-                    </select>
-                    <VoiceIdPicker
-                      ariaLabel={`${ch.display_name} voice id`}
-                      channel={ch.id}
-                      value={vid}
-                      onChange={(v) => {
-                        setVoicePrefs((m) => updatePref(m, ch.id, {
-                          voice_id: v === '' ? null : v,
-                        }))
-                      }}
-                    />
-                  </div>
-                )
-              })}
             </div>
           </section>
 

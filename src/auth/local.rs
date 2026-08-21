@@ -14,11 +14,17 @@ use argon2::{
 use rand::{Rng, RngCore};
 use tracing::{info, warn};
 
-use crate::auth::models::{AuthDb, NewUser, Role, User, UserProfile};
+use crate::auth::models::{AuthDb, NewUser, Role, StoredRefreshToken, User, UserProfile};
 use crate::auth::groups::{Group, NewGroup, UpdateGroup};
 use crate::auth::oidc::sanitize_username;
 use crate::auth::tokens::{hash_refresh_token, issue_long_lived_access_token, issue_token_pair, TokenPair};
 use crate::MiraError;
+
+/// Grace window (ms) in which the just-rotated refresh token may be replayed
+/// without tripping theft detection — covers the lost-response / OS-killed-app
+/// race common on mobile. Kept short so a genuinely stolen token has almost no
+/// reuse window.
+const REFRESH_GRACE_MS: i64 = 30_000;
 
 // ── LocalAuthService ──────────────────────────────────────────────────────────
 
@@ -131,7 +137,10 @@ impl LocalAuthService {
         let pair = issue_token_pair(user, &self.jwt_secret)?;
         let token_hash = hash_refresh_token(&pair.refresh_token);
         let expires_at = self.refresh_expires_at();
-        self.db.save_refresh_token(&user.id, &token_hash, expires_at, user_agent, ip)?;
+        // Each fresh login / device pairing starts its OWN rotation family, so
+        // reuse detection on one device never touches another's sessions.
+        let family_id = uuid::Uuid::new_v4().to_string();
+        self.db.save_refresh_token(&user.id, &token_hash, expires_at, user_agent, ip, Some(&family_id))?;
         self.db.update_last_login(&user.id)?;
         Ok(pair)
     }
@@ -141,46 +150,69 @@ impl LocalAuthService {
     pub async fn refresh(&self, raw_refresh_token: &str) -> Result<(TokenPair, User), MiraError> {
         let token_hash = hash_refresh_token(raw_refresh_token);
 
-        match self.db.find_refresh_token(&token_hash)? {
-            None => {
-                // Token not found → possible theft; revocation is a no-op since
-                // we don't know the user_id without the token. Return Unauthorized.
-                warn!("Refresh token not found — possible theft attempt");
-                Err(MiraError::Unauthorized)
+        let Some(stored) = self.db.find_refresh_token(&token_hash)? else {
+            // Not found → possible theft; revocation is a no-op since we don't
+            // know the user_id without the token.
+            warn!("Refresh token not found — possible theft attempt");
+            return Err(MiraError::Unauthorized);
+        };
+
+        if stored.revoked {
+            // A revoked token was replayed. Two very different causes:
+            //  1) BENIGN RACE — the app refreshed, the server rotated, but the
+            //     reply was lost (network blip / OS-killed the app before it
+            //     persisted the new token), so it retried the just-rotated token.
+            //     Signature: this token's successor is still the CURRENT head
+            //     (un-revoked, not itself rotated) AND it happened within the
+            //     grace window. Honour it by rotating from the head — no lockout.
+            //  2) REAL REUSE — an older/stale token, or one whose successor was
+            //     already consumed → treat as theft and revoke the FAMILY (this
+            //     one device), never the whole account.
+            if let Some(repl_hash) = stored.replaced_by.as_deref() {
+                if let Some(head) = self.db.find_refresh_token(repl_hash)? {
+                    let fresh = (unix_now_ms() - head.created_at) < REFRESH_GRACE_MS;
+                    if !head.revoked && head.replaced_by.is_none() && fresh {
+                        return self.rotate_from(head).await;
+                    }
+                }
             }
-            Some(stored) => {
-                if stored.revoked {
-                    // Revoked token reuse — revoke everything for this user (theft detection).
-                    warn!("Revoked refresh token reused for user {} — revoking all tokens", stored.user_id);
+            match stored.family_id.as_deref() {
+                Some(family) => {
+                    warn!("Revoked refresh token reused (user {}) — revoking family {}", stored.user_id, family);
+                    self.db.revoke_family(family)?;
+                }
+                None => {
+                    // Legacy token with no family — fall back to the old
+                    // account-wide revoke (can't scope it).
+                    warn!("Revoked legacy refresh token reused for user {} — revoking all tokens", stored.user_id);
                     self.db.revoke_all_for_user(&stored.user_id)?;
-                    return Err(MiraError::Unauthorized);
                 }
-
-                let now_ms = unix_now_ms();
-                if stored.expires_at < now_ms {
-                    return Err(MiraError::AuthError("Refresh token expired".into()));
-                }
-
-                // Revoke old token.
-                self.db.revoke_refresh_token(&token_hash)?;
-
-                let user = self
-                    .db
-                    .find_by_id(&stored.user_id)?
-                    .ok_or(MiraError::Unauthorized)?;
-
-                if !user.is_active {
-                    return Err(MiraError::Unauthorized);
-                }
-
-                let pair = issue_token_pair(&user, &self.jwt_secret)?;
-                let new_hash    = hash_refresh_token(&pair.refresh_token);
-                let expires_at  = self.refresh_expires_at();
-                self.db.save_refresh_token(&user.id, &new_hash, expires_at, None, None)?;
-
-                Ok((pair, user))
             }
+            return Err(MiraError::Unauthorized);
         }
+
+        if stored.expires_at < unix_now_ms() {
+            return Err(MiraError::AuthError("Refresh token expired".into()));
+        }
+        self.rotate_from(stored).await
+    }
+
+    /// Rotate a valid (current) refresh token into a fresh pair, keeping the same
+    /// family. Records the successor on the old token so reuse detection can spot
+    /// a benign race. Legacy tokens (no family) adopt a new one here.
+    async fn rotate_from(&self, current: StoredRefreshToken) -> Result<(TokenPair, User), MiraError> {
+        let user = self.db.find_by_id(&current.user_id)?.ok_or(MiraError::Unauthorized)?;
+        if !user.is_active {
+            return Err(MiraError::Unauthorized);
+        }
+        let pair       = issue_token_pair(&user, &self.jwt_secret)?;
+        let new_hash   = hash_refresh_token(&pair.refresh_token);
+        let expires_at = self.refresh_expires_at();
+        let family     = current.family_id.clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        self.db.rotate_refresh_token(&current.token_hash, &new_hash)?;
+        self.db.save_refresh_token(&user.id, &new_hash, expires_at, None, None, Some(&family))?;
+        Ok((pair, user))
     }
 
     // ── Logout ────────────────────────────────────────────────────────────────
@@ -580,4 +612,64 @@ fn unix_now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod refresh_family_tests {
+    use super::*;
+    use crate::auth::{NewUser, Role};
+
+    async fn svc_with_user() -> (tempfile::TempDir, LocalAuthService) {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = LocalAuthService::new(&dir.path().join("auth.db"), "jwt-test-secret".into(), 7).unwrap();
+        svc.create_user(NewUser {
+            username: "alice".into(), display_name: None, email: None,
+            password: "test-password-1234".into(), role: Role::User,
+        }).unwrap();
+        (dir, svc)
+    }
+
+    // A benign refresh race — the app replays the just-rotated token (lost
+    // response / OS-killed before it saved the new one) — is honoured within the
+    // grace window instead of nuking the session.
+    #[tokio::test]
+    async fn grace_window_reissues_on_immediate_replay() {
+        let (_d, svc) = svc_with_user().await;
+        let (a, _u) = svc.login("alice", "test-password-1234", None, None).await.unwrap();
+
+        // Normal rotation: a -> a2.
+        let (a2, _) = svc.refresh(&a.refresh_token).await.unwrap();
+        // Replay the just-rotated `a` (still within grace) — must SUCCEED, not
+        // revoke the family. It re-issues from the current head.
+        let replay = svc.refresh(&a.refresh_token).await;
+        assert!(replay.is_ok(), "immediate replay within grace should re-issue, got {:?}", replay.err());
+        // The family is intact: the head issued by the grace path still refreshes.
+        let (a3, _) = replay.unwrap();
+        assert!(svc.refresh(&a3.refresh_token).await.is_ok(), "family should still be live after a graced race");
+        let _ = a2; // (a2 was rotated by the grace path; not reused here)
+    }
+
+    // Real reuse (a stale grandparent token) revokes ONLY that device's family —
+    // a second device logged into the same account keeps working. This is the
+    // multi-device logout bug the fix targets.
+    #[tokio::test]
+    async fn stale_reuse_revokes_only_its_family_not_other_devices() {
+        let (_d, svc) = svc_with_user().await;
+        // Two independent device sessions (two families).
+        let (dev_a, _) = svc.login("alice", "test-password-1234", None, None).await.unwrap();
+        let (dev_b, _) = svc.login("alice", "test-password-1234", None, None).await.unwrap();
+
+        // Advance device A twice so the original token's successor is itself
+        // rotated (no longer the head) — a replay of the original is now
+        // unambiguously stale, not a grace race.
+        let (a2, _) = svc.refresh(&dev_a.refresh_token).await.unwrap();
+        let (a3, _) = svc.refresh(&a2.refresh_token).await.unwrap();
+
+        // Replay the original device-A token → theft path → revoke family A only.
+        assert!(svc.refresh(&dev_a.refresh_token).await.is_err(), "stale reuse must be rejected");
+        // Family A is dead: its current head can no longer refresh.
+        assert!(svc.refresh(&a3.refresh_token).await.is_err(), "the reused family should be fully revoked");
+        // Device B (a different family) is UNAFFECTED — the whole point.
+        assert!(svc.refresh(&dev_b.refresh_token).await.is_ok(), "other devices must keep their session");
+    }
 }

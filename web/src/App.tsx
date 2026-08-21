@@ -33,6 +33,7 @@ import PolicyPage from '@/pages/PolicyPage'
 import SettingsPage from '@/pages/SettingsPage'
 import StatusPage from '@/pages/StatusPage'
 import PresencePage from '@/pages/PresencePage'
+import PreferencesPage from '@/pages/PreferencesPage'
 import SystemHealthPage from '@/pages/SystemHealthPage'
 import UsersPage from '@/pages/UsersPage'
 import GroupsPage from '@/pages/GroupsPage'
@@ -115,6 +116,7 @@ export default function App() {
             <Route path="/sessions" element={<SessionsPage />} />
             <Route path="/status" element={<StatusPage />} />
             <Route path="/presence" element={<PresencePage />} />
+            <Route path="/preferences" element={<PreferencesPage />} />
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/channel-accounts" element={<ChannelAccountsPage />} />
             <Route path="/mcp" element={<McpPage />} />

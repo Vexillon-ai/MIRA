@@ -102,7 +102,14 @@ pub struct StoredRefreshToken {
     pub token_hash: String,
     pub user_id:    String,
     pub expires_at: i64,
+    pub created_at: i64,
     pub revoked:    bool,
+    /// Rotation lineage this token belongs to (one device session). `None` on
+    /// legacy rows minted before token families.
+    pub family_id:  Option<String>,
+    /// Hash of the token this one rotated into (`None` until it's rotated). Used
+    /// to tell a benign refresh race from real reuse.
+    pub replaced_by: Option<String>,
 }
 
 // ── Device pairing (QR mobile onboarding) ───────────────────────────────────────
@@ -354,9 +361,21 @@ impl AuthDb {
             "ALTER TABLE users DROP COLUMN voice_id",
             "ALTER TABLE users DROP COLUMN voice_speed",
             "ALTER TABLE users DROP COLUMN auto_speak",
+            // Refresh-token FAMILIES (device-scoped rotation). `family_id` groups
+            // a device's rotation lineage; `replaced_by` records the successor a
+            // token rotated into. Reuse detection revokes only the offending
+            // FAMILY (that device), not every session on the account — so a
+            // benign refresh race on one device no longer logs out the others.
+            // NULL on legacy rows (pre-migration); they adopt a family on their
+            // next rotation and fall back to user-wide revoke until then.
+            "ALTER TABLE refresh_tokens ADD COLUMN family_id TEXT",
+            "ALTER TABLE refresh_tokens ADD COLUMN replaced_by TEXT",
         ] {
             let _ = conn.execute(sql, []);
         }
+        // Index the family so revoke-by-family is cheap.
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family ON refresh_tokens(family_id)", []);
 
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
@@ -709,13 +728,14 @@ impl AuthDb {
         expires_at: i64,
         user_agent: Option<&str>,
         ip:         Option<&str>,
+        family_id:  Option<&str>,
     ) -> Result<(), MiraError> {
         let now = Self::now_ms();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO refresh_tokens (token_hash, user_id, expires_at, created_at, revoked, user_agent, ip_address)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
-            params![token_hash, user_id, expires_at, now, user_agent, ip],
+            "INSERT INTO refresh_tokens (token_hash, user_id, expires_at, created_at, revoked, user_agent, ip_address, family_id)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)",
+            params![token_hash, user_id, expires_at, now, user_agent, ip, family_id],
         )
         .map_err(|e| MiraError::DatabaseError(format!("save_refresh_token: {}", e)))?;
         Ok(())
@@ -724,14 +744,18 @@ impl AuthDb {
     pub fn find_refresh_token(&self, token_hash: &str) -> Result<Option<StoredRefreshToken>, MiraError> {
         let conn = self.conn.lock().unwrap();
         let result = conn.query_row(
-            "SELECT token_hash, user_id, expires_at, revoked FROM refresh_tokens WHERE token_hash = ?1",
+            "SELECT token_hash, user_id, expires_at, created_at, revoked, family_id, replaced_by \
+             FROM refresh_tokens WHERE token_hash = ?1",
             params![token_hash],
             |row| {
                 Ok(StoredRefreshToken {
-                    token_hash: row.get(0)?,
-                    user_id:    row.get(1)?,
-                    expires_at: row.get(2)?,
-                    revoked:    row.get::<_, i64>(3)? != 0,
+                    token_hash:  row.get(0)?,
+                    user_id:     row.get(1)?,
+                    expires_at:  row.get(2)?,
+                    created_at:  row.get(3)?,
+                    revoked:     row.get::<_, i64>(4)? != 0,
+                    family_id:   row.get(5)?,
+                    replaced_by: row.get(6)?,
                 })
             },
         );
@@ -747,6 +771,32 @@ impl AuthDb {
         conn.execute(
             "UPDATE refresh_tokens SET revoked=1 WHERE token_hash=?1",
             params![token_hash],
+        )
+        .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Rotate a token: mark it revoked AND record the successor it rotated into,
+    /// so reuse detection can distinguish a benign race (the immediately-previous
+    /// token) from real theft.
+    pub fn rotate_refresh_token(&self, token_hash: &str, replaced_by: &str) -> Result<(), MiraError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE refresh_tokens SET revoked=1, replaced_by=?2 WHERE token_hash=?1",
+            params![token_hash, replaced_by],
+        )
+        .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Revoke every token in one rotation family (one device session) — the
+    /// device-scoped counterpart to `revoke_all_for_user`. This is what reuse
+    /// detection uses so one device's replay doesn't sign out the others.
+    pub fn revoke_family(&self, family_id: &str) -> Result<(), MiraError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE refresh_tokens SET revoked=1 WHERE family_id=?1",
+            params![family_id],
         )
         .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
         Ok(())

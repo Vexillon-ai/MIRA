@@ -1,0 +1,78 @@
+/* Self-contained theme-card grid for the per-user "My Preferences" page.
+   Mirrors the admin Settings appearance grid so both look identical. */
+
+.themeGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+.themeCard {
+  position: relative;
+  padding: 10px;
+  border: 1.5px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-base);
+  cursor: pointer;
+  transition: all var(--transition);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.themeCard:hover {
+  border-color: var(--accent-border);
+  background: var(--bg-elevated);
+}
+
+.themeCardActive {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+.themePreview {
+  width: 100%;
+  height: 44px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 8px;
+}
+
+.themePreviewAccent {
+  height: 8px;
+  border-radius: 4px;
+  width: 55%;
+}
+
+.themePreviewBar {
+  height: 5px;
+  border-radius: 3px;
+  width: 80%;
+  opacity: 0.4;
+  background: #888;
+}
+
+.themeCardLabel {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.themeCardCheck {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 9px;
+}
