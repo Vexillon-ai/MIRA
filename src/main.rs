@@ -965,6 +965,14 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
 
     #[cfg(target_os = "windows")]
     {
+        // Reap stale upgrade sidelines (`mira.exe.old*`, `.mira.exe.upgrade-*`)
+        // HERE, before the SCM dispatch — because that dispatch blocks forever in
+        // the service case, so the later `if args.server` cleanup call is only
+        // ever reached by a console `mira --server`, never the SCM service (the
+        // only way MIRA runs on Windows). That gap leaked 1.3 GB of orphaned
+        // `.old` files across upgrades. Cheap + best-effort; skips locked files.
+        mira::install::binary_upgrade::cleanup_sidelined_binary();
+
         // Route an SCM start to the right service entry. Our two services share
         // one binary; the sentinel service's ImagePath carries `guardian-watch`,
         // so its presence in the launch args tells us to attach as the sentinel

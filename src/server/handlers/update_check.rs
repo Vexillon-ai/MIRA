@@ -157,9 +157,12 @@ fn merge(body: &mut serde_json::Value, extra: serde_json::Value) {
 /// guidance where we can't (Docker → pull a new image; unsupervised → restart
 /// manually).
 fn upgrade_capabilities() -> serde_json::Value {
-    use crate::install::{detect_host, supervisor_unit_path, HostKind};
+    use crate::install::{detect_host, HostKind};
     let host = detect_host();
-    let service_managed = supervisor_unit_path().map(|p| p.exists()).unwrap_or(false);
+    // Use the SHARED supervisor detector (same as /api/status) — not a unit-file
+    // stat, which is always false for a Windows SCM service and wrongly reported
+    // Windows as unsupervised (hiding the Upgrade + Rollback buttons).
+    let service_managed = crate::install::is_self_restartable();
     let host_kind = match host {
         HostKind::LinuxSystemdUser | HostKind::LinuxNoSystemdUser => "linux",
         HostKind::Docker  => "docker",
@@ -383,6 +386,19 @@ pub async fn upgrade(
         })));
     }
 
+    // Concurrency guard (race-free: claims the single upgrade slot under a lock).
+    // A frozen-looking banner used to make users re-click, and each click started
+    // a whole independent download→verify→swap onto the SAME paths — two swaps
+    // racing on the exe is a corruption risk, not just wasted bandwidth. Refuse
+    // the second with 409 and hand back the in-flight job's phase.
+    if !crate::install::binary_upgrade::try_begin_upgrade() {
+        let s = crate::install::binary_upgrade::upgrade_status();
+        return (StatusCode::CONFLICT, Json(json!({
+            "error": "an upgrade is already in progress",
+            "status": s,
+        })));
+    }
+
     std::thread::spawn(move || {
         // Swap the binary but do NOT let run_binary_upgrade restart via
         // `svc.stop()`/`start()` on its own service — that races the live
@@ -402,10 +418,19 @@ pub async fn upgrade(
         };
         match crate::install::binary_upgrade::run_binary_upgrade(opts) {
             Ok(()) => {
+                // Leave the job at `restarting` (don't clear it) — the process is
+                // about to be replaced, so the UI polls the status until the
+                // server drops, then reconnects to the new build.
+                crate::install::binary_upgrade::report_phase("restarting");
                 tracing::info!("self-upgrade: swap complete — triggering restart");
                 restart.notify_waiters();
             }
-            Err(e) => tracing::error!("self-upgrade failed (running binary untouched): {e}"),
+            Err(e) => {
+                // Publish the failure so the UI shows a real error (not a silent
+                // stall) and releases the slot for a retry.
+                crate::install::binary_upgrade::finish_upgrade(Err(e.to_string()));
+                tracing::error!("self-upgrade failed (running binary untouched): {e}");
+            }
         }
     });
 
@@ -414,6 +439,18 @@ pub async fn upgrade(
         "message": "Upgrade started — MIRA will download, verify, swap, and restart. \
                     This page will reconnect shortly."
     })))
+}
+
+/// `GET /api/admin/upgrade/status` — current self-upgrade phase/progress, so the
+/// UI shows real state (downloading N/​M bytes → verifying → swapping →
+/// restarting, or a concrete error) instead of guessing against a fixed timeout.
+/// Admin-only. Returns the idle status when no upgrade has run this process.
+pub async fn upgrade_status(AuthUser(me): AuthUser) -> (StatusCode, Json<serde_json::Value>) {
+    if me.role != Role::Admin {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "admin only" })));
+    }
+    let s = crate::install::binary_upgrade::upgrade_status();
+    (StatusCode::OK, Json(json!(s)))
 }
 
 /// SemVer-aware comparison. `0.145.1` < `0.146.0` < `0.146.1`. Falls

@@ -349,6 +349,48 @@ pub fn supervisor_unit_path() -> Option<PathBuf> {
     None
 }
 
+/// The single source of truth for "is this process supervised, and by what" —
+/// used by BOTH `/api/status` and the self-upgrade capability check so they can
+/// never disagree (they did: `/api/status` said `scm` while update-check said
+/// unsupervised, because the latter probed a Windows service as if it were a
+/// filesystem unit path). `systemd` / `launchd` / `docker` / `scm`, or `None`
+/// for an unsupervised console run. Detection keys off the launcher's markers
+/// (systemd `INVOCATION_ID`, launchd `XPC_SERVICE_NAME`, the Docker marker
+/// file / cgroup, and — on Windows — whether the SCM dispatcher launched us),
+/// NOT a unit-file path (a Windows service has no file to stat).
+pub fn detect_supervisor() -> Option<&'static str> {
+    if std::env::var_os("INVOCATION_ID").is_some() {
+        return Some("systemd");
+    }
+    if let Ok(svc) = std::env::var("XPC_SERVICE_NAME") {
+        if svc.starts_with("com.mira") {
+            return Some("launchd");
+        }
+    }
+    if std::path::Path::new("/.dockerenv").exists() {
+        return Some("docker");
+    }
+    if let Ok(cg) = std::fs::read_to_string("/proc/1/cgroup") {
+        if cg.contains("docker") || cg.contains("containerd") || cg.contains("podman") {
+            return Some("docker");
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if windows::is_running_under_scm() {
+            return Some("scm");
+        }
+    }
+    None
+}
+
+/// Whether a supervisor is present that can restart us in place after a binary
+/// swap (systemd / launchd / Windows SCM). Docker is supervised but can't
+/// self-upgrade (it must pull a new image), so it's excluded here.
+pub fn is_self_restartable() -> bool {
+    matches!(detect_supervisor(), Some("systemd") | Some("launchd") | Some("scm"))
+}
+
 pub fn run_uninstall() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "linux")]
     {

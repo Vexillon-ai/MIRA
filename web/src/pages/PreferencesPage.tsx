@@ -11,11 +11,15 @@
 
 import { SlidersHorizontal, Bell, Palette, Volume2 } from 'lucide-react'
 import NotificationSettings from '@/components/NotificationSettings'
+import CompanionCheckinTest from '@/components/CompanionCheckinTest'
+import BriefingTestButton from '@/components/BriefingTestButton'
 import ThemePicker from '@/components/ThemePicker'
 import VoiceReplyPrefs from '@/components/VoiceReplyPrefs'
+import { useUiStore } from '@/store/uiStore'
 import styles from './PreferencesPage.module.css'
 
 export default function PreferencesPage() {
+  const { sidebarCollapsed, setSidebarCollapsed } = useUiStore()
   return (
     <div className={styles.page}>
       <div className={styles.header}>
@@ -34,14 +38,27 @@ export default function PreferencesPage() {
               Pair your phone (scan the QR in the MIRA app) and turn on browser push so MIRA can reach you.
             </p>
             <NotificationSettings />
+            <p className={styles.cardDesc} style={{ marginTop: 18 }}>
+              Test that proactive messages actually reach you:
+            </p>
+            <CompanionCheckinTest />
+            <BriefingTestButton />
           </div>
         </section>
 
         <section className={styles.card}>
           <div className={styles.cardHead}><Palette size={15} /> Appearance</div>
           <div className={styles.cardBody}>
-            <p className={styles.cardDesc}>Pick a theme for the web interface. Saved in this browser.</p>
+            <p className={styles.cardDesc}>Web-interface preferences for this browser.</p>
             <ThemePicker />
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 16, fontSize: 13 }}>
+              <input
+                type="checkbox"
+                checked={sidebarCollapsed}
+                onChange={(e) => setSidebarCollapsed(e.target.checked)}
+              />
+              Start with the sidebar collapsed
+            </label>
           </div>
         </section>
 

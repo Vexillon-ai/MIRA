@@ -182,8 +182,14 @@ MIRA can keep itself current and recover from a bad update.
   **Upgrade now** button) downloads the signed release archive for **this
   host's** target (Linux/macOS `.tar.gz`, Windows `.zip`; x86_64 or aarch64),
   **verifies the minisign signature** against the embedded public key, swaps the
-  binary, and restarts via the service supervisor. On Windows the running
-  `.exe` is renamed aside and cleaned up on the next boot. **Docker** installs
+  binary, and restarts via the service supervisor. The Settings/banner UI shows
+  **real progress** — a pollable job surface reports the live phase
+  (*downloading N% → verifying → installing → restarting*), so a slow multi-minute
+  download no longer looks like a frozen upgrade, and a real failure surfaces a
+  concrete error instead of stalling. An upgrade is **single-flight**: a second
+  request while one is running is refused (HTTP 409) rather than starting a racing
+  swap. On Windows the running `.exe` is renamed aside and its stale sidelines are
+  reaped on the next service start (previously they leaked). **Docker** installs
   aren't swapped in place — MIRA shows guidance to pull the new image tag and
   recreate the container.
 - **Rollback** — every upgrade first snapshots the **previous binary + config**.

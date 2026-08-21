@@ -112,42 +112,7 @@ pub async fn status_handler(
 /// container heuristics, which can match even when the user is supervising
 /// MIRA some other way inside the container.
 fn detect_supervisor() -> Option<&'static str> {
-    // systemd sets INVOCATION_ID for every service start. Works for both
-    // `systemctl --user` (Linux + WSL) and system-scoped units.
-    if std::env::var_os("INVOCATION_ID").is_some() {
-        return Some("systemd");
-    }
-    // launchd sets XPC_SERVICE_NAME for every LaunchAgent/LaunchDaemon it
-    // spawns. Match our own bundle id so we don't confuse the system shell
-    // (which gets `XPC_SERVICE_NAME=com.apple.…`) with a real service.
-    if let Ok(svc) = std::env::var("XPC_SERVICE_NAME") {
-        if svc.starts_with("com.mira") {
-            return Some("launchd");
-        }
-    }
-    // OCI runtimes (Docker, Podman, containerd). The marker file is the
-    // most reliable; fall back to cgroup inspection on runtimes that don't
-    // create one.
-    if std::path::Path::new("/.dockerenv").exists() {
-        return Some("docker");
-    }
-    if let Ok(cg) = std::fs::read_to_string("/proc/1/cgroup") {
-        if cg.contains("docker") || cg.contains("containerd") || cg.contains("podman") {
-            return Some("docker");
-        }
-    }
-    // Windows: supervised iff the Service Control Manager launched us (the
-    // dispatcher ran `service_main`, which sets the shutdown notify). We key
-    // off that — not merely `target_os = "windows"` — because a bare console
-    // `mira serve` is NOT supervised (exiting wouldn't relaunch). Under SCM,
-    // the recovery actions set at install relaunch us on the non-zero exit an
-    // app-initiated restart produces, the same exit→relaunch contract as
-    // systemd/launchd, so the web-UI Restart button is valid.
-    #[cfg(target_os = "windows")]
-    {
-        if crate::install::windows::is_running_under_scm() {
-            return Some("scm");
-        }
-    }
-    None
+    // Shared detector (moved to `install::detect_supervisor`) so `/api/status`
+    // and the self-upgrade capability check can't disagree — see the note there.
+    crate::install::detect_supervisor()
 }

@@ -132,6 +132,101 @@ pub struct BinaryUpgradeOptions {
     pub token: Option<String>,
 }
 
+// ─── In-flight upgrade status (job surface) ──────────────────────────────────
+//
+// A process-wide singleton the self-upgrade path publishes progress into, so the
+// web UI can show real phases (and only declare failure when the server says so)
+// instead of guessing with a fixed timeout. It also IS the concurrency guard: an
+// upgrade can't start while `in_progress` is set.
+
+/// Phase/progress of the current-or-last self-upgrade, polled by the web UI.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct UpgradeStatus {
+    /// True while an upgrade thread is running (the concurrency guard).
+    pub in_progress: bool,
+    /// idle · resolving · downloading · verifying · extracting · snapshotting ·
+    /// swapping · restarting · done · failed
+    pub phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_version: Option<String>,
+    pub bytes_done:  u64,
+    pub bytes_total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub started_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+impl UpgradeStatus {
+    fn idle() -> Self {
+        Self {
+            in_progress: false, phase: "idle".into(), target_version: None,
+            bytes_done: 0, bytes_total: 0, error: None, started_at_ms: 0, updated_at_ms: 0,
+        }
+    }
+}
+
+fn upgrade_now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+static UPGRADE: std::sync::LazyLock<std::sync::Mutex<UpgradeStatus>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(UpgradeStatus::idle()));
+
+/// Claim the single upgrade slot. Returns `false` if one is already in flight —
+/// the caller must refuse (409) rather than start a second, racing swap onto the
+/// same paths. Race-free: the check + set happen under one lock.
+pub fn try_begin_upgrade() -> bool {
+    let mut s = UPGRADE.lock().unwrap();
+    if s.in_progress { return false; }
+    let t = upgrade_now_ms();
+    *s = UpgradeStatus { in_progress: true, phase: "resolving".into(), started_at_ms: t, updated_at_ms: t, ..UpgradeStatus::idle() };
+    true
+}
+
+/// Report a phase transition. No-op unless an upgrade is in flight, so the CLI
+/// path (which never claims the slot) doesn't publish phantom progress.
+pub fn report_phase(phase: &str) {
+    let mut s = UPGRADE.lock().unwrap();
+    if !s.in_progress { return; }
+    s.phase = phase.to_string();
+    s.updated_at_ms = upgrade_now_ms();
+}
+
+pub fn report_target_version(v: &str) {
+    let mut s = UPGRADE.lock().unwrap();
+    if !s.in_progress { return; }
+    s.target_version = Some(v.to_string());
+    s.updated_at_ms = upgrade_now_ms();
+}
+
+pub fn report_download_progress(done: u64, total: u64) {
+    let mut s = UPGRADE.lock().unwrap();
+    if !s.in_progress { return; }
+    s.bytes_done  = done;
+    s.bytes_total = total;
+    s.updated_at_ms = upgrade_now_ms();
+}
+
+/// Mark the in-flight upgrade finished. `Ok` → phase `done`; `Err` → `failed`
+/// with the message, and the slot is released so the user can retry. (The
+/// success path of a self-upgrade normally ends by restarting the process, so it
+/// leaves the phase at `restarting` and never calls this — see the handler.)
+pub fn finish_upgrade(result: Result<(), String>) {
+    let mut s = UPGRADE.lock().unwrap();
+    s.in_progress = false;
+    s.updated_at_ms = upgrade_now_ms();
+    match result {
+        Ok(())  => { s.phase = "done".into();   s.error = None; }
+        Err(e)  => { s.phase = "failed".into(); s.error = Some(e); }
+    }
+}
+
+pub fn upgrade_status() -> UpgradeStatus {
+    UPGRADE.lock().unwrap().clone()
+}
+
 pub fn run_binary_upgrade(opts: BinaryUpgradeOptions) -> Result<(), Box<dyn Error>> {
     let provider = opts.provider
         .or_else(|| std::env::var("MIRA_RELEASE_PROVIDER").ok()
@@ -161,6 +256,7 @@ pub fn run_binary_upgrade(opts: BinaryUpgradeOptions) -> Result<(), Box<dyn Erro
         None    => fetch_latest_version(provider, &base, token.as_deref())?,
     };
     println!("Upgrading to:     {version}");
+    report_target_version(&version);
     if version == env!("CARGO_PKG_VERSION") && !opts.force {
         println!();
         println!("Already on {version}. Nothing to do.");
@@ -182,19 +278,22 @@ pub fn run_binary_upgrade(opts: BinaryUpgradeOptions) -> Result<(), Box<dyn Erro
     let sig_path     = tmpdir.path().join(&sig_name);
     println!();
     println!("Downloading {archive_name}…");
-    download(provider, &archive_url, &archive_path, token.as_deref())?;
+    report_phase("downloading");
+    download(provider, &archive_url, &archive_path, token.as_deref(), true)?;
     println!("Downloading {sig_name}…");
-    download(provider, &sig_url, &sig_path, token.as_deref())?;
+    download(provider, &sig_url, &sig_path, token.as_deref(), false)?;
 
     // 3. Verify signature with embedded public key.
     println!();
     println!("Verifying signature…");
+    report_phase("verifying");
     verify_signature(&archive_path, &sig_path)?;
     println!("✓ signature verified");
 
     // 4. Extract, find new binary.
     println!();
     println!("Extracting…");
+    report_phase("extracting");
     let extract_dir = tmpdir.path().join("extracted");
     fs::create_dir_all(&extract_dir)?;
     extract_archive(&archive_path, &extract_dir)?;
@@ -206,6 +305,7 @@ pub fn run_binary_upgrade(opts: BinaryUpgradeOptions) -> Result<(), Box<dyn Erro
     // this exact version if the new build misbehaves (R1). Best-effort — a
     // snapshot failure warns but never blocks the upgrade.
     let current_binary = std::env::current_exe()?;
+    report_phase("snapshotting");
     match crate::install::rollback::save_snapshot(&current_binary, env!("CARGO_PKG_VERSION")) {
         Ok(s)  => println!("Rollback snapshot: {}", s.dir.display()),
         Err(e) => eprintln!(
@@ -215,6 +315,7 @@ pub fn run_binary_upgrade(opts: BinaryUpgradeOptions) -> Result<(), Box<dyn Erro
 
     // 6. Atomically swap with the running binary.
     println!("Swapping with:    {}", current_binary.display());
+    report_phase("swapping");
     atomic_swap(&new_binary, &current_binary)?;
     println!("✓ binary replaced");
 
@@ -224,13 +325,14 @@ pub fn run_binary_upgrade(opts: BinaryUpgradeOptions) -> Result<(), Box<dyn Erro
         return Ok(());
     }
 
-    // 6. Restart via existing supervisor backend.
-    let unit_installed = crate::install::supervisor_unit_path()
-        .map(|p| p.exists())
-        .unwrap_or(false);
-    if !unit_installed {
+    // 6. Restart via existing supervisor backend. Use the shared supervisor
+    // detector (not a unit-file stat, which is always false for a Windows SCM
+    // service and would wrongly print "no service unit" + skip the restart on
+    // the very platform this runs on). A bare console `mira --server` correctly
+    // reports unsupervised here and asks for a manual restart.
+    if !crate::install::is_self_restartable() {
         println!();
-        println!("No service unit installed — restart MIRA manually to pick up the new build.");
+        println!("No managed service detected — restart MIRA manually to pick up the new build.");
         return Ok(());
     }
     println!();
@@ -324,7 +426,7 @@ fn fetch_latest_version(provider: ReleaseProvider, base: &str, token: Option<&st
 
 /// Download a single URL to a file. Streams to disk so multi-MB
 /// tarballs don't sit in memory.
-fn download(provider: ReleaseProvider, url: &str, dest: &Path, token: Option<&str>) -> Result<(), Box<dyn Error>> {
+fn download(provider: ReleaseProvider, url: &str, dest: &Path, token: Option<&str>, report: bool) -> Result<(), Box<dyn Error>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
@@ -337,7 +439,20 @@ fn download(provider: ReleaseProvider, url: &str, dest: &Path, token: Option<&st
         ).into());
     }
     let mut file = fs::File::create(dest)?;
-    std::io::copy(&mut resp, &mut file)?;
+    // Chunked copy (instead of io::copy) so the self-upgrade job surface can
+    // publish bytes-done as a ~51 MB asset streams in — that's the phase the
+    // user waits on. `report` is false for the tiny signature download.
+    let total = resp.content_length().unwrap_or(0);
+    if report { report_download_progress(0, total); }
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut done: u64 = 0;
+    loop {
+        let n = std::io::Read::read(&mut resp, &mut buf)?;
+        if n == 0 { break; }
+        file.write_all(&buf[..n])?;
+        done += n as u64;
+        if report { report_download_progress(done, total.max(done)); }
+    }
     file.sync_all()?;
     Ok(())
 }
@@ -513,11 +628,19 @@ pub fn cleanup_sidelined_binary() {
     #[cfg(windows)]
     if let Ok(exe) = std::env::current_exe() {
         let (Some(dir), Some(name)) = (exe.parent(), exe.file_name().and_then(|n| n.to_str())) else { return };
-        // Matches both the legacy `mira.exe.old` and the new `mira.exe.old-<..>`.
-        let prefix = format!("{name}.old");
+        // Reap two kinds of swap detritus:
+        //   `<name>.old` / `<name>.old-<pid>-<seq>` — the sidelined previous exe,
+        //   `.<name>.upgrade-<pid>`                 — an aborted download tempfile.
+        // The freshly-restarted process holds neither, so they delete cleanly; a
+        // still-locked one (a lingering old process) is just retried next boot.
+        // Real rollback backups live in `<data_dir>/rollback/` (pruned to 3) — NOT
+        // these — so the sidelines are reaped fully, keeping ≈0 between upgrades.
+        let old_prefix     = format!("{name}.old");
+        let upgrade_prefix = format!(".{name}.upgrade-");
         let Ok(entries) = fs::read_dir(dir) else { return };
         for e in entries.flatten() {
-            if e.file_name().to_string_lossy().starts_with(&prefix) {
+            let fname = e.file_name().to_string_lossy().into_owned();
+            if fname.starts_with(&old_prefix) || fname.starts_with(&upgrade_prefix) {
                 match fs::remove_file(e.path()) {
                     Ok(())  => tracing::info!("upgrade cleanup: removed stale {}", e.path().display()),
                     Err(err) => tracing::debug!("upgrade cleanup: {} still locked ({err}); will retry next boot", e.path().display()),
@@ -536,6 +659,35 @@ mod tests {
         // The pubkey was committed in slice 7. If this fails, the
         // file shape changed (or the include path broke).
         PublicKey::decode(RELEASE_PUBKEY.trim()).expect("embedded pubkey decodes");
+    }
+
+    #[test]
+    fn upgrade_slot_is_single_and_reusable() {
+        // Claiming the slot succeeds once; a second concurrent claim is refused
+        // (the 409 the handler returns) until the first finishes.
+        assert!(try_begin_upgrade(), "first claim should succeed");
+        assert!(!try_begin_upgrade(), "second concurrent claim must be refused");
+
+        // Progress reporting mutates only while in flight.
+        report_phase("downloading");
+        report_download_progress(10, 100);
+        let s = upgrade_status();
+        assert!(s.in_progress);
+        assert_eq!(s.phase, "downloading");
+        assert_eq!((s.bytes_done, s.bytes_total), (10, 100));
+
+        // Failure releases the slot and surfaces the error.
+        finish_upgrade(Err("boom".into()));
+        let s = upgrade_status();
+        assert!(!s.in_progress);
+        assert_eq!(s.phase, "failed");
+        assert_eq!(s.error.as_deref(), Some("boom"));
+
+        // Reusable after finishing.
+        assert!(try_begin_upgrade(), "slot should be reclaimable after finish");
+        // A report after release-then-reclaim works; clean up for other tests.
+        finish_upgrade(Ok(()));
+        assert!(!upgrade_status().in_progress);
     }
 
     #[test]

@@ -148,8 +148,9 @@ channel in place, turn on:
 - **Daily briefing** — a morning summary built from your calendar, wiki, and
   recent activity.
 
-Both live under **Settings → Notifications**, where you can also fire a test
-check-in or briefing immediately to confirm delivery.
+Both are set up under **My Preferences → Notifications & devices** (open to every
+user), where you can also fire a test check-in or briefing immediately to confirm
+delivery.
 
 ## Troubleshooting
 

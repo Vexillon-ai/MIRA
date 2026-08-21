@@ -80,7 +80,7 @@ aren't held back; everything else is normal priority.
 
 ## Test it
 
-Settings → Notifications → **Send test push** delivers a synthetic
+My Preferences → Notifications & devices → **Send test push** delivers a synthetic
 notification to every registered device for your account — browsers and paired
 phones alike. Paired phones show up in the **Registered devices** list with a
 📱 and their device name.

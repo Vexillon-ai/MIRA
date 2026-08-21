@@ -1165,6 +1165,8 @@ pub fn build_router(
             // + atomic swap + supervisor restart (runs `mira upgrade --binary`).
             .route("/api/admin/upgrade",
                    post(crate::server::handlers::update_check::upgrade))
+            .route("/api/admin/upgrade/status",
+                   get(crate::server::handlers::update_check::upgrade_status))
             // admin-only rollback: GET lists pre-upgrade snapshots; POST
             // restores one (previous binary + config) and restarts.
             .route("/api/admin/rollback",

@@ -42,6 +42,14 @@ Every download is checked against MIRA's embedded signing key before anything is
 swapped, so a tampered or mismatched archive is refused and your running install
 is left untouched.
 
+**It can take a few minutes — and re-clicking is neither needed nor safe.** The
+release archive is ~50 MB, so on a slow connection the download + verify + swap
+can run several minutes before the restart. The banner shows the real phase
+(*downloading N% → verifying → installing → restarting*), so you can see it
+working. Just let it finish — MIRA **refuses to start a second upgrade while one
+is in progress** (a repeat click simply re-attaches to the running one), and the
+page reloads itself onto the new version automatically.
+
 ## Roll back
 
 Every upgrade first snapshots the **previous binary and config**, so you can

@@ -3,7 +3,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload, Trash2, Wrench, RotateCcw, Loader2, Calendar as CalendarIcon, RefreshCw, Shield, ShieldAlert, Volume2, ChevronDown, Bell, Image as ImageIcon, BookText } from 'lucide-react'
+import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload, Trash2, Wrench, RotateCcw, Loader2, Calendar as CalendarIcon, RefreshCw, Shield, ShieldAlert, Volume2, ChevronDown, Image as ImageIcon, BookText } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { api } from '@/api/client'
 import UpdatesCard from '@/components/UpdatesCard'
@@ -15,15 +15,10 @@ import { playBlobWithGain, type PlayHandle } from '@/api/ttsPlayback'
 import { calendarApi } from '@/api/calendar'
 import { wslApi } from '@/api/wsl'
 import { memoryApi, type ConsolidatorRunResult } from '@/api/memory'
-import { useThemeStore, THEMES } from '@/store/themeStore'
-import { useUiStore } from '@/store/uiStore'
 import { useAuthStore } from '@/store/authStore'
 import { useRestartServer } from '@/hooks/useRestartServer'
 import AgentAvatar, { type AgentAppearance } from '@/components/AgentAvatar'
-import NotificationSettings from '@/components/NotificationSettings'
 import BackupRestore from '@/components/BackupRestore'
-import DailyBriefingSettings from '@/components/DailyBriefingSettings'
-import CompanionCheckinTest from '@/components/CompanionCheckinTest'
 import WaitlistPanel from '@/components/WaitlistPanel'
 import { AVATAR_PRESETS } from '@/components/Avatar'
 import VoiceIdPicker from '@/components/VoiceIdPicker'
@@ -345,10 +340,10 @@ function setPath(obj: Config, path: string, value: unknown): Config {
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
-type TabId = 'appearance' | 'providers' | 'agent' | 'tools' | 'sandbox' | 'channels' | 'memory' | 'wiki' | 'calendar' | 'voice' | 'image' | 'notifications' | 'guardian' | 'server' | 'advanced'
+type TabId = 'appearance' | 'providers' | 'agent' | 'tools' | 'sandbox' | 'channels' | 'memory' | 'wiki' | 'calendar' | 'voice' | 'image' | 'guardian' | 'server' | 'advanced'
 
 const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
-  { id: 'appearance', label: 'Appearance', icon: <Palette size={14} /> },
+  { id: 'appearance', label: 'Terminal (TUI)', icon: <Palette size={14} /> },
   { id: 'providers',  label: 'Providers',  icon: <Cpu size={14} />     },
   { id: 'agent',      label: 'Agent',      icon: <Bot size={14} />     },
   { id: 'tools',      label: 'Tools',      icon: <Wrench size={14} />  },
@@ -359,7 +354,6 @@ const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: 'calendar',   label: 'Calendar',   icon: <CalendarIcon size={14} /> },
   { id: 'voice',      label: 'Voice',      icon: <Volume2 size={14} /> },
   { id: 'image',      label: 'Image & Video', icon: <ImageIcon size={14} /> },
-  { id: 'notifications', label: 'Notifications', icon: <Bell size={14} /> },
   { id: 'guardian',   label: 'Guardian',   icon: <ShieldAlert size={14} /> },
   { id: 'server',     label: 'Server & Security', icon: <Server size={14} />  },
   { id: 'advanced',   label: 'Advanced',   icon: <Code2 size={14} />   },
@@ -791,7 +785,7 @@ export default function SettingsPage() {
   const initialTab = (() => {
     if (typeof window === 'undefined') return 'appearance'
     const p = new URLSearchParams(window.location.search).get('tab')
-    const allowed: TabId[] = ['appearance','providers','agent','tools','sandbox','channels','memory','calendar','voice','image','notifications','guardian','server','advanced']
+    const allowed: TabId[] = ['appearance','providers','agent','tools','sandbox','channels','memory','calendar','voice','image','guardian','server','advanced']
     return (allowed as string[]).includes(p ?? '') ? (p as TabId) : 'appearance'
   })()
   const [tab, setTab] = useState<TabId>(initialTab)
@@ -1072,19 +1066,6 @@ export default function SettingsPage() {
         {tab === 'image' && (
           <ImageTab set={set} str={str} num={num} bool={bool} />
         )}
-        {tab === 'notifications' && (
-          <div className={styles.tabBody}>
-            <Section title="Browser / phone push notifications">
-              <NotificationSettings />
-            </Section>
-            <Section title="Daily Briefing">
-              <DailyBriefingSettings />
-            </Section>
-            <Section title="Companion check-in (test)">
-              <CompanionCheckinTest />
-            </Section>
-          </div>
-        )}
         {tab === 'guardian' && (
           <GuardianTab set={set} str={str} num={num} bool={bool} list={list} />
         )}
@@ -1201,48 +1182,15 @@ function AppearanceTab({
   bool: (p: string, fb?: boolean) => boolean
   str: (p: string, fb?: string) => string
 }) {
-  const { theme, setTheme } = useThemeStore()
-  const { sidebarCollapsed, toggleSidebar } = useUiStore()
-
   const TUI_THEMES = ['mira-dark', 'mira-light', 'dracula', 'gruvbox', 'nord']
 
   return (
     <div className={styles.tabBody}>
-      <Section title="Web Interface Theme">
-        <p className={styles.sectionDesc}>
-          Choose the colour scheme for the web UI. Themes are stored locally and don't affect other users.
-        </p>
-        <div className={styles.themeGrid}>
-          {THEMES.map((t) => (
-            <button
-              key={t.value}
-              className={`${styles.themeCard} ${theme === t.value ? styles.themeCardActive : ''}`}
-              onClick={() => setTheme(t.value)}
-            >
-              <div className={styles.themePreview} style={{ background: t.bg }}>
-                <div className={styles.themePreviewAccent} style={{ background: t.accent }} />
-                <div className={styles.themePreviewBar} style={{ background: t.accent + '30' }} />
-                <div className={styles.themePreviewBar} style={{ background: t.accent + '18' }} />
-              </div>
-              <div className={styles.themeCardLabel}>
-                <span>{t.label}</span>
-                {theme === t.value && <span className={styles.themeCardCheck}><Check size={11} /></span>}
-              </div>
-            </button>
-          ))}
-        </div>
-      </Section>
-
-      <Section title="Sidebar">
-        <Field label="Default state" desc="Whether the sidebar starts collapsed or expanded when you open the app.">
-          <Toggle
-            value={sidebarCollapsed}
-            onChange={toggleSidebar}
-            label={sidebarCollapsed ? 'Collapsed' : 'Expanded'}
-          />
-        </Field>
-      </Section>
-
+      <p className={styles.sectionDesc} style={{ margin: '4px 0 12px' }}>
+        Settings for the <strong>terminal UI</strong> (<code>mira tui</code>).
+        The web interface theme and sidebar are per-user — set them under{' '}
+        <strong>My Preferences → Appearance</strong>.
+      </p>
       <Section title="TUI Theme">
         <Field label="Terminal theme" desc="Colour scheme used by the terminal user interface (mira tui).">
           <SelectInput

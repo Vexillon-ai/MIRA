@@ -14,9 +14,10 @@ channel so MIRA has somewhere to reach you. If you haven't set one up yet, do
 that first: see **[Connect a channel](connect-a-channel.md)**. Telegram is the
 quickest to start with.
 
-You **tune** companion behaviour on the **Settings → Presence** page (rhythm,
-personality, what MIRA sends) — or just by asking MIRA in chat. **Enabling**
-check-ins and the test buttons live under **Settings → Notifications**. (When
+You **enable and tune** companion behaviour on the **Presence** page (rhythm,
+personality, what MIRA sends, and the daily briefing) — or just by asking MIRA in
+chat. **Device pairing, browser push, and the test buttons** live under
+**My Preferences → Notifications & devices**, which every user can reach. (When
 you finish onboarding, MIRA already configures Presence from your answers —
 admins are switched on automatically; others enable once a safety contact is
 set.)
@@ -28,14 +29,13 @@ check-ins rather than replies to your prompts. It's designed to feel like a
 friend who knows you, not an alarm clock: MIRA varies its timing, learns when
 you tend to reply, and backs off when you're brief or busy.
 
-1. Go to **Settings → Notifications** and **enable companion mode** for your
-   account.
+1. Go to the **Presence** page and **enable companion mode** for your account.
 2. **Choose a preferred channel** for the check-ins (for example Telegram or
    Signal). This is where the proactive messages will arrive. If you leave it
    unset, MIRA uses whichever surface you last talked to it on — including the
    **web app** or the **native mobile app**, which both receive check-ins and
    the morning briefing as **push notifications** (register a device under
-   Settings → Notifications so a check-in can actually reach you there).
+   My Preferences → Notifications & devices so a check-in can actually reach you there).
 3. **Set your quiet hours** — the windows when MIRA must never message you (for
    example overnight, or during a regular nap). MIRA respects these absolutely;
    it won't reach out inside a quiet window no matter what.
@@ -174,7 +174,7 @@ The daily briefing is a single morning summary, assembled from:
 
 To enable it:
 
-1. Under **Settings → Notifications**, **enable the daily briefing**.
+1. On the **Presence** page, **enable the daily briefing**.
 2. **Set the hour** it should arrive (for example 7 for 7am). You can change it
    any time — or just ask MIRA: *"set my briefing hour to 7"*.
 
@@ -208,7 +208,7 @@ human-in-the-loop review stays with you. (You can still approve from the
 ## Test it right now
 
 You don't have to wait for the next scheduled moment to confirm everything
-works. Under **Settings → Notifications** there are two test buttons:
+works. Under **My Preferences → Notifications & devices** there are two test buttons:
 
 - **Send a check-in now** — fires a companion check-in immediately.
 - **Send a briefing now** — starts building today's briefing and delivers it on

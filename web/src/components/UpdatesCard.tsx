@@ -12,7 +12,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Download, RotateCcw, RefreshCw } from 'lucide-react'
 import { api } from '@/api/client'
-import { waitForNewVersionThenReload } from '@/api/upgradeReload'
+import { waitForNewVersionThenReload, driveUpgrade, phaseLabel } from '@/api/upgradeReload'
 import styles from './UpdatesCard.module.css'
 
 interface UpdateInfo {
@@ -75,10 +75,27 @@ export default function UpdatesCard() {
       if (!reloaded) setMsg('Still restarting — if this page doesn\'t reload shortly, refresh it manually.')
     })
   }
+  // Upgrade drives the server's real progress (phase + bytes) rather than a
+  // blind wait, and only declares trouble when the server says so.
+  const driveUpgradeNow = async () => {
+    const current = info.data?.current ?? ''
+    const res = await driveUpgrade(current, (s) => {
+      if (!s) return
+      const pct = s.bytes_total > 0 ? ` (${Math.min(100, Math.round((s.bytes_done / s.bytes_total) * 100))}%)` : ''
+      setMsg(`Upgrading${s.target_version ? ` to v${s.target_version}` : ''} — ${phaseLabel(s.phase)}${pct}… no need to re-click.`)
+    })
+    if (!res.ok) setMsg(res.error
+      ? `${res.error.charAt(0).toUpperCase()}${res.error.slice(1)}. You can also run \`mira upgrade --binary\` from a terminal.`
+      : 'Still working — it may be downloading on a slow connection. Refresh manually if needed.')
+  }
   const upgrade = useMutation({
     mutationFn: () => api.post('/api/admin/upgrade').then((r) => r.data),
-    onSuccess:  () => awaitRestart(),
-    onError:    () => setMsg('Upgrade failed to start — try `mira upgrade` from a terminal.'),
+    onSuccess:  () => { void driveUpgradeNow() },
+    onError:    (e: any) => {
+      // 409 = already upgrading (a re-click) → attach to the in-flight job.
+      if (e?.response?.status === 409) void driveUpgradeNow()
+      else setMsg('Upgrade failed to start — try `mira upgrade` from a terminal.')
+    },
   })
   const rollback = useMutation({
     mutationFn: (version: string) => api.post('/api/admin/rollback', { version }).then((r) => r.data),

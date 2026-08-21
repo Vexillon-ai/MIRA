@@ -14,7 +14,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { Sparkles, X as XIcon, Download, RotateCw } from 'lucide-react'
 import { useState } from 'react'
 import { api } from '@/api/client'
-import { waitForNewVersionThenReload } from '@/api/upgradeReload'
+import { driveUpgrade, phaseLabel, type UpgradeStatus } from '@/api/upgradeReload'
 import { useAuthStore } from '@/store/authStore'
 import styles from './UpdateBanner.module.css'
 
@@ -53,22 +53,50 @@ export default function UpdateBanner() {
   })
 
   // One-click upgrade: POST kicks off download→verify→swap→restart server-side
-  // and returns 202; the server then restarts. We switch to an "upgrading"
-  // state and auto-reload the page once it's back on the new version.
+  // (202), then we DRIVE it — polling the server's real phase/progress and only
+  // reloading once it's back on the new version.
+  const [progress, setProgress] = useState<UpgradeStatus | null>(null)
+  const [driving, setDriving]   = useState(false)
+  const [upgradeError, setUpgradeError] = useState<string | null>(null)
+
+  const startDrive = async () => {
+    setDriving(true)
+    setUpgradeError(null)
+    const res = await driveUpgrade(data?.current ?? '', setProgress)
+    if (!res.ok) {
+      setUpgradeError(res.error
+        ? res.error.charAt(0).toUpperCase() + res.error.slice(1) + '.'
+        : 'This is taking longer than expected — it may still be downloading on a slow connection.')
+    }
+    setDriving(false)
+  }
+
   const upgradeMut = useMutation({
     mutationFn: () => api.post('/api/admin/upgrade').then((r) => r.data),
-    onSuccess:  () => { void waitForNewVersionThenReload(data?.current ?? '') },
+    onSuccess:  () => { void startDrive() },
+    onError: (e) => {
+      // 409 = an upgrade is already running (e.g. a re-click). Attach to the
+      // in-flight job instead of erroring — the server refuses to start a second.
+      const status = (e as { response?: { status?: number } })?.response?.status
+      if (status === 409) void startDrive()
+    },
   })
 
-  // While upgrading, show progress; the page reloads itself once the new build
-  // is up (manual fallback kept in case the poll times out).
-  if (upgradeMut.isSuccess) {
+  // While upgrading, show the real phase + download progress. The page reloads
+  // itself once the new build answers; a manual fallback stays available.
+  if (driving) {
+    const pct = progress && progress.bytes_total > 0
+      ? Math.min(100, Math.round((progress.bytes_done / progress.bytes_total) * 100))
+      : null
     return (
       <div className={styles.banner} role="status">
         <RotateCw size={14} />
         <span className={styles.text}>
-          Upgrading MIRA… it will download, verify, and restart, then this page
-          reloads automatically.
+          {upgradeError
+            ? <>Upgrade status: {upgradeError} You can also run <code>mira upgrade --binary</code> from a terminal.</>
+            : <>Upgrading MIRA{progress?.target_version ? <> to <strong>{progress.target_version}</strong></> : ''}
+                {' — '}{phaseLabel(progress?.phase)}{pct !== null ? ` (${pct}%)` : ''}.{' '}
+                This can take a few minutes on a slow connection — no need to re-click.</>}
         </span>
         <button className={styles.link} onClick={() => window.location.reload()}>
           Reload now
