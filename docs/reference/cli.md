@@ -107,6 +107,21 @@ Once installed, control the service without touching `systemctl` directly:
 | `mira status` | Show the service's systemd status and recent journal. |
 | `mira uninstall` | Disable and remove the service unit. |
 
+### `mira reset-admin-password`
+
+Locked out? Reset a local account's password from the command line — the recovery
+path when the admin password is lost:
+
+```
+mira reset-admin-password            # resets the built-in "admin" account
+mira reset-admin-password --user sam # reset a specific account
+```
+
+It prompts for the new password (minimum **12 characters** — a passphrase is
+ideal), writes it, and revokes any existing sessions so the old credential can't
+linger. Run it on the host as the operator (it needs filesystem access to the
+data directory); pass `--data-dir`/`--config` if MIRA uses a non-default location.
+
 ## Upgrading
 
 ### `mira upgrade`

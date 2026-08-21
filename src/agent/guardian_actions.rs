@@ -323,6 +323,12 @@ pub async fn execute_action(
     automations: Option<&Arc<crate::automations::AutomationsStore>>,
     channel_mgr: Option<&Arc<tokio::sync::RwLock<crate::gateway::channel_manager::ChannelManager>>>,
     registry:    Option<&Arc<crate::tools::ToolRegistry>>,
+    // The member-device anti-spoof binding is verified HERE — the single
+    // shared execution chokepoint — not only in the HTTP approve handler, so no
+    // caller (HTTP approve · chat decide · autonomous isolation) can actuate a
+    // member device without the ownership check. `None` fails closed for
+    // `ControlMemberDevice`; the non-member kinds never consult it.
+    companion_store: Option<&crate::companion::settings::CompanionStore>,
 ) -> Result<String, String> {
     use GuardianActionKind::*;
     match kind {
@@ -365,10 +371,25 @@ pub async fn execute_action(
             let reg = registry.ok_or("tool registry unavailable")?;
             let t = MemberDeviceTarget::parse(target)
                 .ok_or("invalid member-device target (expected JSON)")?;
+            // Anti-spoof: the device MUST be registered to the member named
+            // in the target (which drives approval routing), else a proposal could
+            // route approval to a ward's guardian while actuating someone else's
+            // device. Fail closed if the ownership store is unavailable.
+            let store = companion_store
+                .ok_or("companion store unavailable — refusing member-device action")?;
+            let owner = store.entity_owner(&t.app_id, &t.entity_id)
+                .map_err(|e| format!("db: {e}"))?;
+            if owner.as_deref() != Some(t.member.as_str()) {
+                return Err("device is not registered to the named member — refusing to act".into());
+            }
             let args = serde_json::json!({
                 "domain":    t.domain,
                 "service":   t.service,
                 "entity_id": t.entity_id,
+                // The app tool re-checks member-device governance on every
+                // call. Pass the (ownership-verified) owner as the caller so this
+                // Guardian-approved action is admitted by that gate.
+                "_user_id":  t.member,
             });
             match reg.execute(&t.tool_name(), args).await {
                 Ok(r) if r.success => Ok(t.note.clone().unwrap_or_else(
@@ -492,5 +513,52 @@ mod tests {
         assert!(GuardianActionKind::RestartBridge.needs_target());
         assert!(!GuardianActionKind::RerunAudit.needs_target());
         assert!(GuardianActionKind::parse("shell").is_none()); // never a valid kind
+    }
+
+    // The member-device anti-spoof (ownership) check is enforced INSIDE the
+    // shared `execute_action`, so no caller can actuate a member device without
+    // it. These exercise the gate directly (an empty registry means a passed gate
+    // then fails at the missing app tool — which proves the gate was cleared).
+    fn dev_target(member: &str) -> String {
+        MemberDeviceTarget {
+            member: member.into(), app_id: "ha".into(),
+            entity_id: "switch.kid_router".into(), domain: "switch".into(),
+            service: "turn_off".into(), note: None,
+        }.to_target()
+    }
+
+    #[tokio::test]
+    async fn execute_refuses_member_device_not_owned_by_the_named_member() {
+        use crate::companion::settings::CompanionStore;
+        let dir = tempfile::tempdir().unwrap();
+        let store = CompanionStore::open(&dir.path().join("c.db")).unwrap();
+        store.set_entity_owner("ha", "switch.kid_router", "kid", None).unwrap();
+        let reg = std::sync::Arc::new(crate::tools::ToolRegistry::new());
+
+        // Spoofed: device is owned by "kid" but the target names "intruder".
+        let err = execute_action(
+            GuardianActionKind::ControlMemberDevice, Some(&dev_target("intruder")),
+            None, None, Some(&reg), Some(&store),
+        ).await.unwrap_err();
+        assert!(err.contains("not registered to the named member"), "got: {err}");
+
+        // Correct owner clears the ownership gate (then fails at the absent tool).
+        let err_ok = execute_action(
+            GuardianActionKind::ControlMemberDevice, Some(&dev_target("kid")),
+            None, None, Some(&reg), Some(&store),
+        ).await.unwrap_err();
+        assert!(!err_ok.contains("not registered"), "gate should have passed: {err_ok}");
+        assert!(err_ok.contains("device control"), "expected a tool error, got: {err_ok}");
+    }
+
+    #[tokio::test]
+    async fn execute_fails_closed_for_member_device_when_store_absent() {
+        let reg = std::sync::Arc::new(crate::tools::ToolRegistry::new());
+        // No companion store → refuse (never actuate a member device blind).
+        let err = execute_action(
+            GuardianActionKind::ControlMemberDevice, Some(&dev_target("kid")),
+            None, None, Some(&reg), None,
+        ).await.unwrap_err();
+        assert!(err.contains("companion store unavailable"), "got: {err}");
     }
 }

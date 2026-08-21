@@ -950,7 +950,7 @@ mod tests {
         assert!(install_dir.join("ui/index.html").exists());
 
         // The echo tool is live + provider-safe-named, and actually echoes.
-        let tools = crate::packages::apps::build_app_tools(&pkg_store, &pkgs_dir, None, None);
+        let tools = crate::packages::apps::build_app_tools(&pkg_store, &pkgs_dir, None, None, None);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name(), "app__com-mira-demo-hello__echo");
         let out = tokio::runtime::Runtime::new().unwrap()
@@ -977,7 +977,7 @@ mod tests {
             "com.mira.demo-hello", &mcp_store, &channel_store, &secrets, &pkg_store,
         ).unwrap();
         assert!(pkg_store.get("com.mira.demo-hello").unwrap().is_none());
-        assert!(crate::packages::apps::build_app_tools(&pkg_store, &pkgs_dir, None, None).is_empty());
+        assert!(crate::packages::apps::build_app_tools(&pkg_store, &pkgs_dir, None, None, None).is_empty());
         assert!(!install_dir.exists());
     }
 }

@@ -288,6 +288,14 @@ pub enum Command {
         #[arg(long)]
         skip_provider_test: bool,
     },
+    // Reset a local account's password from the command line — recovery when the
+    // admin password is lost. Local operator with filesystem access
+    // to auth.db only; prompts for the new password and revokes existing sessions.
+    ResetAdminPassword {
+        // Which account to reset. Defaults to the built-in `admin`.
+        #[arg(long, default_value = "admin")]
+        user: String,
+    },
     // Disable and remove the MIRA systemd user service unit.
     Uninstall,
     // Start the MIRA service (requires `mira install`).
@@ -923,6 +931,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+
+    // Admin password recovery — runs before config-dependent init,
+    // like setup. Local-operator trust model: filesystem access to auth.db.
+    if let Some(Command::ResetAdminPassword { user }) = args.command.as_ref() {
+        match reset_admin_password(args.config.clone(), user) {
+            Ok(())  => std::process::exit(0),
+            Err(e)  => {
+                eprintln!("mira reset-admin-password: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -1228,6 +1248,7 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
             // are all dispatched before config load above.
             Command::Install { .. }
             | Command::Setup { .. }
+            | Command::ResetAdminPassword { .. }
             | Command::Uninstall
             | Command::Start | Command::Stop | Command::Restart | Command::Status
             | Command::Upgrade { .. }
@@ -1365,6 +1386,52 @@ fn load_token(src: &tui::mode::TokenSource) -> Result<String, Box<dyn Error>> {
                 })
         }
     }
+}
+
+// `mira reset-admin-password [--user <name>]` — local password recovery.
+// Synchronous (no tokio runtime): resolves auth.db from the config's data
+// dir, prompts for a new password (validated to the shared admin-password floor),
+// writes it via the auth service's hashing `change_password`, and revokes
+// existing sessions so the old credential can't linger. Trust model: local
+// operator with filesystem access to auth.db (same as the rest of the CLI).
+fn reset_admin_password(
+    config_override: Option<std::path::PathBuf>,
+    username: &str,
+) -> Result<(), Box<dyn Error>> {
+    use mira::auth::LocalAuthService;
+    use rpassword::prompt_password;
+
+    let cfg = MiraConfig::load(config_override)
+        .map_err(|e| -> Box<dyn Error> { format!("config load: {e}").into() })?;
+    let auth_db = cfg.data_dir_path().join("auth.db");
+    if !auth_db.exists() {
+        return Err(format!(
+            "no auth database at {} — run `mira setup` (or start the server) first",
+            auth_db.display()
+        ).into());
+    }
+    // JWT secret + session length are irrelevant here (we mint no tokens); a
+    // throwaway lets the service open the DB.
+    let auth = LocalAuthService::new(&auth_db, "cli-reset-unused".to_string(), 30)
+        .map_err(|e| -> Box<dyn Error> { format!("open auth db: {e}").into() })?;
+    let user = auth.find_by_username(username)
+        .map_err(|e| -> Box<dyn Error> { format!("lookup: {e}").into() })?
+        .ok_or_else(|| -> Box<dyn Error> { format!("no local account named '{username}'").into() })?;
+
+    let pw1 = prompt_password(format!("New password for '{username}': "))?;
+    mira::setup::validate_admin_password(&pw1)?;
+    let pw2 = prompt_password("Confirm new password: ")?;
+    if pw1 != pw2 {
+        return Err("passwords don't match".into());
+    }
+    auth.change_password(&user.id, &pw1)
+        .map_err(|e| -> Box<dyn Error> { format!("change password: {e}").into() })?;
+    let revoked = auth.revoke_all_sessions(&user.id).unwrap_or(0);
+    println!(
+        "\u{2713} Password updated for '{username}'. {revoked} active session(s) revoked. \
+         Log in with the new password."
+    );
+    Ok(())
 }
 
 // ── Sandbox subcommand ────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@ Two independent settings on a Telegram account:
 
 **Delivery mode — how MIRA receives messages:**
 - **Polling (default):** MIRA long-polls Telegram's `getUpdates`. Works anywhere — behind NAT, on localhost, no public URL / port-forward / reverse proxy / TLS. The right choice for self-hosted/home installs. Cost: one poll loop per account.
-- **Webhook:** Telegram pushes updates to `https://<host>/webhook/telegram/<account-id>` (authenticated by a secret-token header). Efficient and instant, but needs a public HTTPS URL Telegram can reach (domain + reverse proxy + cert) — for production deployments.
+- **Webhook:** Telegram pushes updates to `https://<host>/webhook/telegram/<account-id>`. Efficient and instant, but needs a public HTTPS URL Telegram can reach (domain + reverse proxy + cert) — for production deployments. **A per-account `secret_token` is required** (set it on the account and pass it as `secret_token` in your Telegram `setWebhook` call): MIRA verifies the `X-Telegram-Bot-Api-Secret-Token` header and **rejects unverified inbound**, so a stranger who learns the account id can't inject messages. If you genuinely can't set a secret, `channels.telegram.allow_insecure_webhook=true` re-opens the (insecure) unverified path. Polling needs none of this.
 
 **Routing mode — who each inbound message runs as** (change it in place from the account row; it applies live):
 - **Personal (default):** serves **only the owner's verified chat**. You link your own chat once (send a LINK code); any other sender is ignored. Linking is **per-bot**, so the same phone can own a personal bot under one MIRA account *and* be a different user on another bot (e.g. a shared family bot under a second account) — claiming a personal bot doesn't disturb your other links. *Pro:* simplest, private, secure-by-default (a stranger who finds the bot can't act as you). *Con:* one person only.
@@ -89,6 +89,9 @@ Two independent settings on a Telegram account:
 - If MIRA runs in **WSL2** and your services (LM Studio, TTS, SearXNG) run on the **Windows host**, do NOT use the Windows LAN IP — a WSL2 NAT guest can't reach it. Use the `windows-host` alias instead: `http://windows-host:1234/v1`.
 - Set it up once (root): `sudo mira wsl-host-alias-install` (also done by `sudo mira helper-install`). It maps `windows-host` to the WSL gateway IP and refreshes it on every boot. Check with `mira helper-status`.
 - MIRA auto-detects URLs pointed at an unreachable Windows-host IP and offers a **one-click fix** (Settings banner) to swap them to `windows-host`. Alternative durable fix: WSL **mirrored networking** (`networkingMode=mirrored` in `.wslconfig`) so `localhost` works.
+
+## Reset a lost admin password
+- Locked out of the web UI? On the host, run `mira reset-admin-password` (or `--user <name>` for a non-admin account). It prompts for a new password (min 12 chars — a passphrase is ideal), sets it, and revokes existing sessions. Needs filesystem access to MIRA's data dir; pass `--data-dir`/`--config` if it's non-default.
 
 ## Deploy / apply changes
 - Most config applies live. Rust/binary changes need a rebuild + `systemctl --user restart mira`. Web UI changes need the bundle synced. MCP server changes hot-reload with no restart.

@@ -171,18 +171,37 @@ pub async fn telegram_handler(
         }
     };
 
-    // Per-account secret verification. If the account didn't register a
-    // secret we fall through (operator's choice — unauthenticated
-    // webhook accepted, matching the bot's BotFather setup).
-    if let Some(ref expected) = ctx.secret_token {
-        let provided = headers
-            .get("x-telegram-bot-api-secret-token")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-        let ok = bool::from(provided.as_bytes().ct_eq(expected.as_bytes()));
-        if !ok {
-            warn!("Telegram webhook: bad secret on account {}", account);
-            return (StatusCode::UNAUTHORIZED, "unauthorized");
+    // Per-account secret verification (fail-closed). A configured
+    // `secret_token` is verified in constant time. When the account has NO
+    // secret the webhook is REJECTED — anyone who learns the (non-secret)
+    // account id could otherwise POST forged updates — unless the operator has
+    // explicitly opted into insecure webhooks.
+    match ctx.secret_token.as_deref() {
+        Some(expected) => {
+            let provided = headers
+                .get("x-telegram-bot-api-secret-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            if !bool::from(provided.as_bytes().ct_eq(expected.as_bytes())) {
+                warn!("Telegram webhook: bad secret on account {}", account);
+                return (StatusCode::UNAUTHORIZED, "unauthorized");
+            }
+        }
+        None => {
+            let allow_insecure = match &state.live_config {
+                Some(cfg) => cfg.get().await.channels.telegram.allow_insecure_webhook,
+                None      => false,
+            };
+            if !allow_insecure {
+                warn!("Telegram webhook REJECTED on account {} — no secret_token configured. \
+                       Set a per-account secret_token and include it in your setWebhook call, \
+                       or set channels.telegram.allow_insecure_webhook=true to accept unverified \
+                       inbound (insecure).", account);
+                return (StatusCode::UNAUTHORIZED, "webhook secret required");
+            }
+            warn!("Telegram webhook on account {} accepted WITHOUT signature verification \
+                   (channels.telegram.allow_insecure_webhook=true) — anyone who learns the \
+                   account id can inject messages.", account);
         }
     }
 

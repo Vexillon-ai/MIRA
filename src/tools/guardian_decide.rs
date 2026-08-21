@@ -8,9 +8,13 @@
 //! main agent calls this when the operator responds; deterministic server code
 //! then executes (same shared `execute_action` as the web approve handler).
 //!
-//! Authorized to the Guardian's configured operator only (the watchdog
-//! `notify_user_id`) via the trusted injected `_user_id` — a non-operator turn
-//! cannot decide. Acts on the most-recent pending proposal when no id is given.
+//! Authorization via the trusted injected `_user_id`: the Guardian's operator
+//! (`notify_user_id`) may decide any action; a **member-scoped** action may also
+//! be decided by that member's **guardian** (co-parent). System/household actions
+//! stay operator-only. A member-scoped device *approval* is routed to the web UI
+//! (which runs the ownership-verified actuation) rather than actuated from
+//! chat; *declines* are handled in chat. Acts on the most-recent pending proposal
+//! when no id is given.
 
 use std::sync::{Arc, OnceLock};
 
@@ -33,8 +37,12 @@ pub struct GuardianDecideTool {
     /// yet (the action fails gracefully).
     channel_manager: Arc<OnceLock<Arc<RwLock<ChannelManager>>>>,
     audit:           Option<Arc<AuditStore>>,
-    /// The only user permitted to decide (the Guardian's `notify_user_id`).
+    /// The Guardian's operator (`notify_user_id`) — may decide any action.
     authorized_user: Option<String>,
+    /// Companion system — resolves a ward's guardian(s) so a co-parent guardian
+    /// (not just the operator) can decide a member-scoped action by chat. `None`
+    /// when the companion feature is off → operator-only (prior behaviour).
+    companion:       Option<Arc<crate::companion::CompanionSystem>>,
 }
 
 impl GuardianDecideTool {
@@ -44,8 +52,9 @@ impl GuardianDecideTool {
         channel_manager: Arc<OnceLock<Arc<RwLock<ChannelManager>>>>,
         audit:           Option<Arc<AuditStore>>,
         authorized_user: Option<String>,
+        companion:       Option<Arc<crate::companion::CompanionSystem>>,
     ) -> Self {
-        Self { store, automations, channel_manager, audit, authorized_user }
+        Self { store, automations, channel_manager, audit, authorized_user, companion }
     }
 
     fn record(&self, id: &str, kind: &str, decision: &str, detail: String) {
@@ -87,12 +96,26 @@ impl Tool for GuardianDecideTool {
     fn tier(&self) -> Tier { Tier::System }
 
     async fn execute(&self, args: ToolArgs) -> Result<ToolResult, MiraError> {
-        // Trusted operator gate — `_user_id` is injected by the turn, not the model.
+        use crate::agent::guardian_actions::{approval_scope, ApprovalScope};
+
+        // Trusted caller id — `_user_id` is injected by the turn, not the model.
         let caller = args.get("_user_id").and_then(|v| v.as_str()).unwrap_or("");
-        match self.authorized_user.as_deref() {
-            Some(u) if !caller.is_empty() && u == caller => {}
-            _ => return Ok(ToolResult::failure(
-                "Only MIRA-Guardian's configured operator can approve or decline its actions.")),
+        if caller.is_empty() {
+            return Ok(ToolResult::failure("Only an authorised operator or guardian can decide Guardian actions."));
+        }
+        let is_operator = self.authorized_user.as_deref() == Some(caller);
+        let store_opt = self.companion.as_ref().map(|c| c.store());
+
+        // Coarse gate: the operator, or anyone who is a guardian of at least one
+        // ward, may reach the decision logic. The fine-grained per-action check
+        // (System = operator-only; Member = that member's guardian or operator)
+        // is applied once the target action is known.
+        let is_any_guardian = store_opt
+            .map(|s| !s.wards_of(caller).unwrap_or_default().is_empty())
+            .unwrap_or(false);
+        if !is_operator && !is_any_guardian {
+            return Ok(ToolResult::failure(
+                "Only MIRA-Guardian's operator or a ward's guardian can approve or decline its actions."));
         }
 
         let action = match args.get("action_id").and_then(|v| v.as_str()) {
@@ -103,18 +126,43 @@ impl Tool for GuardianDecideTool {
             return Ok(ToolResult::success("There is no pending MIRA-Guardian proposal to act on."));
         };
 
+        // Fine-grained authorization by the action's approval scope.
+        let scope = approval_scope(a.kind, a.target.as_deref());
+        let authorized = match &scope {
+            ApprovalScope::System     => is_operator,
+            ApprovalScope::Member(m)  => is_operator || store_opt
+                .map(|s| crate::companion::governance::guardians_of(s, m).iter().any(|g| g == caller))
+                .unwrap_or(false),
+        };
+        if !authorized {
+            return Ok(ToolResult::failure(match &scope {
+                ApprovalScope::System    => "Only the Guardian's operator can decide household/system actions.",
+                ApprovalScope::Member(_) => "Only this member's guardian (or the operator) can decide this action.",
+            }.to_string()));
+        }
+
         let decision = args.get("decision").and_then(|v| v.as_str()).unwrap_or("").to_ascii_lowercase();
         let kind = a.kind.as_str();
         let approve = matches!(decision.as_str(), "approve" | "approved" | "yes" | "do it" | "go ahead" | "ok");
         let decline = matches!(decision.as_str(), "decline" | "declined" | "no" | "reject" | "deny" | "hold" | "stop");
 
         if approve {
+            // Member-scoped device actions are NOT actuated from chat: the
+            // ownership-verified actuation path lives in the web approve
+            // endpoint, which resolves the tool registry. Route the approver
+            // there instead of executing-then-failing, and leave the row Pending
+            // so the web approval still works.
+            if matches!(scope, ApprovalScope::Member(_)) {
+                return Ok(ToolResult::success(format!(
+                    "This affects a family member's device. For safety it's approved in the web UI \
+                     (Settings → Guardian → pending actions), where MIRA verifies the device is \
+                     registered to that member before acting. It's still pending (id={}).", a.id)));
+            }
             self.record(&a.id, kind, "approved", format!("approved via chat by {caller}"));
             let mgr = self.channel_manager.get();
-            // Member-scoped device actions execute via the HTTP approve endpoint
-            // (which resolves the tool registry + guardian routing); the chat
-            // decide path handles system actions only, so no registry here.
-            match execute_action(a.kind, a.target.as_deref(), self.automations.as_ref(), mgr, None).await {
+            // System actions only here — they don't consult the companion store,
+            // so `None` is correct (and fails closed for any member kind).
+            match execute_action(a.kind, a.target.as_deref(), self.automations.as_ref(), mgr, None, None).await {
                 Ok(msg) => {
                     let _ = self.store.decide(&a.id, GuardianActionStatus::Executed, &msg);
                     self.record(&a.id, kind, "executed", msg.clone());
@@ -127,6 +175,8 @@ impl Tool for GuardianDecideTool {
                 }
             }
         } else if decline {
+            // Declining never actuates — safe by chat for the operator or any
+            // authorised guardian.
             let _ = self.store.decide(&a.id, GuardianActionStatus::Declined, &format!("declined via chat by {caller}"));
             self.record(&a.id, kind, "declined", format!("declined via chat by {caller}"));
             Ok(ToolResult::success(format!("Declined the pending '{kind}' proposal.")))

@@ -219,6 +219,11 @@ pub struct ToolRegistry {
     // reload path can rebuild `subprocess`-handler app tools with their install
     // dir. `None` in minimal/test builds.
     app_packages_dir: Option<std::path::PathBuf>,
+    // Companion system — lets a device-actuating app tool enforce member-device
+    // governance: an entity registered in `entity_ownership` may only be
+    // actuated by its owner or a guardian, on the DIRECT chat path too (not just
+    // the Guardian's approval flow). `None` in minimal/test builds → no gate.
+    app_companion: Option<Arc<crate::companion::CompanionSystem>>,
 }
 
 impl ToolRegistry {
@@ -233,6 +238,7 @@ impl ToolRegistry {
             app_http:    None,
             app_secrets: None,
             app_packages_dir: None,
+            app_companion: None,
         }
     }
 
@@ -245,11 +251,19 @@ impl ToolRegistry {
         http:         Option<Arc<crate::tools::http_policy::HttpPolicy>>,
         secrets:      Option<Arc<crate::skills::SecretsStore>>,
         packages_dir: Option<std::path::PathBuf>,
+        companion:    Option<Arc<crate::companion::CompanionSystem>>,
     ) -> Self {
         self.app_http         = http;
         self.app_secrets      = secrets;
         self.app_packages_dir = packages_dir;
+        self.app_companion    = companion;
         self
+    }
+
+    /// The companion system used by device-actuating app tools to enforce
+    /// member-device governance. `None` disables the gate.
+    pub fn app_companion(&self) -> Option<Arc<crate::companion::CompanionSystem>> {
+        self.app_companion.clone()
     }
 
     /// The shared SSRF-guarded HTTP handle for app `http` tool handlers.

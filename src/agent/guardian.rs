@@ -711,9 +711,11 @@ pub fn spawn_watch_loop(
                                     continue;
                                 }
                                 // Member-scoped kinds are never autonomy-eligible, so
-                                // the isolation path never needs the tool registry.
+                                // the isolation path never needs the tool registry or
+                                // the companion store (both None → execute_action fails
+                                // closed if a member kind ever reached here).
                                 let res = execute_action(a.kind, a.target.as_deref(),
-                                    automations.as_ref(), channel_manager.as_ref(), None).await;
+                                    automations.as_ref(), channel_manager.as_ref(), None, None).await;
                                 auto_cooldown.insert(kind_s.clone(), now);
                                 match res {
                                     Ok(msg) => {

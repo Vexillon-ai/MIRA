@@ -42,10 +42,11 @@ fn admin_only(caller: &AuthUser) -> Option<Response> {
 /// admin-only; member-scoped actions (a later slice) also admit the affected
 /// member's guardians. Returns `Some(403)` when the caller may not decide it.
 ///
-/// Guardian resolution is passed empty for now — every current action kind is
-/// `System` (admin-only), so this is behaviour-identical to `admin_only`. When
-/// member-scoped actions land, `guardians` is filled via
-/// `companion::governance::guardians_of` and the member's guardians gain access.
+/// For a `System`-scope action this is behaviour-identical to `admin_only`
+/// (plus the configured `system_approvers`). For a member-scoped action
+/// (`ControlMemberDevice`), `guardians` is resolved via
+/// `companion::governance::guardians_of` so the affected member's guardian(s)
+/// may also decide it.
 fn require_approver(
     caller:           &AuthUser,
     kind:             crate::agent::guardian_actions::GuardianActionKind,
@@ -241,12 +242,19 @@ pub async fn approve_action(
     audit_decision(&audit, &id, action.kind.as_str(), "approved",
                    Some(format!("approved by {}", caller.0.username)));
 
+    // Hold the companion Arc for the duration of the call so the borrowed store
+    // (the anti-spoof check inside execute_action) outlives it. The 409
+    // pre-check above still gives a friendly error + leaves the row Pending; this
+    // is the authoritative gate.
+    let companion = agent.companion();
+    let companion_store = companion.as_ref().map(|c| c.store());
     let outcome = crate::agent::guardian_actions::execute_action(
         action.kind,
         action.target.as_deref(),
         automations.as_ref().map(|e| &e.0),
         channel_mgr.as_ref().map(|e| &e.0.0),
         Some(&agent.tools),
+        companion_store,
     ).await;
 
     let kind = action.kind.as_str();

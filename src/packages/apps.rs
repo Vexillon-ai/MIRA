@@ -399,16 +399,19 @@ pub struct AppTool {
     /// On-disk install dir + capabilities for the `subprocess` handler. `None`
     /// (minimal/test builds) → the handler fails gracefully.
     exec:        Option<Arc<AppExecCtx>>,
+    /// Companion system for member-device governance. `None` → no gate.
+    companion:   Option<Arc<crate::companion::CompanionSystem>>,
 }
 
 impl AppTool {
     pub fn new(
-        app_id:  &str,
-        spec:    &AppToolSpec,
-        config:  serde_json::Map<String, serde_json::Value>,
-        http:    Option<Arc<HttpPolicy>>,
-        secrets: Option<Arc<SecretsStore>>,
-        exec:    Option<Arc<AppExecCtx>>,
+        app_id:    &str,
+        spec:      &AppToolSpec,
+        config:    serde_json::Map<String, serde_json::Value>,
+        http:      Option<Arc<HttpPolicy>>,
+        secrets:   Option<Arc<SecretsStore>>,
+        exec:      Option<Arc<AppExecCtx>>,
+        companion: Option<Arc<crate::companion::CompanionSystem>>,
     ) -> Self {
         Self {
             // `app__<segment>__<tool>` — the segment (id, dots→hyphens) scopes the
@@ -422,6 +425,7 @@ impl AppTool {
             secrets,
             http,
             exec,
+            companion,
         }
     }
 
@@ -734,6 +738,35 @@ impl Tool for AppTool {
     fn args_schema(&self) -> serde_json::Value { self.schema.clone() }
 
     async fn execute(&self, args: ToolArgs) -> Result<ToolResult, MiraError> {
+        // Member-device governance on the DIRECT actuation path. If this
+        // call targets an entity registered in `entity_ownership` (a member
+        // device), the caller must be that entity's owner or a guardian —
+        // otherwise a user could actuate someone else's device straight from chat,
+        // bypassing the Guardian approval flow. Non-registered entities (ordinary
+        // app use) are unaffected. `_user_id` is injected by the chat handler
+        // (inject-wins, so a model can't spoof it); the Guardian's `execute_action`
+        // passes the ownership-verified owner as `_user_id`. Absent caller on a governed
+        // entity → refuse (fail-closed).
+        if let Some(companion) = self.companion.as_ref() {
+            if let Some(entity_id) = args.get("entity_id").and_then(|v| v.as_str()) {
+                if let Ok(Some(owner)) = companion.store().entity_owner(&self.app_id, entity_id) {
+                    let caller = args.get("_user_id").and_then(|v| v.as_str());
+                    let allowed = match caller {
+                        Some(uid) => uid == owner
+                            || crate::companion::governance::guardians_of(companion.store(), &owner)
+                                .iter().any(|g| g == uid),
+                        None => false,
+                    };
+                    if !allowed {
+                        return Ok(ToolResult::failure(format!(
+                            "'{entity_id}' is registered to a family member — only its owner or their \
+                             guardian can control it. A Guardian-proposed action goes through the \
+                             Settings → Guardian approval flow instead."
+                        )));
+                    }
+                }
+            }
+        }
         match &self.handler {
             AppHandler::Echo => {
                 let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
@@ -843,6 +876,7 @@ pub fn build_app_tools(
     packages_dir: &std::path::Path,
     http:         Option<Arc<HttpPolicy>>,
     secrets:      Option<Arc<SecretsStore>>,
+    companion:    Option<Arc<crate::companion::CompanionSystem>>,
 ) -> Vec<Arc<dyn Tool>> {
     let mut out: Vec<Arc<dyn Tool>> = Vec::new();
     for pkg in pkg_store.list().unwrap_or_default() {
@@ -862,6 +896,7 @@ pub fn build_app_tools(
             for t in &spec.tools {
                 out.push(Arc::new(AppTool::new(
                     &pkg.id, t, config.clone(), http.clone(), secrets.clone(), exec.clone(),
+                    companion.clone(),
                 )));
             }
         }
@@ -992,6 +1027,51 @@ pub fn resolve_emit_event(
 mod tests {
     use super::*;
 
+    // The member-device governance gate applies to DIRECT app-tool calls,
+    // not just the Guardian's approval flow: a registered (owned) entity may only
+    // be actuated by its owner or a guardian; the caller (`_user_id`) is trusted
+    // (inject-wins in the chat path). Non-registered entities are unaffected.
+    #[tokio::test]
+    async fn member_device_governance_gates_direct_app_tool_actuation() {
+        use crate::companion::CompanionSystem;
+        use crate::companion::settings::{CareNet, CareRole, CompanionSettings};
+
+        let dir = tempfile::tempdir().unwrap();
+        let companion = std::sync::Arc::new(CompanionSystem::open(dir.path()).unwrap());
+        // Device registered to "kid"; kid's guardian is "mum".
+        companion.store().set_entity_owner("com.mira.ha", "switch.kid_router", "kid", None).unwrap();
+        let mut kid = CompanionSettings::new("kid");
+        kid.safety_contact_user_id = Some("mum".into());
+        kid.care = CareNet { role: CareRole::Child, consent_at: None, guardian_ids: vec![] };
+        companion.store().upsert(&kid).unwrap();
+
+        let spec = AppToolSpec {
+            name: "call_service".into(),
+            description: "d".into(),
+            args_schema: serde_json::json!({}),
+            handler: AppHandler::Echo,
+        };
+        let tool = AppTool::new("com.mira.ha", &spec, Default::default(), None, None, None, Some(companion.clone()));
+
+        let call = |uid: Option<&str>, entity: &str| {
+            let mut a = serde_json::Map::new();
+            a.insert("entity_id".into(), serde_json::json!(entity));
+            a.insert("text".into(), serde_json::json!("ok"));
+            if let Some(u) = uid { a.insert("_user_id".into(), serde_json::json!(u)); }
+            serde_json::Value::Object(a)
+        };
+
+        // Owner + guardian may actuate the governed device; a stranger and an
+        // absent caller may not.
+        assert!(tool.execute(call(Some("kid"), "switch.kid_router")).await.unwrap().success);
+        assert!(tool.execute(call(Some("mum"), "switch.kid_router")).await.unwrap().success);
+        assert!(!tool.execute(call(Some("dad"), "switch.kid_router")).await.unwrap().success);
+        assert!(!tool.execute(call(None, "switch.kid_router")).await.unwrap().success);
+
+        // A non-registered entity is ordinary app use — no gate.
+        assert!(tool.execute(call(Some("dad"), "switch.unregistered")).await.unwrap().success);
+    }
+
     fn demo_spec() -> serde_json::Value {
         serde_json::json!({
             "ui": { "entry": "ui/index.html" },
@@ -1042,7 +1122,7 @@ mod tests {
     #[test]
     fn app_tool_name_is_provider_safe_and_echo_works() {
         let spec = AppSpec::parse(&demo_spec()).unwrap();
-        let tool = AppTool::new("com.mira.demo-hello", &spec.tools[0], Default::default(), None, None, None);
+        let tool = AppTool::new("com.mira.demo-hello", &spec.tools[0], Default::default(), None, None, None, None);
         assert_eq!(tool.name(), "app__com-mira-demo-hello__echo");
         // provider-safe charset
         assert!(tool.name().chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
@@ -1051,7 +1131,7 @@ mod tests {
     #[tokio::test]
     async fn echo_returns_text_arg() {
         let spec = AppSpec::parse(&demo_spec()).unwrap();
-        let tool = AppTool::new("com.mira.demo-hello", &spec.tools[0], Default::default(), None, None, None);
+        let tool = AppTool::new("com.mira.demo-hello", &spec.tools[0], Default::default(), None, None, None, None);
         let r = tool.execute(serde_json::json!({"text": "hi there"})).await.unwrap();
         assert!(r.success);
         assert_eq!(r.output, "hi there");
@@ -1067,7 +1147,7 @@ mod tests {
                 headers: BTreeMap::new(), body: None, response: None,
             },
         };
-        AppTool::new("com.mira.demo", &spec, config, None, None, None)
+        AppTool::new("com.mira.demo", &spec, config, None, None, None, None)
     }
 
     #[test]
@@ -1210,6 +1290,7 @@ mod tests {
         AppTool::new(
             "com.mira.sub", &spec, serde_json::Map::new(), None, None,
             Some(Arc::new(AppExecCtx { install_dir, capabilities: caps })),
+            None,
         )
     }
 

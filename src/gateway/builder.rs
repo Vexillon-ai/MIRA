@@ -818,6 +818,7 @@ impl GatewayBuilder {
                 Some(Arc::clone(&http_policy)),
                 secrets_store.clone(),
                 Some(data_dir.join("packages")),
+                companion_system.clone(),
             );
         let tools = Arc::new(tool_registry);
         mcp_servers.attach_tool_registry(Arc::clone(&tools));
@@ -843,6 +844,7 @@ impl GatewayBuilder {
         if let Ok(pkg_store) = crate::packages::PackageStore::open(&data_dir.join("auth.db")) {
             tools.set_app_tools(crate::packages::build_app_tools(
                 &pkg_store, &data_dir.join("packages"), tools.app_http(), tools.app_secrets(),
+                tools.app_companion(),
             ));
         }
         // FDI-2: reconcile managed app service containers (start active ones,
@@ -2401,6 +2403,7 @@ fn build_tool_registry(
             guardian_channel_manager,
             guardian_audit,
             config.automations.watchdog.notify_user_id.clone(),
+            companion_system.clone(),
         ));
     }
     // Settings introspection: describe any setting (open) +

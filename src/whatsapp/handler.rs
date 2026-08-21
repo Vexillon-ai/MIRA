@@ -96,17 +96,38 @@ pub async fn whatsapp_inbound(
         return StatusCode::NOT_FOUND;
     };
 
-    // Signature verification over the raw body. When an app_secret is
-    // configured we REQUIRE a valid signature; without one we accept
-    // unverified (operator's explicit choice, warned at startup).
-    if let Some(secret) = ctx.app_secret.as_deref() {
-        let provided = headers
-            .get("x-hub-signature-256")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-        if !verify_signature(secret, &body, provided) {
-            warn!("WhatsApp inbound: bad signature on account {}", account);
-            return StatusCode::UNAUTHORIZED;
+    // Signature verification over the raw body (fail-closed). A configured
+    // `app_secret` REQUIRES a valid `X-Hub-Signature-256`. When the account has
+    // NO app_secret the webhook is REJECTED — anyone who learns the account id
+    // could otherwise POST forged inbound — unless the operator has explicitly
+    // opted into insecure webhooks. (A real WhatsApp Cloud API app always has an
+    // app secret, so this should never need the escape hatch.)
+    match ctx.app_secret.as_deref() {
+        Some(secret) => {
+            let provided = headers
+                .get("x-hub-signature-256")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            if !verify_signature(secret, &body, provided) {
+                warn!("WhatsApp inbound: bad signature on account {}", account);
+                return StatusCode::UNAUTHORIZED;
+            }
+        }
+        None => {
+            let allow_insecure = match &state.deps.live_config {
+                Some(cfg) => cfg.get().await.channels.whatsapp.allow_insecure_webhook,
+                None      => false,
+            };
+            if !allow_insecure {
+                warn!("WhatsApp webhook REJECTED on account {} — no app_secret configured. \
+                       Set the account's app_secret, or set \
+                       channels.whatsapp.allow_insecure_webhook=true to accept unverified \
+                       inbound (insecure).", account);
+                return StatusCode::UNAUTHORIZED;
+            }
+            warn!("WhatsApp webhook on account {} accepted WITHOUT signature verification \
+                   (channels.whatsapp.allow_insecure_webhook=true) — anyone who learns the \
+                   account id can inject messages.", account);
         }
     }
 

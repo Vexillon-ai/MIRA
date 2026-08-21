@@ -1185,6 +1185,14 @@ pub struct TelegramConfig {
     // value (verified inline by `telegram_handler`). The schema still
     // accepts the old field on existing configs so they keep loading;
     // serde drops it on the next save.
+
+    // Fail-closed inbound: when an account has NO `secret_token`, its
+    // webhook is rejected unless this is explicitly set true. Default false
+    // (secure). Set true only if you genuinely can't register a secret in your
+    // `setWebhook` call and accept that anyone who learns the account id could
+    // POST forged updates.
+    #[serde(default)]
+    pub allow_insecure_webhook: bool,
 }
 
 impl Default for TelegramConfig {
@@ -1193,6 +1201,7 @@ impl Default for TelegramConfig {
             enabled:     false,
             bot_token:   None,
             polling:     false,
+            allow_insecure_webhook: false,
         }
     }
 }
@@ -1225,6 +1234,12 @@ pub struct MatrixConfig {
 pub struct WhatsAppConfig {
     #[serde(default)]
     pub enabled: bool,
+
+    // Fail-closed inbound: when an account has NO `app_secret`, its webhook
+    // is rejected unless this is explicitly set true. Default false (secure). A
+    // real WhatsApp Cloud API app always has an app secret, so leave this off.
+    #[serde(default)]
+    pub allow_insecure_webhook: bool,
 }
 
 // Slack channel kill switch. Per-account credentials (bot token + signing

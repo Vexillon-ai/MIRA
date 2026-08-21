@@ -81,6 +81,17 @@ struct Answers {
     data_dir: String,
 }
 
+/// Shared admin-password policy for `mira setup` and `mira reset-admin-password`.
+/// A LAN-exposed family instance needs a real floor: at least 12 characters,
+/// with a nudge toward a passphrase (raised from 8).
+pub fn validate_admin_password(pw: &str) -> Result<(), String> {
+    if pw.chars().count() < 12 {
+        return Err("admin password must be at least 12 characters — a short passphrase \
+                    (e.g. four random words) is easy to remember and hard to guess".into());
+    }
+    Ok(())
+}
+
 pub fn run(opts: SetupOptions) -> Result<(), Box<dyn Error>> {
     let config_path = opts
         .config_path
@@ -156,11 +167,9 @@ fn interactive(opts: &SetupOptions, existing_admin: Option<String>) -> Result<Op
         )
         .interact_text()?;
     let admin_pass = Password::with_theme(&theme())
-        .with_prompt("Admin password (min 8 chars)")
+        .with_prompt("Admin password (min 12 chars — a passphrase is ideal)")
         .with_confirmation("Confirm password", "Passwords don't match — try again")
-        .validate_with(|p: &String| -> Result<(), &str> {
-            if p.len() >= 8 { Ok(()) } else { Err("at least 8 characters") }
-        })
+        .validate_with(|p: &String| validate_admin_password(p))
         .interact()?;
 
     // 2) LLM provider — auto-detect locals, then a menu that ALWAYS lists every
@@ -364,9 +373,7 @@ fn from_opts(opts: &SetupOptions, existing_admin: Option<String>) -> Result<Answ
         .clone()
         .or_else(|| env("MIRA_SETUP_ADMIN_PASS"))
         .ok_or("unattended setup needs --admin-pass (or MIRA_SETUP_ADMIN_PASS)")?;
-    if admin_pass.len() < 8 {
-        return Err("admin password must be at least 8 characters".into());
-    }
+    validate_admin_password(&admin_pass)?;
 
     let host = match opts.bind.clone().or_else(|| env("MIRA_SETUP_BIND")).as_deref() {
         Some("lan") | Some("0.0.0.0") => "0.0.0.0".to_string(),
@@ -697,6 +704,16 @@ fn expand_tilde(p: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_password_floor_is_twelve_with_guidance() {
+        assert!(validate_admin_password("short").is_err());
+        assert!(validate_admin_password("elevenchars").is_err());        // 11
+        assert!(validate_admin_password("twelvechars!").is_ok());        // 12
+        assert!(validate_admin_password("correct horse battery staple").is_ok());
+        // The message nudges toward a passphrase.
+        assert!(validate_admin_password("x").unwrap_err().contains("passphrase"));
+    }
 
     #[test]
     fn parse_openai_models() {

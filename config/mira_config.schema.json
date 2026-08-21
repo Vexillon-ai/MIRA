@@ -714,6 +714,10 @@
                 "string",
                 "null"
               ]
+            },
+            "allow_insecure_webhook": {
+              "description": "Fail-closed inbound webhook control. When an account has no per-account webhook secret configured, its inbound webhook is REJECTED unless this is true. Default false (secure). Set true only if you cannot register a secret and accept that anyone who learns the account id could POST forged updates.",
+              "type": "boolean"
             }
           }
         },
@@ -746,6 +750,10 @@
           "properties": {
             "enabled": {
               "description": "Enable the WhatsApp channel. When false, inbound webhooks are dropped (200, no processing) and outbound dispatchers short-circuit. Per-row enabled flags still apply on top.",
+              "type": "boolean"
+            },
+            "allow_insecure_webhook": {
+              "description": "Fail-closed inbound webhook control. When an account has no per-account webhook secret configured, its inbound webhook is REJECTED unless this is true. Default false (secure). Set true only if you cannot register a secret and accept that anyone who learns the account id could POST forged updates.",
               "type": "boolean"
             }
           }

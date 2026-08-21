@@ -13,6 +13,30 @@ function isApp(pkg: InstalledPackage): boolean {
   return Array.isArray(comps) && comps.some((c) => c.type === 'app')
 }
 
+// Runtime egress lockdown for the app iframe. The UI is rendered via
+// `srcDoc`, so the `connect-src 'none'` HEADER the server sets on the fetch does
+// NOT govern the running iframe (a srcdoc document doesn't inherit a fetched
+// response's headers). Inject the policy as a `<meta>` CSP into the document
+// itself — combined with `sandbox="allow-scripts"` (opaque origin) this blocks
+// the app from making its own network calls (fetch/img/WebSocket) to phone home
+// or exfiltrate. `postMessage` to the parent is unaffected (not a network fetch).
+// CSP metas only tighten, so an app's own policy can't loosen this.
+const APP_IFRAME_CSP =
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+  "img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'"
+
+function withAppCsp(html: string): string {
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${APP_IFRAME_CSP}">`
+  const head = html.match(/<head[^>]*>/i)
+  if (head) return html.slice(0, head.index! + head[0].length) + meta + html.slice(head.index! + head[0].length)
+  const htmlTag = html.match(/<html[^>]*>/i)
+  if (htmlTag) {
+    const i = htmlTag.index! + htmlTag[0].length
+    return html.slice(0, i) + `<head>${meta}</head>` + html.slice(i)
+  }
+  return `<!doctype html><head>${meta}</head>${html}`
+}
+
 // Settings form for an app that declares a `config_schema`. Non-secret fields
 // are pre-filled with current values; secret fields (API keys) show whether one
 // is saved and are only sent when the admin types a new value. Renders nothing
@@ -104,7 +128,7 @@ export default function AppsPage() {
     if (!selected) { setHtml(''); return }
     let cancelled = false
     appsApi.getUi(selected)
-      .then((h) => { if (!cancelled) setHtml(h) })
+      .then((h) => { if (!cancelled) setHtml(withAppCsp(h)) })
       .catch(() => { if (!cancelled) setHtml('<p style="font-family:sans-serif">Failed to load app UI.</p>') })
     return () => { cancelled = true }
   }, [selected])

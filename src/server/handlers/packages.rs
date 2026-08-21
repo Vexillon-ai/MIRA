@@ -48,7 +48,7 @@ fn reload_app_tools(registry: &McpServerRegistry, pkg_store: &PackageStore) {
         // without a restart.
         let pkgs_dir = tools.app_packages_dir().unwrap_or_else(|| std::path::PathBuf::from("packages"));
         tools.set_app_tools(packages::build_app_tools(
-            pkg_store, &pkgs_dir, tools.app_http(), tools.app_secrets(),
+            pkg_store, &pkgs_dir, tools.app_http(), tools.app_secrets(), tools.app_companion(),
         ));
         // FDI-2: reconcile app service containers to the new active set (start a
         // newly-enabled app's backend, reap a disabled/uninstalled one). Blocking
