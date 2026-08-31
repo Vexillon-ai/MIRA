@@ -814,6 +814,23 @@ impl MemorySystem {
         Ok(count)
     }
 
+    // Complete wipe of everything owned by `user_id` — memories, knowledge-graph
+    // rows, audit rows, AND their semantic vectors. Used to tear down an
+    // ephemeral guest so nothing leaks into a later session. Best-effort on the
+    // semantic side (kept in sync with the SQL wipe).
+    pub async fn purge_user(&self, user_id: &str) -> Result<(), crate::MiraError> {
+        let ids = self.storage.lock().unwrap().purge_user(user_id)?;
+        if !ids.is_empty() {
+            if let Some(ref sem) = self.semantic_memory {
+                let mut sem = sem.lock().await;
+                for id in ids {
+                    sem.delete_memory(id);
+                }
+            }
+        }
+        Ok(())
+    }
+
     // Get a single memory item by ID.
     pub fn get(&self, id: u64) -> Option<MemoryItem> {
         self.storage.lock().unwrap().get(id).ok().flatten()

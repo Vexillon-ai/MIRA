@@ -3,7 +3,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload, Trash2, Wrench, RotateCcw, Loader2, Calendar as CalendarIcon, RefreshCw, Shield, ShieldAlert, Volume2, ChevronDown, Image as ImageIcon, BookText } from 'lucide-react'
+import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload, Trash2, Wrench, RotateCcw, Loader2, Calendar as CalendarIcon, RefreshCw, Shield, ShieldAlert, Volume2, ChevronDown, Image as ImageIcon, BookText, Lock } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { api } from '@/api/client'
 import UpdatesCard from '@/components/UpdatesCard'
@@ -340,7 +340,7 @@ function setPath(obj: Config, path: string, value: unknown): Config {
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
-type TabId = 'appearance' | 'providers' | 'agent' | 'tools' | 'sandbox' | 'channels' | 'memory' | 'wiki' | 'calendar' | 'voice' | 'image' | 'guardian' | 'server' | 'advanced'
+type TabId = 'appearance' | 'providers' | 'agent' | 'tools' | 'sandbox' | 'channels' | 'memory' | 'wiki' | 'calendar' | 'voice' | 'image' | 'guardian' | 'restricted' | 'server' | 'advanced'
 
 const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: 'appearance', label: 'Terminal (TUI)', icon: <Palette size={14} /> },
@@ -355,6 +355,7 @@ const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: 'voice',      label: 'Voice',      icon: <Volume2 size={14} /> },
   { id: 'image',      label: 'Image & Video', icon: <ImageIcon size={14} /> },
   { id: 'guardian',   label: 'Guardian',   icon: <ShieldAlert size={14} /> },
+  { id: 'restricted', label: 'Restricted Mode', icon: <Lock size={14} /> },
   { id: 'server',     label: 'Server & Security', icon: <Server size={14} />  },
   { id: 'advanced',   label: 'Advanced',   icon: <Code2 size={14} />   },
 ]
@@ -785,7 +786,7 @@ export default function SettingsPage() {
   const initialTab = (() => {
     if (typeof window === 'undefined') return 'appearance'
     const p = new URLSearchParams(window.location.search).get('tab')
-    const allowed: TabId[] = ['appearance','providers','agent','tools','sandbox','channels','memory','calendar','voice','image','guardian','server','advanced']
+    const allowed: TabId[] = ['appearance','providers','agent','tools','sandbox','channels','memory','calendar','voice','image','guardian','restricted','server','advanced']
     return (allowed as string[]).includes(p ?? '') ? (p as TabId) : 'appearance'
   })()
   const [tab, setTab] = useState<TabId>(initialTab)
@@ -1068,6 +1069,9 @@ export default function SettingsPage() {
         )}
         {tab === 'guardian' && (
           <GuardianTab set={set} str={str} num={num} bool={bool} list={list} />
+        )}
+        {tab === 'restricted' && (
+          <RestrictedTab str={str} num={num} bool={bool} />
         )}
         {tab === 'server' && (
           <ServerTab set={set} str={str} num={num} bool={bool} draft={draft} />
@@ -3410,6 +3414,131 @@ function Combobox({
 }
 
 // ── Server tab ────────────────────────────────────────────────────────────────
+
+// Read-only view of Restricted Mode. Deliberately NOT editable: Restricted Mode
+// is fail-closed and immutable at runtime, so it is set in mira_config.json and
+// applied on restart. This panel exists so an operator can SEE that the instance
+// is locked down and exactly what that means.
+function RestrictedTab({
+  str, num, bool,
+}: {
+  str: (p: string, fb?: string) => string
+  num: (p: string, fb?: number) => number
+  bool: (p: string, fb?: boolean) => boolean
+}) {
+  const profile = str('restricted_mode.profile', '').trim()
+  const active = profile.length > 0
+
+  // A cap value → human string. 0 means "unlimited" for most, "provider default"
+  // for the two clamp knobs.
+  const cap = (path: string, kind: 'count' | 'tokens' | 'secs' | 'clamp' | 'ctx') => {
+    const n = num(`restricted_mode.caps.${path}`, 0)
+    if (n === 0) return (kind === 'clamp' || kind === 'ctx') ? 'No clamp (provider default)' : 'Unlimited'
+    if (kind === 'secs') return `${n.toLocaleString()}s`
+    if (kind === 'count') return `${n.toLocaleString()} / min`
+    return `${n.toLocaleString()} tokens`
+  }
+
+  const Val = ({ children }: { children: ReactNode }) => (
+    <span style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 13 }}>{children}</span>
+  )
+
+  if (!active) {
+    return (
+      <div className={styles.tabBody}>
+        <Section title="Restricted Mode">
+          <p className={styles.sectionDesc} style={{ marginTop: 0 }}>
+            <strong>Off.</strong> This instance is unrestricted — every capability is
+            available subject to normal per-user roles.
+          </p>
+          <p className={styles.sectionDesc}>
+            Restricted Mode is a fail-closed profile for safely exposing MIRA (a public
+            demo, a kiosk, or to reduce prompt-injection blast radius). Turn it on by
+            setting <code>restricted_mode.profile</code> in <code>mira_config.json</code> and
+            restarting — see the “Safely expose MIRA” guide.
+          </p>
+        </Section>
+      </div>
+    )
+  }
+
+  return (
+    <div className={styles.tabBody}>
+      <Section title="Status">
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+          borderRadius: 8, background: 'var(--warn-bg, rgba(220,160,40,0.12))',
+          border: '1px solid var(--warn-border, rgba(220,160,40,0.4))', marginBottom: 4,
+        }}>
+          <Lock size={16} />
+          <span>
+            <strong>Restricted Mode is active</strong> — profile <Val>{profile}</Val>.
+            Dangerous and side-effecting capabilities are denied at the policy layer.
+          </span>
+        </div>
+        <p className={styles.sectionDesc}>
+          This is read-only. Restricted Mode is fixed at startup and cannot be changed at
+          runtime — edit <code>restricted_mode</code> in <code>mira_config.json</code> and
+          restart to change it.
+        </p>
+      </Section>
+
+      <Section title="What the “hardened” profile does">
+        <Field label="Allowed" desc="Chat &amp; reasoning, per-user memory, and the wiki.">
+          <Val>chat · memory · wiki</Val>
+        </Field>
+        <Field
+          label="Denied"
+          desc="Shell &amp; code execution, filesystem writes, real outbound channel messages, care-network escalations, home-automation actuation, guardian actions, arbitrary web fetch, and external writes. New/unknown tools are denied by default."
+        >
+          <Val>side-effecting capabilities</Val>
+        </Field>
+      </Section>
+
+      <Section title="Resource &amp; cost caps">
+        <Field label="Per-user rate limit" desc="Inbound messages per user, per minute.">
+          <Val>{cap('messages_per_min', 'count')}</Val>
+        </Field>
+        <Field label="Per-turn response cap" desc="Also applied to the model's max_tokens.">
+          <Val>{cap('max_tokens_per_turn', 'clamp')}</Val>
+        </Field>
+        <Field label="Context budget" desc="History the model sees per turn.">
+          <Val>{cap('context_budget_tokens', 'ctx')}</Val>
+        </Field>
+        <Field label="Concurrency cap" desc="Simultaneous in-flight turns across the instance.">
+          <Val>{num('restricted_mode.caps.max_concurrent_sessions', 0) === 0 ? 'Unlimited' : num('restricted_mode.caps.max_concurrent_sessions', 0).toLocaleString()}</Val>
+        </Field>
+        <Field label="Daily token ceiling" desc="Total tokens per UTC day across the instance.">
+          <Val>{cap('daily_token_ceiling', 'tokens')}</Val>
+        </Field>
+      </Section>
+
+      <Section title="Guest sessions">
+        {bool('restricted_mode.guest.enabled') ? (
+          <>
+            <Field label="Anonymous guests" desc="Minted via POST /api/auth/guest (fail-closed — only while a profile is active).">
+              <Val>Enabled</Val>
+            </Field>
+            <Field label="Session lifetime" desc="Each guest is wiped after this.">
+              <Val>{`${num('restricted_mode.guest.session_ttl_secs', 0).toLocaleString()}s`}</Val>
+            </Field>
+            <Field label="Max active guests" desc="Beyond this, minting returns a graceful “busy”.">
+              <Val>{num('restricted_mode.guest.max_active', 0) === 0 ? 'Unlimited' : num('restricted_mode.guest.max_active', 0).toLocaleString()}</Val>
+            </Field>
+            <Field label="Seed wiki" desc="Baseline copied into each guest's isolated wiki.">
+              <Val>{str('restricted_mode.guest.seed_wiki_dir', '') || '— none —'}</Val>
+            </Field>
+          </>
+        ) : (
+          <p className={styles.sectionDesc} style={{ marginTop: 0 }}>
+            <strong>Disabled.</strong> <code>POST /api/auth/guest</code> refuses (403). Enable with
+            <code> restricted_mode.guest.enabled</code>.
+          </p>
+        )}
+      </Section>
+    </div>
+  )
+}
 
 function ServerTab({
   set, str, num, bool, draft,

@@ -478,6 +478,15 @@ impl Dispatcher {
         to_override: Option<&str>,
         text:        &str,
     ) -> Result<(), MiraError> {
+        // Restricted Mode — deny proactive/scheduled sends on real channels
+        // (check-ins, briefings, follow-ups). `channel_send_denied` permits
+        // "web" (the chat UI is not a real outbound channel). Return Ok so a
+        // gated schedule doesn't error-loop — the assistant text is still in
+        // history; it just isn't pushed out.
+        if let Some(reason) = crate::policy::restricted::channel_send_denied(channel) {
+            warn!("automations: outbound '{channel}' suppressed for '{user_id}' — {reason}");
+            return Ok(());
+        }
         match channel {
             // Web: nothing to push — the assistant message is already in
             // history and the NotificationBus event has woken any open tab.

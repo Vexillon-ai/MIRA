@@ -1078,7 +1078,20 @@ impl AgentCore {
         // model can't recall it. This keeps the prompt in the reliable-recall zone
         // AND turns compaction on for the overflow. Cloud providers left unset keep
         // the legacy fixed-turn window. See effective-vs-advertised-context.md.
-        let effective_ctx = self.effective_context_tokens();
+        let mut effective_ctx = self.effective_context_tokens();
+        // Restricted Mode per-turn caps (Slice 2). When a profile is active, shrink
+        // the context window and the response-token budget to the configured caps
+        // (each no-ops at 0). `restricted_response_cap` is also applied to the
+        // provider's `max_tokens` below so output length is genuinely bounded.
+        let restricted_caps = crate::policy::restricted::caps();
+        if let Some(rc) = restricted_caps.as_ref() {
+            effective_ctx = rc.clamp_context_budget(effective_ctx);
+        }
+        let restricted_response_cap: Option<u32> =
+            restricted_caps.as_ref().and_then(|rc| rc.response_token_cap());
+        let effective_max_response = restricted_caps.as_ref()
+            .map(|rc| rc.clamp_response_tokens(acfg.max_response_tokens))
+            .unwrap_or(acfg.max_response_tokens);
         // Tool-schema tokens the request will ALSO carry (not part of `messages`).
         // Budgeting that ignores them silently overshoots the window by the tool
         // block — on a small local window (8K) the ~120-tool "all" set alone can
@@ -1114,7 +1127,7 @@ impl AgentCore {
         let mut skip = if effective_ctx > 0 {
             // Cap the output reservation so a small window can't underflow the
             // budget to zero. Fold the tool-schema reserve in alongside it.
-            let reservation = (acfg.max_response_tokens as usize)
+            let reservation = (effective_max_response as usize)
                 .min(effective_ctx / 4)
                 + tool_reserve;
             let budget = crate::agent::context_budget::context_budget(
@@ -1254,6 +1267,10 @@ impl AgentCore {
         let options = GenerationOptions {
             reasoning_effort: context.reasoning_effort.clone(),
             prompt_cache: cache_prefix,
+            // Restricted Mode: hard-cap output length when configured, so a turn
+            // can't be coaxed into an unbounded (costly) generation. Unset
+            // otherwise, preserving the provider/default behaviour.
+            max_tokens: restricted_response_cap,
             ..GenerationOptions::default()
         };
 
@@ -1384,6 +1401,12 @@ impl AgentCore {
             cr = usage.cache_read_tokens, cw = usage.cache_write_tokens,
             out = usage.completion_tokens,
         );
+        // Restricted Mode: bank this turn's tokens against the global daily
+        // ceiling (no-op when the ceiling is unlimited). Uses total_tokens so the
+        // ceiling reflects real spend (prompt + completion).
+        if let Some(rc) = restricted_caps.as_ref() {
+            rc.record_tokens(usage.total_tokens as u64);
+        }
         let _ = tx.send(StreamEvent::Done { usage }).await;
 
         // ── 5. Persist session ────────────────────────────────────────────────

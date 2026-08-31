@@ -669,6 +669,10 @@ fn combine_delivery(
         (DO::Failed(ch, e), Err(we)) => Some(format!("real-channel ({ch}) failed: {e}; web record failed: {we}")),
         (DO::NoChannel, Ok(()))      => None, // web-only contact — expected
         (DO::NoChannel, Err(e))      => Some(e.clone()),
+        // Restricted Mode suppressed the real channel; the durable web record is
+        // the delivery. Not a failure — no loud "no one alerted".
+        (DO::Suppressed(_), Ok(()))  => Some("web thread only; real channel suppressed (restricted mode)".to_string()),
+        (DO::Suppressed(r), Err(e))  => Some(format!("real channel suppressed (restricted mode: {r}); web record failed: {e}")),
     };
     if web.is_ok() || reached_channel {
         (EscalationOutcome::Delivered, note)

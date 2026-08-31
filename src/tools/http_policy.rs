@@ -70,6 +70,11 @@ struct HttpPolicyInner {
     // engine (callers that don't yet have agent context can still issue
     // requests, but they sit outside the policy decision audit trail).
     policy_engine: Option<Arc<dyn crate::policy::PolicyEngine>>,
+    // Restricted Mode gate. When set, EVERY outbound hop (context-aware or
+    // legacy context-free) is checked before the request fires — unlike the
+    // agent-scoped `policy_engine`, this does not require an `agent_id`. Under a
+    // `hardened` profile all egress is denied. Layered on top of the SSRF guard.
+    restricted: Option<Arc<crate::policy::RestrictedPolicy>>,
 }
 
 // Configuration input to [`HttpPolicy::new`]. Mirrors `[security.http]` +
@@ -250,6 +255,7 @@ impl HttpPolicy {
                 searxng_exception: cfg.searxng_exception,
                 rate:              Arc::new(rate),
                 policy_engine:     None,
+                restricted:        None,
             }),
         }
     }
@@ -273,8 +279,54 @@ impl HttpPolicy {
                 searxng_exception: inner.searxng_exception.clone(),
                 rate:              Arc::clone(&inner.rate),
                 policy_engine:     Some(engine),
+                restricted:        inner.restricted.clone(),
             }),
         }
+    }
+
+    // Attach a Restricted Mode gate. Preserves rate-limit state + any policy
+    // engine already wired. When present, every outbound hop is checked; under a
+    // `hardened` profile all egress is denied (defense-in-depth beside the tool
+    // gate, which already denies network-tier tools).
+    pub fn with_restricted_policy(
+        self,
+        restricted: Option<Arc<crate::policy::RestrictedPolicy>>,
+    ) -> Self {
+        let inner = self.inner;
+        Self {
+            inner: Arc::new(HttpPolicyInner {
+                user_agent:        inner.user_agent.clone(),
+                max_body_bytes:    inner.max_body_bytes,
+                request_timeout:   inner.request_timeout,
+                max_redirects:     inner.max_redirects,
+                denylist:          inner.denylist.clone(),
+                allowlist:         inner.allowlist.clone(),
+                searxng_exception: inner.searxng_exception.clone(),
+                rate:              Arc::clone(&inner.rate),
+                policy_engine:     inner.policy_engine.clone(),
+                restricted:        restricted,
+            }),
+        }
+    }
+
+    // Fail-closed Restricted Mode check for a single outbound hop. Returns
+    // `PolicyDenied` when the active profile denies network egress. A no-op when
+    // Restricted Mode is off. Called at the entry of `follow` and `do_one_hop`
+    // so no request path (context-aware or legacy) can bypass it.
+    fn restricted_guard(&self, url: &str) -> Result<(), PolicyError> {
+        let Some(restricted) = &self.inner.restricted else { return Ok(()); };
+        let host = Url::parse(url).ok()
+            .and_then(|u| u.host_str().map(str::to_owned))
+            .unwrap_or_default();
+        if let crate::policy::RestrictedDecision::Deny { reason } =
+            restricted.check_network_egress(&host)
+        {
+            return Err(PolicyError::PolicyDenied {
+                rule:   format!("restricted-mode/{}", restricted.profile_name()),
+                reason,
+            });
+        }
+        Ok(())
     }
 
     pub fn user_agent(&self) -> &str { &self.inner.user_agent }
@@ -434,6 +486,11 @@ impl HttpPolicy {
         body:          Option<&[u8]>,
         allow_private: &[String],
     ) -> Result<HttpResponse, PolicyError> {
+        // 0. Restricted Mode — the single funnel every outbound hop passes
+        // through (`follow` calls this per redirect; `request_with_context` calls
+        // it directly), so gating here is fail-closed for ALL network egress.
+        self.restricted_guard(url)?;
+
         let parsed = Url::parse(url).map_err(|_| PolicyError::InvalidUrl(url.to_owned()))?;
 
         // 1. Scheme gate.

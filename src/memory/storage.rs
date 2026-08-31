@@ -655,6 +655,50 @@ impl MemoryStorage {
         Ok((rows, ids))
     }
 
+    // Hard-delete EVERYTHING owned by `user_id` across every user-keyed table in
+    // this database — the complete-wipe used to tear down an ephemeral guest so
+    // no memory can leak into a later session. Returns the deleted memory ids so
+    // the caller can drop matching vectors from the semantic store. Runs in a
+    // transaction so a partial wipe can't leave a half-deleted (leaky) user.
+    pub fn purge_user(&self, user_id: &str) -> Result<Vec<u64>, MiraError> {
+        let ids: Vec<u64> = {
+            let mut stmt = self.conn
+                .prepare("SELECT id FROM memories WHERE user_id = ?1")
+                .map_err(|e| MiraError::MemoryError(format!("purge_user prepare: {e}")))?;
+            stmt.query_map(params![user_id], |row| row.get::<_, i64>(0))
+                .map_err(|e| MiraError::MemoryError(format!("purge_user query: {e}")))?
+                .filter_map(|r| r.ok())
+                .map(|i| i as u64)
+                .collect()
+        };
+
+        // All four user-keyed tables, in one transaction. `memories` and the two
+        // knowledge-graph tables key on `user_id`; `memory_audit` on
+        // `actor_user_id`. If the schema ever grows another user-keyed table,
+        // add it here — an incomplete wipe is a cross-session leak.
+        self.conn.execute_batch("BEGIN")
+            .map_err(|e| MiraError::MemoryError(format!("purge_user begin: {e}")))?;
+        let run = |sql: &str| self.conn.execute(sql, params![user_id]);
+        let result = (|| {
+            run("DELETE FROM memories     WHERE user_id       = ?1")?;
+            run("DELETE FROM memory_audit WHERE actor_user_id = ?1")?;
+            run("DELETE FROM kg_entities  WHERE user_id       = ?1")?;
+            run("DELETE FROM kg_edges     WHERE user_id       = ?1")?;
+            Ok::<(), rusqlite::Error>(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")
+                    .map_err(|e| MiraError::MemoryError(format!("purge_user commit: {e}")))?;
+                Ok(ids)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(MiraError::MemoryError(format!("purge_user delete: {e}")))
+            }
+        }
+    }
+
     // List all memories for this user with pagination
     pub fn list_all(&self, limit: u64, offset: u64) -> Result<Vec<MemoryItem>, MiraError> {
         let sql = format!(
@@ -2009,6 +2053,24 @@ mod tests {
         storage.store("One".to_string(), Category::Fact, vec![], None).unwrap();
         storage.store("Two".to_string(), Category::Fact, vec![], None).unwrap();
         assert_eq!(storage.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn purge_user_wipes_only_the_target_user() {
+        let path = "/tmp/mira_test_purge_user.db";
+        std::fs::remove_file(path).ok();
+        let a = MemoryStorage::new_for_user(path, "guestA").unwrap();
+        let b = MemoryStorage::new_for_user(path, "guestB").unwrap();
+        a.store("A secret".into(), Category::Fact, vec![], None).unwrap();
+        b.store("B keep".into(),   Category::Fact, vec![], None).unwrap();
+        assert_eq!(a.count().unwrap(), 1);
+        assert_eq!(b.count().unwrap(), 1);
+
+        let ids = a.purge_user("guestA").unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(a.count().unwrap(), 0, "target user is wiped");
+        assert_eq!(b.count().unwrap(), 1, "other user is untouched — no cross-session leak");
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

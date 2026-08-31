@@ -194,6 +194,115 @@ pub struct MiraConfig {
     // tool reads its defaults from here; key/endpoint come from providers.openai.
     #[serde(default)]
     pub video: VideoConfig,
+
+    // Restricted Mode — a fail-closed capability-restriction profile for safely
+    // exposing MIRA (guest/kiosk instances, prompt-injection blast-radius
+    // reduction). Off by default (`profile` unset): with no profile selected the
+    // server behaves exactly as before. See `RestrictedModeConfig`.
+    #[serde(default)]
+    pub restricted_mode: RestrictedModeConfig,
+}
+
+// Restricted Mode configuration. When `profile` names a built-in profile
+// (currently only `"hardened"`), the server denies dangerous / side-effecting
+// capabilities (shell, code, outbound channels, care escalations, home
+// actuation, arbitrary web fetch) at the policy layer, fail-closed. An
+// unrecognised profile name is a fatal startup error (never a silent
+// fall-through to unrestricted). Read once at startup and held immutably — no
+// runtime path can widen it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RestrictedModeConfig {
+    // The active restriction profile, or `None`/unset for Restricted Mode off.
+    // The only built-in profile is `"hardened"` (guest/exposed/kiosk).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+
+    // Resource / cost caps applied while a profile is active. Every field
+    // defaults to 0 = unlimited, so a bare `profile` with no caps behaves like
+    // the Slice-1 deny-only mode. The private demo profile sets real values.
+    #[serde(default)]
+    pub caps: RestrictedCaps,
+
+    // Ephemeral guest sessions (anonymous "try it" access). Off by default and
+    // FAIL-CLOSED: guest minting is only ever possible when a `profile` is ALSO
+    // set — a guest session is never handed out on an unrestricted instance.
+    #[serde(default)]
+    pub guest: GuestConfig,
+}
+
+// Ephemeral, sandboxed guest sessions. Each guest is an isolated, throwaway
+// account with its own seeded memory + wiki namespace, wiped on a TTL and by a
+// periodic global reset. Off by default. Enforced (and only mintable) while a
+// `restricted_mode.profile` is active.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuestConfig {
+    // Master switch for anonymous guest sessions + the mint endpoint
+    // (POST /api/auth/guest). Off by default. Even when true, guests are only
+    // minted if `restricted_mode.profile` is also set (fail-closed).
+    #[serde(default)]
+    pub enabled: bool,
+    // Lifetime of a guest session, seconds. After this the session's token stops
+    // working and its data is wiped. Default 1800 (30 min).
+    #[serde(default = "default_guest_ttl_secs")]
+    pub session_ttl_secs: u64,
+    // Max simultaneously-active guest sessions across the instance. Excess mint
+    // requests get a graceful "busy" response. 0 = unlimited (not recommended
+    // for a public endpoint). Default 0.
+    #[serde(default)]
+    pub max_active: u32,
+    // Periodic global-reset backstop: every N seconds, tear down ALL guest
+    // sessions regardless of age (belt-and-braces against leaks). 0 = off.
+    #[serde(default)]
+    pub global_reset_secs: u64,
+    // Optional baseline wiki directory copied into each new guest's wiki so a
+    // guest starts with seeded context (persona, household, etc.). Relative to
+    // the data dir, or absolute. None = start with an empty wiki.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_wiki_dir: Option<String>,
+}
+
+fn default_guest_ttl_secs() -> u64 { 1800 }
+
+impl Default for GuestConfig {
+    fn default() -> Self {
+        Self {
+            enabled:          false,
+            session_ttl_secs: default_guest_ttl_secs(),
+            max_active:       0,
+            global_reset_secs: 0,
+            seed_wiki_dir:    None,
+        }
+    }
+}
+
+// Server-enforced resource + cost caps for Restricted Mode. All zero-defaulted
+// (0 = unlimited / no clamp) so they never bite unless an operator opts in.
+// Enforced only while `restricted_mode.profile` is set.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RestrictedCaps {
+    // Per-user inbound message rate, messages per rolling 60s. 0 = unlimited.
+    #[serde(default)]
+    pub messages_per_min: u32,
+    // Hard cap on a single turn's response tokens. The effective per-turn
+    // response budget becomes min(agent.max_response_tokens, this). 0 = no clamp.
+    #[serde(default)]
+    pub max_tokens_per_turn: u32,
+    // Small context-budget ceiling (tokens of history the model sees per turn).
+    // The effective context budget becomes min(configured, this). 0 = no clamp.
+    #[serde(default)]
+    pub context_budget_tokens: u32,
+    // Max age of a single conversation before it is treated as expired, seconds.
+    // 0 = unlimited. (Fully enforced once ephemeral guest sessions land.)
+    #[serde(default)]
+    pub max_session_secs: u64,
+    // Global cap on simultaneous in-flight restricted turns across the instance.
+    // Excess requests get a graceful "busy, try later". 0 = unlimited.
+    #[serde(default)]
+    pub max_concurrent_sessions: u32,
+    // Global ceiling on total tokens spent per UTC day across the instance. When
+    // reached, further turns degrade gracefully until the next day. 0 = unlimited.
+    #[serde(default)]
+    pub daily_token_ceiling: u64,
 }
 
 // Backup runtime knobs. The on-demand `GET /api/admin/backup` and the
@@ -4231,6 +4340,7 @@ impl Default for MiraConfig {
             weather:         WeatherConfig::default(),
             image:           ImageConfig::default(),
             video:           VideoConfig::default(),
+            restricted_mode: RestrictedModeConfig::default(),
         }
     }
 }

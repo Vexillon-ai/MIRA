@@ -589,6 +589,10 @@ pub fn build_router(
             .route("/api/auth/pairing/start",        post(crate::server::handlers::auth::pairing_start_handler))
             .route("/api/auth/pairing/claim",        post(crate::server::handlers::auth::pairing_claim_handler))
             .route("/api/auth/pairing/{id}/status",  get(crate::server::handlers::auth::pairing_status_handler))
+            // Restricted Mode — anonymous guest session mint (public; the caller
+            // has no token yet). Fail-closed inside the handler: refuses unless a
+            // restriction profile is active AND guest sessions are enabled.
+            .route("/api/auth/guest",                post(crate::server::handlers::auth::guest_handler))
             .layer(Extension(oidc_service))
             .layer(Extension(ldap_service))
             .layer(Extension(Arc::clone(&auth)));

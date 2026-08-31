@@ -24,7 +24,7 @@
 //
 // Isolation: the Python runs in wasm (V8) — no syscalls, no host FS except the
 // single mounted /output, no network from user code. The Node host process is
-// privileged (see design-docs/code-execution-sandbox.md security note).
+// privileged.
 
 import { loadPyodide } from "pyodide";
 import { readFileSync } from "node:fs";

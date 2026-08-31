@@ -93,6 +93,10 @@ impl SecurityConfig {
                 // whole point); /start + /{id}/status stay behind auth via
                 // the AuthUser extractor.
                 "/api/auth/pairing/claim",
+                // Restricted Mode — anonymous guest session mint. Public by
+                // design (no token yet); the handler is fail-closed and only
+                // mints when a profile is active AND guest sessions are enabled.
+                "/api/auth/guest",
                 // Q1.7 — landing page + public waitlist signup. The
                 // landing page is served from /landing/* and posts to
                 // /api/waitlist/signup; the admin read/export/delete
@@ -150,6 +154,10 @@ impl Default for SecurityConfig {
                 // whole point); /start + /{id}/status stay behind auth via
                 // the AuthUser extractor.
                 "/api/auth/pairing/claim",
+                // Restricted Mode — anonymous guest session mint. Public by
+                // design (no token yet); the handler is fail-closed and only
+                // mints when a profile is active AND guest sessions are enabled.
+                "/api/auth/guest",
                 // Q1.7 — landing page + public waitlist signup. The
                 // landing page is served from /landing/* and posts to
                 // /api/waitlist/signup; the admin read/export/delete

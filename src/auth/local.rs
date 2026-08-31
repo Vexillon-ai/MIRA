@@ -28,6 +28,11 @@ const REFRESH_GRACE_MS: i64 = 30_000;
 
 // ── LocalAuthService ──────────────────────────────────────────────────────────
 
+// Username prefix for ephemeral guest accounts (Restricted Mode guest sessions).
+// A dedicated prefix lets a startup sweep find and purge orphaned guests without
+// a schema change.
+pub const GUEST_USERNAME_PREFIX: &str = "guest_";
+
 // Auth service: user management, login, JWT + refresh token lifecycle.
 #[derive(Clone)]
 pub struct LocalAuthService {
@@ -352,6 +357,50 @@ impl LocalAuthService {
             candidate = format!("{base}{n}");
         }
         Err(MiraError::AuthError("could not allocate a unique username for SSO user".into()))
+    }
+
+    // Create an ephemeral GUEST account: a throwaway `Role::User` with a random
+    // username (`guest_…`) and an unusable random password. Used by the guest-
+    // session mechanism (Restricted Mode); torn down — row + data — on TTL. The
+    // username prefix lets a startup sweep find and purge orphaned guests.
+    pub fn create_guest_user(&self) -> Result<User, MiraError> {
+        let unusable: String = rand::thread_rng()
+            .sample_iter(&rand::distributions::Alphanumeric)
+            .take(48).map(char::from).collect();
+        let hash = Self::hash_password(&unusable)?;
+        for _ in 0..1000 {
+            let suffix: String = rand::thread_rng()
+                .sample_iter(&rand::distributions::Alphanumeric)
+                .take(16).map(char::from).collect();
+            let username = format!("{GUEST_USERNAME_PREFIX}{}", suffix.to_ascii_lowercase());
+            if self.db.find_by_username(&username)?.is_none() {
+                let new = NewUser {
+                    username,
+                    display_name: Some("Guest".into()),
+                    email:        None,
+                    password:     unusable.clone(), // unused; `hash` passed directly
+                    role:         Role::User,
+                };
+                return self.db.create_user(new, hash);
+            }
+        }
+        Err(MiraError::AuthError("could not allocate a unique guest username".into()))
+    }
+
+    // Mint a standalone short-TTL access token for an arbitrary user (no refresh
+    // token). Used to hand a guest a scoped, self-expiring session credential.
+    pub fn issue_access_token_for(&self, user: &User, ttl_secs: i64) -> Result<String, MiraError> {
+        issue_long_lived_access_token(user, &self.jwt_secret, ttl_secs)
+    }
+
+    // Every guest account currently in the DB (by username prefix). A startup
+    // sweep uses this to purge guests orphaned by a restart — guests are
+    // ephemeral and never survive a process restart.
+    pub fn list_guest_users(&self) -> Result<Vec<User>, MiraError> {
+        Ok(self.db.list_users()?
+            .into_iter()
+            .filter(|u| u.username.starts_with(GUEST_USERNAME_PREFIX))
+            .collect())
     }
 
     pub fn update_user(

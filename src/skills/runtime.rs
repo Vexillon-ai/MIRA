@@ -273,6 +273,11 @@ fn resolve_prompt(path: &PathBuf) -> std::io::Result<String> {
 /// the `SkillTool ↔ ToolRegistry` ownership cycle never forms.
 pub struct BuiltinSnapshotDispatcher {
     table: HashMap<String, Arc<dyn Tool>>,
+    // Restricted Mode gate, snapshotted from the registry. Skills invoke builtins
+    // through this dispatcher, which calls `tool.execute()` DIRECTLY — bypassing
+    // `ToolRegistry::execute`'s gate. So the same fail-closed check is applied
+    // here too, else a Skill would be a hole straight through Restricted Mode.
+    restricted: Option<Arc<crate::policy::RestrictedPolicy>>,
 }
 
 impl BuiltinSnapshotDispatcher {
@@ -283,7 +288,7 @@ impl BuiltinSnapshotDispatcher {
         let table = registry.iter()
             .map(|(name, tool)| (name.clone(), tool.clone()))
             .collect();
-        Self { table }
+        Self { table, restricted: registry.restricted_policy() }
     }
 
     /// Number of tools captured. Mostly useful for diagnostics.
@@ -299,6 +304,15 @@ impl BuiltinDispatcher for BuiltinSnapshotDispatcher {
                 "skill called builtin {name:?}, which isn't registered in this MIRA build",
             ))
         })?;
+        // Apply the same fail-closed Restricted Mode gate the registry applies —
+        // a Skill must never be a bypass around it.
+        if let Some(restricted) = &self.restricted {
+            if let crate::policy::RestrictedDecision::Deny { reason } =
+                restricted.check_tool(name, tool.tier())
+            {
+                return Ok(ToolResult::failure(reason));
+            }
+        }
         tool.execute(args).await
     }
 }

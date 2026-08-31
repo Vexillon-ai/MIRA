@@ -640,6 +640,8 @@ pub fn spawn_watch_loop(
                             DeliveryOutcome::NoChannel => {}
                             DeliveryOutcome::Failed(ch, e) =>
                                 warn!("MIRA-Guardian alert delivery to '{ch}' failed: {e}"),
+                            DeliveryOutcome::Suppressed(r) =>
+                                info!("MIRA-Guardian alert channel delivery suppressed (restricted mode: {r})"),
                         }
                         Some(o)
                     } else { None };

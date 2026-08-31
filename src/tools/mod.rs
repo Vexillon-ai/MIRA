@@ -224,6 +224,12 @@ pub struct ToolRegistry {
     // actuated by its owner or a guardian, on the DIRECT chat path too (not just
     // the Guardian's approval flow). `None` in minimal/test builds → no gate.
     app_companion: Option<Arc<crate::companion::CompanionSystem>>,
+    // Restricted Mode capability gate. When set, EVERY `execute()` call is checked
+    // against the active profile *unconditionally* (independent of `_agent_id`, so
+    // plain user turns and background callers are gated too) and a denied tool
+    // short-circuits to a `ToolResult::failure(..)` before any work runs. `None`
+    // on a normal instance → no gate, zero cost. See `crate::policy::restricted`.
+    restricted: Option<Arc<crate::policy::RestrictedPolicy>>,
 }
 
 impl ToolRegistry {
@@ -239,7 +245,25 @@ impl ToolRegistry {
             app_secrets: None,
             app_packages_dir: None,
             app_companion: None,
+            restricted: None,
         }
+    }
+
+    // Attach a Restricted Mode capability gate. Chainable, mirrors `with_audit` /
+    // `with_policy_engine`. When present, `execute()` consults it before every
+    // tool runs. `None` (the default) leaves the registry unrestricted.
+    pub fn with_restricted_policy(
+        mut self,
+        restricted: Option<Arc<crate::policy::RestrictedPolicy>>,
+    ) -> Self {
+        self.restricted = restricted;
+        self
+    }
+
+    // The active Restricted Mode gate, if any. Lets other enforcement points that
+    // share this registry (e.g. the skill→builtin dispatcher) apply the same gate.
+    pub fn restricted_policy(&self) -> Option<Arc<crate::policy::RestrictedPolicy>> {
+        self.restricted.clone()
     }
 
     // Attach the apps-framework deps used to build app tools with real handlers:
@@ -424,6 +448,30 @@ impl ToolRegistry {
         let digest        = args_digest(&args);
         let started_at_ms = Utc::now().timestamp_millis();
         let t0            = Instant::now();
+
+        // Restricted Mode gate — consulted UNCONDITIONALLY (unlike the agent-
+        // scoped policy engine below): a plain user turn, a background caller, or
+        // a prompt-injected model call is gated exactly the same. Fail-closed:
+        // only tools the active profile explicitly allows (and only at `Pure`
+        // tier) run; everything else short-circuits here before any work. The
+        // decision reads the tool's real `tier()` from the resolved instance, so
+        // the model cannot spoof it via args.
+        if let Some(restricted) = &self.restricted {
+            if let crate::policy::RestrictedDecision::Deny { reason } =
+                restricted.check_tool(name, tool.tier())
+            {
+                warn!("tool '{}' denied by restricted mode ({}): {}",
+                    name, restricted.profile_name(), reason);
+                if let Some(store) = self.audit.as_ref() {
+                    let _ = store.record(
+                        &actor, name, &digest, started_at_ms,
+                        t0.elapsed().as_millis() as i64,
+                        Outcome::Failure, Some(&reason),
+                    );
+                }
+                return Ok(ToolResult::failure(reason));
+            }
+        }
 
         // consult the policy engine before running.
         // Skipped when (a) no engine is wired, OR (b) there is neither an
@@ -1041,5 +1089,87 @@ mod tests {
                    Some("com.x".into()));
         assert_eq!(parse_skill_id(&json!({"_skill_id": ""})), None);
         assert_eq!(parse_skill_id(&json!({})),                None);
+    }
+
+    // ── Restricted Mode gate at the registry chokepoint ─────────────────────
+    // These are the adversarial acceptance tests: prove `execute()` fails closed
+    // for denied tools even when NOTHING agent-scoped is present (the old
+    // fail-open condition), and that the safe showcase set still runs.
+
+    // A stub whose name + capability tier we control, so we can exercise the gate
+    // for both allow-listed Pure tools and denied dangerous ones.
+    struct TierStub { tool_name: &'static str, cap: Tier }
+
+    #[async_trait]
+    impl Tool for TierStub {
+        fn name(&self) -> &str { self.tool_name }
+        fn description(&self) -> &str { "restricted-mode test stub" }
+        fn args_schema(&self) -> serde_json::Value { json!({}) }
+        async fn execute(&self, _a: ToolArgs) -> Result<ToolResult, MiraError> {
+            Ok(ToolResult::success("ran"))
+        }
+        fn tier(&self) -> Tier { self.cap }
+    }
+
+    fn hardened_registry() -> ToolRegistry {
+        let cfg = crate::config::RestrictedModeConfig { profile: Some("hardened".into()), ..Default::default() };
+        let policy = crate::policy::RestrictedPolicy::from_config(&cfg).unwrap().map(Arc::new);
+        let mut reg = ToolRegistry::new().with_restricted_policy(policy);
+        // A dangerous tool (code tier) and an allow-listed safe one (pure).
+        reg.register(TierStub { tool_name: "shell_execute", cap: Tier::Code });
+        reg.register(TierStub { tool_name: "wiki_read",     cap: Tier::Pure });
+        // A Pure tool that is NOT on the allow-list (deferred side effects).
+        reg.register(TierStub { tool_name: "settings_set",  cap: Tier::Pure });
+        reg
+    }
+
+    #[tokio::test]
+    async fn restricted_denies_dangerous_tool_even_with_no_agent_id() {
+        let reg = hardened_registry();
+        // No `_agent_id`, no `_app_id`, no policy engine — the exact context that
+        // was fail-OPEN before Restricted Mode. Must still deny.
+        let r = reg.execute("shell_execute", json!({})).await.unwrap();
+        assert!(!r.success, "shell must be denied fail-closed");
+        assert!(r.error.unwrap().contains("restricted mode"));
+    }
+
+    #[tokio::test]
+    async fn restricted_denies_unlisted_pure_tool() {
+        let reg = hardened_registry();
+        let r = reg.execute("settings_set", json!({})).await.unwrap();
+        assert!(!r.success, "unlisted Pure tool must be denied");
+    }
+
+    #[tokio::test]
+    async fn restricted_allows_the_showcase_set() {
+        let reg = hardened_registry();
+        let r = reg.execute("wiki_read", json!({})).await.unwrap();
+        assert!(r.success, "allow-listed Pure tool must run");
+        assert_eq!(r.output, "ran");
+    }
+
+    #[tokio::test]
+    async fn restricted_cannot_be_widened_by_spoofed_args() {
+        let reg = hardened_registry();
+        // A prompt-injected model can put anything in args. None of it may flip
+        // the gate — the tier is read from the resolved tool, not the args.
+        let attack = json!({
+            "_agent_id": AgentId::new().to_string(),
+            "_restricted_mode": false,
+            "profile": "off",
+            "allow": ["shell_execute"],
+            "tier": "pure",
+        });
+        let r = reg.execute("shell_execute", attack).await.unwrap();
+        assert!(!r.success, "spoofed args must not widen the profile");
+    }
+
+    #[tokio::test]
+    async fn no_restricted_policy_leaves_everything_runnable() {
+        // Off by default: a registry with no policy runs the dangerous tool.
+        let mut reg = ToolRegistry::new();
+        reg.register(TierStub { tool_name: "shell_execute", cap: Tier::Code });
+        let r = reg.execute("shell_execute", json!({})).await.unwrap();
+        assert!(r.success, "unrestricted registry must run tools normally");
     }
 }

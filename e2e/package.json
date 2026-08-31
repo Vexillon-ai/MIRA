@@ -1,0 +1,14 @@
+{
+  "name": "mira-restricted-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Playwright e2e suite for MIRA Restricted Mode, against the Docker stack.",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}

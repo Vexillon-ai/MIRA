@@ -1,0 +1,109 @@
+# Restricted Mode e2e stack.
+#
+# Images are built by ./run.sh (host-built binary → mira:e2e, plus mira-mock:e2e)
+# — this file references them, it does not build. Bring up with:
+#   docker compose -f e2e/docker-compose.test.yml up -d
+#
+# Every MIRA instance is the same image with a different baked config (mounted
+# read-only at /seed-config.json) and port, so we can prove the fail-closed
+# matrix that a single instance can't. State is ephemeral (no volumes) → each
+# `up` starts clean.
+
+name: mira-restricted-e2e
+
+x-mira: &mira-common
+  image: mira:e2e
+  restart: "no"
+  networks: [miranet]
+
+services:
+  # ── Deterministic mock LLMs (one per chatting instance, so /debug is not
+  #    shared/racy). Debug ports are exposed so tests can inspect what MIRA sent.
+  mock-main:
+    image: mira-mock:e2e
+    networks: [miranet]
+    environment: { MOCK_USAGE_TOTAL: "50" }
+    ports: ["18091:8080"]
+
+  mock-caps:
+    image: mira-mock:e2e
+    networks: [miranet]
+    # A per-turn delay so a turn holds the concurrency slot long enough for a
+    # parallel request to hit max_concurrent_sessions=1.
+    environment: { MOCK_USAGE_TOTAL: "50", MOCK_DELAY_MS: "1200" }
+    ports: ["18092:8080"]
+
+  mock-daily:
+    image: mira-mock:e2e
+    networks: [miranet]
+    environment: { MOCK_USAGE_TOTAL: "50" }
+    ports: ["18093:8080"]
+
+  # ── hardened + guest enabled, generous caps: the "everything works" instance.
+  mira-main:
+    <<: *mira-common
+    ports: ["18081:8080"]
+    volumes:
+      - ./configs/main.json:/seed-config.json:ro
+      - ./seed-wiki:/seed-wiki:ro
+    depends_on: [mock-main]
+
+  # ── hardened + guest enabled, TIGHT caps: rate / concurrency / daily / clamp.
+  mira-caps:
+    <<: *mira-common
+    ports: ["18082:8080"]
+    volumes:
+      - ./configs/caps.json:/seed-config.json:ro
+    depends_on: [mock-caps]
+
+  # ── hardened + guest enabled, low daily_token_ceiling: daily-ceiling test.
+  mira-daily:
+    <<: *mira-common
+    ports: ["18086:8080"]
+    volumes:
+      - ./configs/daily.json:/seed-config.json:ro
+    depends_on: [mock-daily]
+
+  # ── hardened + guest enabled, max_active=1: capacity (503) test.
+  mira-capacity:
+    <<: *mira-common
+    ports: ["18083:8080"]
+    volumes:
+      - ./configs/capacity.json:/seed-config.json:ro
+    depends_on: [mock-main]
+
+  # ── hardened + guest DISABLED: guest mint must 403.
+  mira-noguest:
+    <<: *mira-common
+    ports: ["18084:8080"]
+    volumes:
+      - ./configs/noguest.json:/seed-config.json:ro
+    depends_on: [mock-main]
+
+  # ── NO profile + guest.enabled=true (misconfig): guest mint must 403
+  #    (fail-closed — never handed out on an unrestricted instance).
+  mira-unrestricted:
+    <<: *mira-common
+    ports: ["18085:8080"]
+    volumes:
+      - ./configs/unrestricted.json:/seed-config.json:ro
+    depends_on: [mock-main]
+
+  # ── OPT-IN real-LLM smoke: hardened + guest, pointed at a local model on the
+  #    Windows host. Only starts under the `local` profile:
+  #      docker compose -f e2e/docker-compose.test.yml --profile local up -d mira-local
+  #    Edit e2e/configs/local.json (provider url + default_model) to match your
+  #    LM Studio / Ollama setup first. The local-smoke spec auto-skips if this
+  #    instance isn't up, so it never fails the deterministic suite.
+  mira-local:
+    <<: *mira-common
+    profiles: ["local"]
+    ports: ["18087:8080"]
+    volumes:
+      - ./configs/local.json:/seed-config.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  miranet:
+    driver: bridge

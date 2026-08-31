@@ -99,6 +99,43 @@ pub async fn chat_handler(
         .clone()
         .unwrap_or_else(|| config.default_chat_model().1);
 
+    // ── Restricted Mode caps (Slice 2) ────────────────────────────────────────
+    // Instance-wide while a profile is active. Enforce the per-user message rate,
+    // the global daily token ceiling, and the global concurrency cap BEFORE any
+    // DB write or new-conversation creation, so a throttled or over-quota request
+    // costs nothing. On a trip, stream a friendly assistant message (renders as a
+    // normal reply) instead of a raw error. The acquired concurrency slot is held
+    // for the turn's lifetime (moved into the turn task below).
+    let turn_slot = if let Some(rcaps) = crate::policy::restricted::caps() {
+        use crate::policy::restricted::CapVerdict;
+        let denial = match rcaps.check_rate(&user.id) {
+            CapVerdict::Deny { message } => Some(message),
+            CapVerdict::Ok => match rcaps.check_daily_ceiling() {
+                CapVerdict::Deny { message } => Some(message),
+                CapVerdict::Ok => None,
+            },
+        };
+        if let Some(message) = denial {
+            return canned_assistant_sse(
+                req.conversation_id.clone().unwrap_or_default(),
+                model.clone(),
+                config.default_chat_model().0,
+                message,
+            );
+        }
+        match rcaps.try_acquire_turn_slot() {
+            Some(slot) => Some(slot),
+            None => return canned_assistant_sse(
+                req.conversation_id.clone().unwrap_or_default(),
+                model.clone(),
+                config.default_chat_model().0,
+                "This service is busy right now — please try again in a moment.".to_string(),
+            ),
+        }
+    } else {
+        None
+    };
+
     // Resolve the conversation up front so we can branch on its `mode`.
     let (conv_id, conv_mode) = match &req.conversation_id {
         Some(id) => {
@@ -319,6 +356,9 @@ pub async fn chat_handler(
     }
 
     tokio::spawn(async move {
+        // Hold the Restricted Mode concurrency slot for the whole turn; dropping
+        // it here (task end) frees the global permit. `None` when unrestricted.
+        let _turn_slot = turn_slot;
         match agent.process_with_context(
             &session_id, &user_id, "web", &message, turn_provider, turn_ctx,
         ).await {
@@ -631,6 +671,32 @@ pub async fn chat_handler(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// Stream a single canned assistant message over SSE, in the exact happy-path
+// shape (`token` events + a `done` event), so a Restricted Mode cap trip renders
+// as a normal assistant reply rather than an error toast. The turn is never run;
+// no tokens are spent and nothing is persisted.
+fn canned_assistant_sse(
+    conversation_id: String,
+    model:           String,
+    provider:        String,
+    message:         String,
+) -> axum::response::Response {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(8);
+    let payload = DonePayload {
+        conversation_id,
+        model,
+        provider,
+        usage: crate::types::TokenUsage::default(),
+    };
+    tokio::spawn(async move {
+        let _ = tx.send(Ok(Event::default().event("token").data(message))).await;
+        if let Ok(json) = serde_json::to_string(&payload) {
+            let _ = tx.send(Ok(Event::default().event("done").data(json))).await;
+        }
+    });
+    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()).into_response()
+}
 
 // Build a per-turn `TurnContext` based on the conversation's mode.
 // // - `mode="onboarding"`: swap in the onboarding prompt, restrict the tool

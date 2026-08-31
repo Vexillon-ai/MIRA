@@ -1,0 +1,647 @@
+{
+  "config_version": "1",
+  "data_dir": "~/.mira/data",
+  "primary_provider": "lmstudio",
+  "providers": {
+    "ollama": {
+      "enabled": false,
+      "url": "http://localhost:11434",
+      "default_model": "llama3.2",
+      "timeout_secs": 120
+    },
+    "lmstudio": {
+      "enabled": true,
+      "url": "http://host.docker.internal:1234/v1",
+      "default_model": "local-model",
+      "timeout_secs": 300
+    },
+    "openrouter": {
+      "enabled": false,
+      "base_url": "https://openrouter.ai/api/v1",
+      "default_model": "meta-llama/llama-3.2-3b-instruct",
+      "catalog_refresh_hours": 24
+    },
+    "openai": {
+      "enabled": false,
+      "base_url": "https://api.openai.com/v1",
+      "default_model": "gpt-4o-mini",
+      "timeout_secs": 120
+    },
+    "deepseek": {
+      "enabled": false,
+      "base_url": "https://api.deepseek.com/v1",
+      "default_model": "deepseek-chat",
+      "timeout_secs": 120
+    },
+    "moonshot": {
+      "enabled": false,
+      "base_url": "https://api.moonshot.ai/v1",
+      "default_model": "kimi-k2-0905-preview",
+      "timeout_secs": 120
+    },
+    "groq": {
+      "enabled": false,
+      "base_url": "https://api.groq.com/openai/v1",
+      "default_model": "llama-3.3-70b-versatile",
+      "timeout_secs": 120
+    },
+    "xai": {
+      "enabled": false,
+      "base_url": "https://api.x.ai/v1",
+      "default_model": "grok-4",
+      "timeout_secs": 120
+    },
+    "openai_compat": {
+      "enabled": false,
+      "name": "",
+      "base_url": "",
+      "default_model": "",
+      "timeout_secs": 120,
+      "auth_style": "bearer"
+    },
+    "anthropic": {
+      "enabled": false,
+      "base_url": "https://api.anthropic.com",
+      "default_model": "claude-sonnet-4-5",
+      "timeout_secs": 120
+    },
+    "gemini": {
+      "enabled": false,
+      "base_url": "https://generativelanguage.googleapis.com",
+      "default_model": "gemini-2.5-pro",
+      "timeout_secs": 120
+    }
+  },
+  "cli": {
+    "colored_output": true,
+    "streaming": true,
+    "prompt": "> "
+  },
+  "tui": {
+    "theme": "mira-dark",
+    "layout": "standard",
+    "show_timestamps": true,
+    "show_token_count": true,
+    "mode": "auto",
+    "server_url": "http://127.0.0.1:8082",
+    "auto_token_path": "~/.mira/data/local.token",
+    "resume_last": false
+  },
+  "server": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8080,
+    "request_timeout_secs": 30,
+    "update_check": {
+      "enabled": true,
+      "source_url": "https://api.github.com/repos/Vexillon-ai/MIRA/releases",
+      "frequency": "daily"
+    },
+    "web_apps": {
+      "enabled": true,
+      "mode": "both",
+      "host_suffix": "localhost",
+      "port": 0
+    },
+    "readiness_cache_ttl_secs": 30,
+    "display_name": "MIRA E2E (local model)"
+  },
+  "channels": {
+    "signal": {
+      "enabled": false,
+      "rest_port": 8080,
+      "cli_binary": "signal-cli",
+      "data_dir": "/tmp/tmp.Nbt4aJzJwU/.local/share/signal-cli"
+    },
+    "telegram": {
+      "enabled": false,
+      "polling": false,
+      "allow_insecure_webhook": false
+    },
+    "discord": {
+      "enabled": false
+    },
+    "matrix": {
+      "enabled": false
+    },
+    "whatsapp": {
+      "enabled": false,
+      "allow_insecure_webhook": false
+    },
+    "slack": {
+      "enabled": false
+    },
+    "external": {
+      "enabled": false
+    }
+  },
+  "logging": {
+    "level": "info",
+    "format": "compact",
+    "file": "~/.mira/logs/mira.log",
+    "max_file_size_mb": 10,
+    "max_files": 5
+  },
+  "memory": {
+    "embedding": {
+      "provider": "internal",
+      "model": "BGE-small-en-v1.5",
+      "model_cache_dir": "~/.mira/models"
+    },
+    "embedding_dim": 384,
+    "embedding_cache_size": 1000,
+    "similarity_threshold": 0.6,
+    "context_top_k": 15,
+    "auto_extract": {
+      "mode": "heuristic",
+      "min_confidence": "medium",
+      "allowed_categories": [
+        "fact",
+        "preference",
+        "skill",
+        "project"
+      ],
+      "llm_channels": []
+    },
+    "indexer": {
+      "enabled": true,
+      "interval_secs": 60,
+      "batch_size": 32,
+      "skip_roles": [
+        "tool",
+        "system"
+      ]
+    },
+    "rollup": {
+      "enabled": false,
+      "interval_secs": 3600,
+      "day_lag_days": 1,
+      "max_messages": 200,
+      "max_chars_per_message": 800
+    },
+    "graph": {
+      "enabled": false
+    },
+    "consolidation": {
+      "contradictions_enabled": false,
+      "entity_dedup_enabled": false,
+      "entity_dedup_ratio": 0.6,
+      "importance_enabled": false,
+      "importance_half_life_days": 30.0
+    },
+    "recency": {
+      "weight": 0.25,
+      "half_life_days": 30.0
+    }
+  },
+  "session": {
+    "cleanup_interval_secs": 600,
+    "timeout_secs": 3600,
+    "max_turns": 50
+  },
+  "agent": {
+    "max_tool_rounds": 8,
+    "tool_mode": "auto",
+    "system_prompt_file": "",
+    "disable_reasoning": false,
+    "playful_easter_eggs": true,
+    "max_context_turns": 20,
+    "context_length_tokens": 0,
+    "context_safety_margin_tokens": 2048,
+    "local_effective_context_tokens": 8192,
+    "prompt_cache_enabled": false,
+    "compaction": {
+      "enabled": true,
+      "keep_last_turns": 6,
+      "summary_model": "",
+      "max_summary_tokens": 1024
+    },
+    "degeneracy_guard": {
+      "enabled": true,
+      "min_chars": 400,
+      "window_chars": 512,
+      "min_distinct_chars": 1,
+      "min_window_tokens": 24,
+      "min_distinct_tokens": 2
+    },
+    "tools": {
+      "shell": {
+        "enabled": false
+      },
+      "filesystem": {
+        "enabled": false
+      },
+      "web_fetch": {
+        "enabled": true,
+        "max_body_bytes": 5242880,
+        "max_text_chars": 262144,
+        "timeout_secs": 30,
+        "max_redirects": 5
+      },
+      "url_preview": {
+        "enabled": true,
+        "max_body_bytes": 131072
+      },
+      "web_search": {
+        "enabled": true,
+        "default": "ddg",
+        "failover": [
+          "ddg"
+        ],
+        "top_k": 10,
+        "brave": {},
+        "searxng": {}
+      }
+    },
+    "tool_selection": {
+      "mode": "all",
+      "core_tools": [
+        "memory_*",
+        "wiki_*",
+        "now"
+      ],
+      "top_k": 8,
+      "min_similarity": 0.3,
+      "stickiness_turns": 6,
+      "expose_find_tools": true
+    },
+    "reasoning": {
+      "enabled": false,
+      "provider": "",
+      "min_chars": 600,
+      "effort": "medium",
+      "classifier_provider": ""
+    },
+    "avatar": null,
+    "avatar_updated_at": null,
+    "llm_aliases": {},
+    "max_tool_round_tokens": 2048,
+    "max_response_tokens": 16384,
+    "detail": {
+      "view_mode": "poll",
+      "poll_interval_ms": 1500,
+      "prettify_output": false
+    },
+    "show_thinking": true,
+    "session_budget_usd": 5.0,
+    "default_task_budget_usd": 2.0,
+    "max_task_budget_usd": 10.0
+  },
+  "guardian": {
+    "mode": "off",
+    "watch_interval_secs": 900,
+    "action_approver_ids": [],
+    "isolation_dry_run": true,
+    "isolation_grace_secs": 180,
+    "isolation_autonomy_kinds": [
+      "rerun_audit"
+    ],
+    "provision_model": "qwen2.5:3b-instruct",
+    "routine_provider": null,
+    "routine_model": null,
+    "triage_provider": null,
+    "triage_model": null,
+    "process": {
+      "enabled": false,
+      "probe_interval_secs": 30,
+      "down_after_failures": 3,
+      "probe_url": null,
+      "notify_user_id": null,
+      "owns_watch": false,
+      "log_file": null
+    }
+  },
+  "security": {
+    "rate_limit_rpm": 60,
+    "cors_allowed_origins": [],
+    "blocked_ips": [],
+    "jwt_secret": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    "session_days": 7,
+    "http": {
+      "denylist": [],
+      "allowlist": [],
+      "allowlist_only": false,
+      "rate": {
+        "user_per_min": 60,
+        "user_per_hour": 600,
+        "user_per_domain_per_min": 10,
+        "search_per_min": 30
+      }
+    }
+  },
+  "proxy": {
+    "enabled": false,
+    "nginx_binary": "/usr/sbin/nginx",
+    "config_path": "~/.mira/nginx/nginx.conf",
+    "pid_path": "~/.mira/nginx/nginx.pid",
+    "worker_processes": "auto",
+    "websocket_support": true,
+    "tls": {
+      "enabled": false,
+      "cert_path": "",
+      "key_path": "",
+      "listen_port": 443
+    }
+  },
+  "calendar": {
+    "enabled": true,
+    "sync_provider": "none",
+    "sync_interval_mins": 15,
+    "google": {
+      "client_id": "",
+      "client_secret": "",
+      "redirect_uri": "",
+      "scopes": ""
+    },
+    "outlook": {
+      "client_id": "",
+      "client_secret": "",
+      "redirect_uri": "",
+      "scopes": ""
+    }
+  },
+  "sandbox": {
+    "enabled": false,
+    "seccomp_mode": "allowlist",
+    "code_run": {
+      "enabled": false,
+      "allowed_languages": [
+        "python"
+      ],
+      "max_wall_clock_seconds": 10,
+      "max_memory_mb": 256
+    },
+    "python": {},
+    "backend": "",
+    "wasm": {},
+    "pyodide": {
+      "enabled": false,
+      "prewarm": []
+    }
+  },
+  "tts": {
+    "enabled": true,
+    "default_backend": "internal",
+    "default_speed": 1.0,
+    "default_format": "wav",
+    "streaming": true,
+    "max_chars_per_request": 4000,
+    "request_timeout_secs": 180,
+    "cache": {
+      "enabled": true,
+      "max_disk_mb": 100,
+      "ttl_days": 30
+    },
+    "internal": {
+      "engine": "piper",
+      "default_voice": "en_US-amy-medium",
+      "auto_download_voices": true,
+      "volume": 1.0
+    },
+    "kokoro": {
+      "enabled": false,
+      "default_voice": "af_heart",
+      "auto_download": true,
+      "device": "auto"
+    },
+    "chatterbox": {
+      "enabled": false,
+      "port": 8087,
+      "default_voice": "Adrian",
+      "supervise": false
+    },
+    "openai": {
+      "base_url": "https://api.openai.com/v1",
+      "model": "tts-1",
+      "default_voice": "alloy",
+      "volume": 1.0
+    },
+    "openai_compat": {
+      "url": "http://localhost:8000/v1",
+      "model": "tts-1",
+      "default_voice": "alloy",
+      "volume": 1.0
+    },
+    "elevenlabs": {
+      "model": "eleven_turbo_v2_5",
+      "default_voice_id": "21m00Tcm4TlvDq8ikWAM",
+      "volume": 1.0
+    },
+    "cartesia": {
+      "model": "sonic-english",
+      "volume": 1.0
+    },
+    "routing": {
+      "web": "",
+      "tui": "",
+      "telegram": "",
+      "signal": "",
+      "mobile": ""
+    }
+  },
+  "stt": {
+    "enabled": true,
+    "default_backend": "internal",
+    "max_audio_seconds": 300,
+    "request_timeout_secs": 60,
+    "internal": {
+      "model": "base.en",
+      "auto_download_model": true,
+      "threads": 0,
+      "use_gpu": false
+    },
+    "openai": {
+      "base_url": "https://api.openai.com/v1",
+      "model": "whisper-1"
+    },
+    "openai_compat": {
+      "url": "http://localhost:8080/v1",
+      "model": "whisper-1"
+    },
+    "routing": {
+      "web": "",
+      "tui": "",
+      "telegram": "",
+      "signal": ""
+    }
+  },
+  "automations": {
+    "quota_per_user": {
+      "schedules": 50,
+      "webhooks": 20,
+      "event_subscriptions": 50
+    },
+    "agent_creates_pending": true,
+    "agent_rationale_required": true,
+    "max_chain_depth": 5,
+    "max_action_secs": 300,
+    "channel_rate_limits": {
+      "signal": 3,
+      "email": 1,
+      "telegram": 3,
+      "*": 10,
+      "web": 60
+    },
+    "watchdog": {
+      "enabled": false,
+      "interval_secs": 60,
+      "severity_threshold": "WARN",
+      "dedup_ttl_secs": 600,
+      "rate_limit_per_min": 10,
+      "storm_threshold": 30,
+      "storm_window_secs": 300,
+      "storm_cooldown_secs": 900,
+      "ignore_patterns": [],
+      "notify_user_id": null,
+      "channel": "web",
+      "log_file": null
+    }
+  },
+  "companion": {
+    "max_unanswered_checkins": 3,
+    "max_per_day": 6,
+    "min_gap_minutes": 90
+  },
+  "artifacts": {
+    "root_dir": "~/mira-artifacts"
+  },
+  "wiki": {
+    "enabled": true,
+    "auto_extract": {
+      "mode": "review",
+      "min_confidence": 0.6,
+      "max_ops_per_turn": 3,
+      "auto_apply_above": 0.7
+    },
+    "agent_tools": {
+      "enabled": true,
+      "write_mode": "review"
+    },
+    "git": {
+      "enabled": true,
+      "auto_commit": true
+    },
+    "mcp": {
+      "enabled": true
+    }
+  },
+  "mcp": {
+    "servers": []
+  },
+  "email_oauth": {
+    "public_base_url": "",
+    "google_client_id": "",
+    "microsoft_client_id": ""
+  },
+  "auth": {
+    "oidc": {
+      "enabled": false,
+      "public_base_url": "",
+      "providers": []
+    },
+    "signup": {
+      "enabled": false,
+      "require_approval": true,
+      "default_role": "user",
+      "allowed_domains": []
+    },
+    "ldap": {
+      "enabled": false,
+      "url": "",
+      "starttls": false,
+      "bind_dn": "",
+      "bind_password": "",
+      "user_base_dn": "",
+      "user_filter": "(uid={username})",
+      "attr_email": "mail",
+      "attr_display_name": "cn",
+      "required_group": "",
+      "auto_provision": false,
+      "allowed_domains": [],
+      "default_role": "user"
+    }
+  },
+  "system_email": {
+    "enabled": false,
+    "from_address": "",
+    "from_name": "",
+    "smtp_host": "",
+    "smtp_port": 465,
+    "smtp_use_tls": true,
+    "smtp_username": "",
+    "smtp_password": ""
+  },
+  "backup": {
+    "scheduled_enabled": false,
+    "scheduled_interval_secs": 86400,
+    "scheduled_retention_count": 7
+  },
+  "notifications": {
+    "fcm": {
+      "enabled": false
+    }
+  },
+  "weather": {
+    "provider": "open_meteo",
+    "units": "metric"
+  },
+  "image": {
+    "default_backend": "",
+    "openai": {
+      "default_model": "dall-e-3"
+    },
+    "automatic1111": {
+      "enabled": false,
+      "base_url": "http://127.0.0.1:7860",
+      "steps": 25,
+      "sampler": "Euler a",
+      "width": 1024,
+      "height": 1024,
+      "cfg_scale": 7.0
+    },
+    "comfyui": {
+      "enabled": false,
+      "base_url": "http://127.0.0.1:8188",
+      "steps": 20,
+      "width": 1024,
+      "height": 1024,
+      "cfg_scale": 7.0
+    }
+  },
+  "video": {
+    "default_backend": "",
+    "openai": {
+      "default_model": "sora-2",
+      "default_size": "1280x720",
+      "default_seconds": 4
+    },
+    "comfyui": {
+      "enabled": false,
+      "base_url": "http://127.0.0.1:8188",
+      "steps": 20,
+      "width": 512,
+      "height": 512,
+      "fps": 16,
+      "cfg_scale": 7.0
+    },
+    "wan2gp": {
+      "enabled": false,
+      "base_url": "http://127.0.0.1:7862"
+    }
+  },
+  "restricted_mode": {
+    "profile": "hardened",
+    "caps": {
+      "messages_per_min": 60,
+      "max_concurrent_sessions": 10,
+      "daily_token_ceiling": 0,
+      "max_tokens_per_turn": 256,
+      "context_budget_tokens": 4000
+    },
+    "guest": {
+      "enabled": true,
+      "session_ttl_secs": 1800,
+      "max_active": 20
+    }
+  }
+}

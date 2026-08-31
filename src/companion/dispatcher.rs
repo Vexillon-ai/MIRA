@@ -92,6 +92,10 @@ pub enum DeliveryOutcome {
     NoChannel,
     // A configured channel (`0`) failed to deliver (`1`) — this is isolation.
     Failed(String, String),
+    // The send was intentionally NOT performed because Restricted Mode denies
+    // outbound channel messages. Distinct from `Failed` so callers don't treat a
+    // deliberate policy suppression as a channel outage / isolation signal.
+    Suppressed(String),
 }
 
 // Holds the dependencies the scheduler needs to send a check-in.
@@ -1305,6 +1309,14 @@ impl CompanionDispatcher {
         let Some(channel) = self.last_messaging_channel(user_id) else {
             return DeliveryOutcome::NoChannel;
         };
+        // Restricted Mode — deny real outbound to any external channel (covers
+        // proactive check-ins, briefings, AND care-network escalations, which all
+        // funnel here). The web-record arm of an escalation still runs at its own
+        // call site, so a suppressed bridge does not lose the durable alert.
+        if let Some(reason) = crate::policy::restricted::channel_send_denied(&channel) {
+            warn!("companion: outbound to '{channel}' suppressed for '{user_id}' — {reason}");
+            return DeliveryOutcome::Suppressed(reason);
+        }
         let res = match channel.as_str() {
             "signal"   => self.deliver_signal(user_id, text).await,
             "telegram" => self.deliver_telegram(user_id, text).await,

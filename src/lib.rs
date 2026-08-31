@@ -26,6 +26,7 @@ pub mod error;
 pub mod events;
 pub mod gateway;
 pub mod guardian_sentinel;
+pub mod guest;      // Ephemeral guest sessions (Restricted Mode)
 pub mod hardware;
 pub mod health;
 pub mod discord;

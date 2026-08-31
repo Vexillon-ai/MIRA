@@ -59,6 +59,7 @@ pub mod admin;
 pub mod engine;
 pub mod event;
 pub mod llm;
+pub mod restricted;
 pub mod rules;
 
 pub use admin::{
@@ -68,6 +69,9 @@ pub use engine::{
     AllowAllEngine, DenyAllEngine, PolicyDecision, PolicyEngine,
 };
 pub use event::{NetworkEgressDirection, PolicyEvent};
+pub use restricted::{
+    CapVerdict, RestrictedCapsRuntime, RestrictedDecision, RestrictedPolicy, TurnSlot,
+};
 pub use llm::{check_llm_call, LlmCallContext};
 pub use rules::{
     BuiltinRulesEngine, FilesystemAllowlistRule, MaxRecursionDepthRule,

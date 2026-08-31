@@ -449,6 +449,47 @@ impl GatewayBuilder {
             Arc::new(crate::policy::ChainedEngine::new(engines))
         };
 
+        // ── Restricted Mode ────────────────────────────────────────────────
+        // Resolve the configured capability-restriction profile ONCE, here, and
+        // hold it immutably for the rest of startup. Threaded (as an `Option`)
+        // into every side-effect chokepoint: the tool registry + skill dispatcher,
+        // the HTTP policy, and the companion / automations channel dispatchers.
+        // `None` on a normal instance → no gate anywhere. An UNKNOWN profile is
+        // fatal (fail-closed): refuse to boot rather than silently run unrestricted.
+        let restricted_policy: Option<Arc<crate::policy::RestrictedPolicy>> =
+            match crate::policy::RestrictedPolicy::from_config(&config.restricted_mode) {
+                Ok(Some(p)) => {
+                    warn!(
+                        "Restricted Mode ACTIVE — profile '{}'. Shell, code, filesystem \
+                         writes, outbound channels, care escalations, home actuation, and \
+                         arbitrary web fetch are DENIED at the policy layer (fail-closed).",
+                        p.profile_name()
+                    );
+                    Some(Arc::new(p))
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::error!("FATAL: invalid restricted_mode config: {e}");
+                    return Err(MiraError::ConfigError(e));
+                }
+            };
+        // Publish it to the process-global that the scattered channel-send
+        // chokepoints (`deliver_outbound`, `deliver_to_user`) consult. Write-once.
+        crate::policy::restricted::install_global(restricted_policy.clone());
+
+        // Restricted Mode resource/cost caps (Slice 2) — a stateful runtime built
+        // only while a profile is active (each cap independently no-ops at 0).
+        // Published to a sibling process-global read by the chat handler (rate /
+        // concurrency / daily ceiling) and the agent core (per-turn clamps + token
+        // accounting).
+        let restricted_caps: Option<Arc<crate::policy::RestrictedCapsRuntime>> =
+            restricted_policy.as_ref().map(|_| {
+                Arc::new(crate::policy::RestrictedCapsRuntime::new(
+                    config.restricted_mode.caps.clone(),
+                ))
+            });
+        crate::policy::restricted::install_caps_global(restricted_caps.clone());
+
         // Build the shared HttpPolicy + search backends ONCE. They're used by
         // network-tier tools (web_fetch / web_search / url_preview) AND by the
         // skill resolver below (ResearchAdapter takes the same fetcher and
@@ -456,6 +497,7 @@ impl GatewayBuilder {
         let http_policy: Arc<HttpPolicy> = Arc::new({
             let mut p = HttpPolicy::new(build_http_policy_config(&config));
             p = p.with_policy_engine(Arc::clone(&policy_engine));
+            p = p.with_restricted_policy(restricted_policy.clone());
             p
         });
         let search_backends: Vec<Arc<dyn SearchBackend>> =
@@ -714,7 +756,44 @@ impl GatewayBuilder {
             guardian_action_store.clone(),
             agent_audit.clone(),
             Arc::clone(&guardian_channel_manager),
-        );
+        )
+        // Restricted Mode gate — applied here (registry still owned, before it is
+        // Arc-wrapped and before the skill BuiltinSnapshotDispatcher snapshots it,
+        // so the dispatcher inherits the same gate). `None` = unrestricted.
+        .with_restricted_policy(restricted_policy.clone());
+
+        // ── Ephemeral guest sessions (Restricted Mode, Slice 3) ────────────────
+        // Built whenever auth + history exist (both needed to create AND wipe a
+        // guest). Purges any orphaned guests from a previous run on startup, then
+        // runs the TTL sweep + optional global-reset loop. The manager's
+        // is_enabled() — a profile active AND guest.enabled — is the fail-closed
+        // authority; the /api/auth/guest endpoint is always mounted but refuses
+        // to mint unless enabled, so a guest is never handed out unrestricted.
+        if let (Some(auth_svc), Some(hist)) = (auth_service.as_ref(), history.as_ref()) {
+            let guest_mgr = Arc::new(crate::guest::GuestManager::new(
+                config.restricted_mode.guest.clone(),
+                restricted_policy.is_some(),
+                Arc::clone(auth_svc),
+                Arc::clone(&memory),
+                Arc::clone(&wiki_registry),
+                Arc::clone(hist),
+                data_dir.to_path_buf(),
+                config.server.display_name.clone().unwrap_or_else(|| "MIRA".to_string()),
+                config.server.public_base_url.clone(),
+            ));
+            // Clear orphaned guests from a prior run before serving traffic.
+            guest_mgr.startup_purge().await;
+            Arc::clone(&guest_mgr).spawn_maintenance();
+            crate::guest::install_global(guest_mgr);
+            if config.restricted_mode.guest.enabled && restricted_policy.is_some() {
+                info!("Guest sessions ENABLED (ttl {}s, max_active {})",
+                    config.restricted_mode.guest.session_ttl_secs,
+                    config.restricted_mode.guest.max_active);
+            } else if config.restricted_mode.guest.enabled {
+                warn!("restricted_mode.guest.enabled is true but no restricted_mode.profile \
+                       is set — guest minting is DISABLED (fail-closed).");
+            }
+        }
 
         // ── MCP host (Q2 #7, Slices 1-4) ───────────────────────────
         // per-user storage. Open the mcp_servers table next

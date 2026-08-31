@@ -1,0 +1,36 @@
+# Fast TEST image for the Restricted Mode e2e suite.
+#
+# NOT the production image (that's the repo-root Dockerfile — a full multi-stage
+# cargo build). This one wraps a HOST-built release binary for quick iteration.
+# Base is ubuntu:24.04 to match the host glibc (2.39) the binary was built
+# against — a debian:bookworm base (glibc 2.36) would fail to run it.
+#
+# Build context = repo root. Build with:
+#   docker build -f e2e/Dockerfile.test -t mira:e2e .
+# after `cargo build --release --bin mira` and `npm --prefix web run build`.
+FROM ubuntu:24.04
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl tini libstdc++6 \
+ && rm -rf /var/lib/apt/lists/*
+
+# Host-built binary + the built SPA. Paths are relative to the repo root context.
+# (target/ is git-ignored; the compose build passes the real path via build-arg.)
+# Both staged into e2e/.artifacts (web/dist and target/ are .dockerignore'd, so
+# run.sh copies the built SPA + binary here first).
+ARG MIRA_BIN=e2e/.artifacts/mira
+COPY ${MIRA_BIN}         /usr/local/bin/mira
+COPY e2e/.artifacts/web  /app/web
+COPY e2e/docker-entrypoint-test.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/mira /usr/local/bin/entrypoint.sh
+
+ENV HOME=/data \
+    MIRA_WEB_DIR=/app/web
+WORKDIR /data
+EXPOSE 8080
+
+HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=10 \
+  CMD curl -fsS -o /dev/null http://127.0.0.1:8080/livez || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

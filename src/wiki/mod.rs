@@ -442,6 +442,53 @@ impl WikiRegistry {
         let _ = self.system_wiki.set(wiki.clone());
         Ok(wiki)
     }
+
+    /// Completely remove a user's wiki — its markdown tree and its audit DB —
+    /// and evict the cached handle. Used to tear down an ephemeral guest so its
+    /// wiki cannot leak into a later session. Best-effort per file; returns the
+    /// first hard error removing the tree.
+    pub fn purge_user(&self, user_id: &str) -> std::io::Result<()> {
+        // Drop the cached handle first so nothing keeps the files open.
+        self.user_wikis.lock().expect("wiki cache poisoned").remove(user_id);
+        let root = user_wiki_root(&self.data_dir, user_id);
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        // Audit DB + its sqlite WAL/SHM sidecars.
+        let audit = self.data_dir.join(format!("wiki_{}.db", sanitize_id(user_id)));
+        for suffix in ["", "-wal", "-shm"] {
+            let p = PathBuf::from(format!("{}{}", audit.display(), suffix));
+            if p.exists() { let _ = std::fs::remove_file(&p); }
+        }
+        Ok(())
+    }
+
+    /// Seed a (not-yet-created) user's wiki by copying a baseline directory tree
+    /// into its root. Call BEFORE the first `for_user`, so the seeded pages are
+    /// present when the wiki is opened (the scaffolder won't overwrite existing
+    /// files). Used to give a fresh guest curated starting context.
+    pub fn seed_user_from_dir(&self, user_id: &str, baseline: &Path) -> std::io::Result<()> {
+        let root = user_wiki_root(&self.data_dir, user_id);
+        std::fs::create_dir_all(&root)?;
+        copy_dir_recursive(baseline, &root)
+    }
+}
+
+/// Recursively copy a directory tree (files + subdirs). Skips nothing; the
+/// caller is responsible for pointing at a trusted baseline.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to   = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 // ── Internals: path resolution + scaffolding ─────────────────────────────────

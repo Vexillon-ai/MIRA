@@ -700,3 +700,22 @@ _Video-generation backends for the video_generate tool: OpenAI Videos / Sora, lo
 - **`video.wan2gp.enabled`** (boolean) — Enable the WAN2GP backend.
 - **`video.wan2gp.base_url`** (string) — Gradio app base URL, e.g. http://127.0.0.1:7862.
 - **`video.wan2gp.api_name`** (string) — Gradio API endpoint name to call (e.g. /generate_video), from the app's /config.
+
+## restricted_mode
+
+_Restricted Mode — a fail-closed capability-restriction profile for safely exposing MIRA (guest/kiosk instances, reducing prompt-injection blast radius). Off by default (no profile). Read once at startup and held immutably; no runtime path can widen it. Toggling it requires a service restart._
+
+- **`restricted_mode.profile`** (string) — The active restriction profile, or unset for Restricted Mode off. The only built-in profile is 'hardened' (guest/exposed/kiosk), which denies shell, code execution, filesystem writes, outbound channel messages, care-network escalations, home actuation, and arbitrary web fetch, while allowing chat, memory, and the wiki. An unrecognised profile name is a fatal startup error, never a silent fall-through to unrestricted.
+- **`restricted_mode.caps`** (object) — Server-enforced resource and cost caps, applied only while a profile is active. Every field defaults to 0 = unlimited / no clamp, so a bare profile behaves as deny-only. Intended for guest/kiosk/public instances to bound spend and load.
+- **`restricted_mode.caps.messages_per_min`** (integer) — Per-user inbound message rate limit, messages per rolling 60 seconds. 0 = unlimited. A user over the limit gets a brief 'slow down' reply instead of a turn.
+- **`restricted_mode.caps.max_tokens_per_turn`** (integer) — Hard cap on a single turn's response tokens. The effective per-turn response budget becomes the smaller of `agent.max_response_tokens` and this. 0 = no clamp.
+- **`restricted_mode.caps.context_budget_tokens`** (integer) — Ceiling on the tokens of conversation history the model sees per turn. The effective context budget becomes the smaller of the configured budget and this. 0 = no clamp.
+- **`restricted_mode.caps.max_session_secs`** (integer) — Maximum age of a single conversation before it is treated as expired, in seconds. 0 = unlimited. Fully enforced once ephemeral guest sessions land.
+- **`restricted_mode.caps.max_concurrent_sessions`** (integer) — Global cap on simultaneous in-flight restricted turns across the whole instance. Requests beyond the cap get a graceful 'busy, try again shortly' reply. 0 = unlimited.
+- **`restricted_mode.caps.daily_token_ceiling`** (integer) — Global ceiling on total tokens spent per UTC day across the instance. Once reached, further turns degrade gracefully until the next day rather than spending unbounded. 0 = unlimited.
+- **`restricted_mode.guest`** (object) — Ephemeral, sandboxed guest sessions for anonymous 'try it' access. Off by default and fail-closed: guests are only ever minted when a profile is ALSO set, so a guest session is never handed out on an unrestricted instance. Each guest is a throwaway account with its own seeded, isolated memory + wiki, wiped on a TTL and by a periodic global reset.
+- **`restricted_mode.guest.enabled`** (boolean) — Master switch for anonymous guest sessions and the mint endpoint POST /api/auth/guest. Off by default. Even when true, guests are minted only if `restricted_mode.profile` is also set.
+- **`restricted_mode.guest.session_ttl_secs`** (integer) — Lifetime of a guest session in seconds. After this the token stops working and the guest's data is wiped. Default 1800 (30 minutes).
+- **`restricted_mode.guest.max_active`** (integer) — Maximum simultaneously-active guest sessions across the instance. Excess mint requests get a graceful 'busy' response. 0 = unlimited (not recommended for a public endpoint).
+- **`restricted_mode.guest.global_reset_secs`** (integer) — Periodic global-reset backstop: every N seconds tear down ALL guest sessions regardless of age, as a belt-and-braces guard against leaks. 0 = off.
+- **`restricted_mode.guest.seed_wiki_dir`** (string) — Optional baseline wiki directory copied into each new guest's wiki so guests start with seeded context (persona, household, etc.). Relative to the data dir, or absolute. Unset = start with an empty wiki.

@@ -570,3 +570,68 @@ pub async fn oidc_callback_handler(
         Err(e) => login_error_redirect(&format!("Could not start your session: {e}")),
     }
 }
+
+// ── Guest sessions (Restricted Mode) ───────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct GuestServerInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+// Response contract for `POST /api/auth/guest`. The iOS/Android "Try now"
+// buttons and the browser demo integrate against exactly this shape.
+#[derive(Serialize)]
+pub struct GuestSessionResponse {
+    // Which instance the caller just connected to.
+    pub server:           GuestServerInfo,
+    // Bearer access token, scoped to the ephemeral guest account.
+    pub access_token:     String,
+    pub token_type:       &'static str,
+    // Absolute expiry (ms since epoch) and the session length, so a client can
+    // show a countdown / re-request when it lapses.
+    pub expires_at_ms:    i64,
+    pub session_ttl_secs: u64,
+    pub user:             UserResponse,
+}
+
+/// `POST /api/auth/guest` — mint an anonymous, short-lived guest session.
+///
+/// Public (no auth). **Fail-closed:** refuses unless Restricted Mode is active
+/// AND `restricted_mode.guest.enabled` is true; the endpoint is always mounted
+/// but returns `403` otherwise (a guest is never handed out on an unrestricted
+/// instance). `503` when at the `max_active` capacity.
+pub async fn guest_handler() -> impl IntoResponse {
+    use crate::guest::GuestMintError;
+    let Some(mgr) = crate::guest::global() else {
+        return (StatusCode::FORBIDDEN, "Guest sessions are not available on this server.")
+            .into_response();
+    };
+    match mgr.mint().await {
+        Ok(session) => {
+            let (name, base_url) = mgr.server_info();
+            let resp = GuestSessionResponse {
+                server: GuestServerInfo {
+                    name: name.to_string(),
+                    base_url: base_url.map(str::to_string),
+                },
+                access_token:     session.access_token,
+                token_type:       "Bearer",
+                expires_at_ms:    session.expires_at_ms,
+                session_ttl_secs: session.session_ttl_secs,
+                user:             UserResponse::from(session.user),
+            };
+            (StatusCode::CREATED, Json(resp)).into_response()
+        }
+        Err(GuestMintError::Disabled) =>
+            (StatusCode::FORBIDDEN, "Guest sessions are not enabled on this server.").into_response(),
+        Err(GuestMintError::AtCapacity) =>
+            (StatusCode::SERVICE_UNAVAILABLE,
+             "This server is at capacity — please try again shortly.").into_response(),
+        Err(GuestMintError::Internal(e)) => {
+            tracing::warn!("guest mint failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Could not start a guest session.").into_response()
+        }
+    }
+}

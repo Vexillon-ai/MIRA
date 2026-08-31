@@ -464,6 +464,15 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Delete every conversation owned by `user_id` — and, via `ON DELETE
+    /// CASCADE`, all of their messages and message vectors. Used to wipe an
+    /// ephemeral guest's chat history on teardown. Returns the conversation count.
+    pub fn purge_user(&self, user_id: &str) -> Result<usize, MiraError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM conversations WHERE user_id = ?1", params![user_id])
+            .map_err(|e| MiraError::HistoryError(e.to_string()))
+    }
+
     /// One-shot re-stamp of legacy conversations onto a real user id. Used by
     /// the channel-accounts migrator on first run: any row whose `user_id`
     /// equals `from` on the given `channel` gets rewritten to `to`. Returns

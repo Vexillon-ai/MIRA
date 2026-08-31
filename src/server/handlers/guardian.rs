@@ -133,6 +133,7 @@ pub async fn guardian_relay(
             DeliveryOutcome::Delivered(ch) => delivered.push(ch),
             DeliveryOutcome::NoChannel     => {}
             DeliveryOutcome::Failed(ch, e) => warn!("guardian relay: delivery to '{ch}' failed: {e}"),
+            DeliveryOutcome::Suppressed(r) => warn!("guardian relay: channel delivery suppressed (restricted mode: {r})"),
         }
     }
     info!("guardian relay: delivered a sentinel message via {:?}", delivered);
