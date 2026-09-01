@@ -26,26 +26,55 @@ use crate::auth::AuthUser;
 use crate::notifications::web_push::WebPushService;
 use crate::notifications::NotificationBus;
 
+/// Should this notification be delivered over `caller`'s SSE stream?
+///
+/// The `NotificationBus` is a single broadcast channel shared by every
+/// connected client, so the stream MUST filter — otherwise one user's
+/// notifications (whose envelope body carries the message text) leak onto every
+/// other connected user's stream. Acute on any multi-user / RBAC deployment.
+/// Rules:
+///   • a notification addressed to a user (`user_id = Some`) goes ONLY to that
+///     user — this is the leak fix.
+///   • a global notice (`user_id = None`, e.g. SystemDegraded/Guardian) goes to
+///     regular users but NOT to guests (a restricted/demo visitor shouldn't see
+///     the instance's system/health chatter).
+fn deliver_to(notif_user: Option<&str>, caller_id: &str, caller_is_guest: bool) -> bool {
+    match notif_user {
+        Some(uid) => uid == caller_id,
+        None       => !caller_is_guest,
+    }
+}
+
 pub async fn notifications_stream(
-    AuthUser(_user): AuthUser,
+    AuthUser(user): AuthUser,
     Extension(bus): Extension<Arc<NotificationBus>>,
 ) -> impl IntoResponse {
     let rx = bus.subscribe();
+    let caller_id = user.id.clone();
+    let caller_is_guest = user.is_guest();
 
-    let sse_stream = stream::unfold(rx, |mut rx| async move {
-        loop {
-            match rx.recv().await {
-                Ok(notif) => {
-                    // Serialise the canonical envelope (superset of the
-                    // legacy shape) so native clients get type/severity/
-                    // sent_at while the existing web client keeps reading
-                    // kind/channel/message.
-                    let data = serde_json::to_string(&notif.to_envelope()).unwrap_or_default();
-                    let event = Event::default().event("notification").data(data);
-                    return Some((Ok::<Event, Infallible>(event), rx));
+    let sse_stream = stream::unfold(rx, move |mut rx| {
+        let caller_id = caller_id.clone();
+        async move {
+            loop {
+                match rx.recv().await {
+                    Ok(notif) => {
+                        // Per-user filter — never forward another user's
+                        // notification (see `deliver_to`).
+                        if !deliver_to(notif.user_id.as_deref(), &caller_id, caller_is_guest) {
+                            continue;
+                        }
+                        // Serialise the canonical envelope (superset of the
+                        // legacy shape) so native clients get type/severity/
+                        // sent_at while the existing web client keeps reading
+                        // kind/channel/message.
+                        let data = serde_json::to_string(&notif.to_envelope()).unwrap_or_default();
+                        let event = Event::default().event("notification").data(data);
+                        return Some((Ok::<Event, Infallible>(event), rx));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed)    => return None,
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed)    => return None,
             }
         }
     });
@@ -257,6 +286,18 @@ mod tests {
 
     fn req(json: serde_json::Value) -> SubscribeRequest {
         serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn sse_delivery_is_scoped_per_user() {
+        // A user's own notification reaches them.
+        assert!(deliver_to(Some("u1"), "u1", false));
+        // Another user's notification never leaks onto this stream (the fix).
+        assert!(!deliver_to(Some("u2"), "u1", false));
+        // Global notices (no user_id) reach regular users…
+        assert!(deliver_to(None, "u1", false));
+        // …but never a guest.
+        assert!(!deliver_to(None, "guest_x", true));
     }
 
     #[test]

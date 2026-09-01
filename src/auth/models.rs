@@ -84,6 +84,14 @@ pub struct User {
     pub token_version:     i64,
 }
 
+impl User {
+    /// True for an ephemeral guest account (reserved `guest_` username prefix,
+    /// minted by the Restricted-Mode guest endpoint).
+    pub fn is_guest(&self) -> bool {
+        self.username.starts_with(crate::auth::local::GUEST_USERNAME_PREFIX)
+    }
+}
+
 // ── NewUser ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
