@@ -1040,7 +1040,8 @@ pub(crate) async fn generate_auto_title(
     // residual leakage; the prompt's job is to make the right answer the
     // most likely completion of `Title:`.
     let prompt = format!(
-        "Generate a 3-6 word title summarising the topic of the message.\n\n\
+        "/no_think\n\
+         Generate a 3-6 word title summarising the topic of the message.\n\n\
          Message: How do I sort a list of dicts in Python by a key?\n\
          Title: Sorting Python Dicts By Key\n\n\
          Message: Plan my weekend trip to Tokyo with a focus on food\n\
@@ -1087,18 +1088,46 @@ pub(crate) async fn generate_auto_title(
 // `None` when nothing plausible survives so the caller can fall back to
 // the preview-based default instead of naming the conversation
 // "Let me analyze the given information…".
-fn sanitize_auto_title(raw: &str) -> Option<String> {
-    let mut stripped = String::with_capacity(raw.len());
+/// ASCII-case-insensitive substring search, returning a byte index. Safe to
+/// slice at (the needle is ASCII, so matches land on char boundaries).
+fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.is_empty() || h.len() < n.len() { return None; }
+    (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
+}
+
+/// Strip reasoning-model chain-of-thought blocks. Models wrap it in either
+/// `<think>…</think>` OR `<thinking>…</thinking>` (and either case) — note
+/// `<think>` is NOT a substring of `<thinking>`, so both must be handled
+/// explicitly. An UNCLOSED opener (the title token cap truncated mid-thought)
+/// discards everything from the opener on, so a half-emitted thought never
+/// becomes the title.
+fn strip_reasoning_blocks(raw: &str) -> String {
+    const TAGS: [(&str, &str); 2] = [("<thinking>", "</thinking>"), ("<think>", "</think>")];
+    let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
-    while let Some(start) = rest.find("<think>") {
-        stripped.push_str(&rest[..start]);
-        let after = &rest[start + "<think>".len()..];
-        match after.find("</think>") {
-            Some(end) => rest = &after[end + "</think>".len()..],
-            None      => { rest = ""; break; }
+    loop {
+        // Earliest opener of any tag.
+        let next = TAGS.iter()
+            .filter_map(|&(open, close)| find_ci(rest, open).map(|i| (i, open, close)))
+            .min_by_key(|&(i, _, _)| i);
+        match next {
+            None => { out.push_str(rest); break; }
+            Some((start, open, close)) => {
+                out.push_str(&rest[..start]);
+                let after = &rest[start + open.len()..];
+                match find_ci(after, close) {
+                    Some(end) => rest = &after[end + close.len()..],
+                    None      => break, // unclosed → drop everything after the opener
+                }
+            }
         }
     }
-    stripped.push_str(rest);
+    out
+}
+
+fn sanitize_auto_title(raw: &str) -> Option<String> {
+    let stripped = strip_reasoning_blocks(raw);
 
     // Walk lines bottom-up so a trailing title still wins over earlier
     // preamble, but skip any line that smells like restated instructions
@@ -1190,6 +1219,28 @@ mod auto_title_tests {
     fn strips_think_block_and_keeps_title() {
         let raw = "<think>let me consider</think>\nMorning Coffee Plans";
         assert_eq!(sanitize_auto_title(raw).as_deref(), Some("Morning Coffee Plans"));
+    }
+
+    #[test]
+    fn strips_thinking_block_too() {
+        // The <thinking>…</thinking> variant (not a substring of <think>) was
+        // leaking into titles verbatim — this is the regression under test.
+        let raw = "<thinking>the user is asking about X, so…</thinking>\nTokyo Food Trip";
+        assert_eq!(sanitize_auto_title(raw).as_deref(), Some("Tokyo Food Trip"));
+    }
+
+    #[test]
+    fn strips_thinking_case_insensitive_and_inline() {
+        let raw = "<Thinking>hmm</Thinking> Budget Spreadsheet Help";
+        assert_eq!(sanitize_auto_title(raw).as_deref(), Some("Budget Spreadsheet Help"));
+    }
+
+    #[test]
+    fn unclosed_thinking_yields_no_title_so_caller_falls_back() {
+        // Token cap truncates mid-thought: no closing tag. Must NOT surface the
+        // half-thought as the title — returns None so the heuristic fallback wins.
+        let raw = "<thinking>let me work out what the best title would be for this";
+        assert!(sanitize_auto_title(raw).is_none());
     }
 
     #[test]
