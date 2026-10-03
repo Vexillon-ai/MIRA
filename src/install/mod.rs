@@ -591,6 +591,16 @@ pub fn apply_guardian_enable_change(enabled: bool, config_path: PathBuf) {
 // Common pre-flight for service-control subcommands. Refuses with a
 // targeted message when the platform/host can't honour the operation.
 fn require_supervised() -> Result<(), Box<dyn Error>> {
+    // A `--system` install is supervised via the system bus, which does not need
+    // a per-user systemd session. `detect_host()` only probes `systemctl --user`,
+    // so without this a system-scope install (service running as the `mira` system
+    // user, no user bus) would be wrongly rejected as "systemd --user is not
+    // available". If the system unit exists, the control commands can proceed
+    // (they route to the system bus via linux::control_scope).  (#3)
+    #[cfg(target_os = "linux")]
+    if linux::system_unit_path().exists() {
+        return Ok(());
+    }
     match detect_host() {
         HostKind::LinuxSystemdUser | HostKind::Macos | HostKind::Windows => Ok(()),
         HostKind::Docker => Err(

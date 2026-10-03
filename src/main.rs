@@ -730,6 +730,14 @@ pub enum TtsCacheAction {
 // `unshare(CLONE_NEWUSER)` (for plugin network isolation) requires a
 // single-threaded process, which tokio's multi-thread runtime is not.
 fn main() -> Result<(), Box<dyn Error>> {
+    // Install the process-level rustls CryptoProvider before anything touches TLS.
+    // The binary links two rustls providers (aws-lc-rs via reqwest/jsonwebtoken, ring
+    // via ldap3/lettre), so rustls 0.23 can't auto-pick one; the first code path that
+    // builds a config from defaults — the Discord gateway's tokio-tungstenite WSS
+    // connect — otherwise panics and the service crash-loops under systemd. Install
+    // aws-lc-rs (the dominant provider) once; Err just means it's already set.  (GH #2)
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     // Windows post-restart relauncher: a deliberate restart exits the service
     // cleanly (exit 0, no SCM crash event) and spawns a detached copy of us
     // with MIRA_WIN_RELAUNCH set, whose only job is to start the service again

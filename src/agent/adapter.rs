@@ -232,10 +232,24 @@ impl WorkerTask for SubprocessAdapter {
         if matches!(self.config.assignment_channel, AssignmentChannel::Stdin) {
             if let Some(mut stdin) = child.stdin.take() {
                 if let Err(e) = stdin.write_all(rendered.as_bytes()).await {
-                    return Err(WorkerFailure {
-                        error: format!("write stdin: {e}"),
-                        partial_artifacts: vec![], fault: None,
-                    });
+                    // A BrokenPipe means the child closed its stdin before we
+                    // finished writing — it either doesn't read stdin or has
+                    // already exited. That's not a worker failure: the child's
+                    // exit status + stderr are the real outcome, so fall through
+                    // and collect them instead of masking them with "write
+                    // stdin: Broken pipe". (A fast-exiting / stdin-ignoring tool
+                    // hits this in production; it also raced this write in CI.)
+                    if e.kind() == std::io::ErrorKind::BrokenPipe {
+                        tracing::debug!(
+                            "agent adapter: child closed stdin before the assignment \
+                             finished writing ({e}); collecting its output/exit instead"
+                        );
+                    } else {
+                        return Err(WorkerFailure {
+                            error: format!("write stdin: {e}"),
+                            partial_artifacts: vec![], fault: None,
+                        });
+                    }
                 }
                 // Closing stdin signals EOF — tools that read until EOF
                 // (most do) will start working as soon as we drop it.

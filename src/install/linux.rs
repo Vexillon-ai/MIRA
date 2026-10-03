@@ -392,35 +392,51 @@ fn run_systemctl_inherited(args: &[&str], allow_codes: &[i32]) -> Result<(), Box
     Err(format!("systemctl {} returned {}", args.join(" "), s).into())
 }
 
+// systemctl scope for the installed main unit. A `--system` install writes the
+// unit to /etc/systemd/system and is driven on the system bus (no `--user`); a
+// default install uses the user bus. Prefer the system scope when that unit
+// exists — mirroring uninstall()'s "system-scope takes precedence" selection —
+// so the day-to-day control commands match whichever scope was installed.
+fn control_scope() -> &'static [&'static str] {
+    if system_unit_path().exists() { &[] } else { &["--user"] }
+}
+
 fn ensure_unit_installed() -> Result<(), Box<dyn Error>> {
-    let unit = unit_path();
-    if !unit.exists() {
-        return Err(format!(
-            "MIRA service unit not found at {}. Run `mira install` first, \
-             or use `mira --server` to run in the foreground.",
-            unit.display()
-        ).into());
+    if system_unit_path().exists() || unit_path().exists() {
+        return Ok(());
     }
-    Ok(())
+    Err(format!(
+        "MIRA service unit not found at {} (or system-scope {}). Run `mira install` \
+         first, or use `mira --server` to run in the foreground.",
+        unit_path().display(),
+        system_unit_path().display(),
+    ).into())
+}
+
+// Build a systemctl argv with the scope prefix threaded in front of the verb.
+fn scoped<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut v: Vec<&'a str> = control_scope().to_vec();   // Vec<&'static str> coerces (covariant)
+    v.extend_from_slice(args);
+    v
 }
 
 pub fn start() -> Result<(), Box<dyn Error>> {
     ensure_unit_installed()?;
-    run_systemctl(&["--user", "start", "mira.service"])?;
+    run_systemctl(&scoped(&["start", "mira.service"]))?;
     println!("✓ started mira.service");
     Ok(())
 }
 
 pub fn stop() -> Result<(), Box<dyn Error>> {
     ensure_unit_installed()?;
-    run_systemctl(&["--user", "stop", "mira.service"])?;
+    run_systemctl(&scoped(&["stop", "mira.service"]))?;
     println!("✓ stopped mira.service");
     Ok(())
 }
 
 pub fn restart() -> Result<(), Box<dyn Error>> {
     ensure_unit_installed()?;
-    run_systemctl(&["--user", "restart", "mira.service"])?;
+    run_systemctl(&scoped(&["restart", "mira.service"]))?;
     println!("✓ restarted mira.service");
     Ok(())
 }
@@ -429,7 +445,7 @@ pub fn status() -> Result<(), Box<dyn Error>> {
     ensure_unit_installed()?;
     // `systemctl status` exits 3 when the unit is inactive/dead — that's
     // not an error in this context, the user just wants the report.
-    run_systemctl_inherited(&["--user", "status", "mira.service"], &[3])
+    run_systemctl_inherited(&scoped(&["status", "mira.service"]), &[3])
 }
 
 // Write to a sibling `.tmp` then rename, so a concurrent reader (or a

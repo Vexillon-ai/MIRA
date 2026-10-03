@@ -4310,7 +4310,7 @@ dependencies = [
 
 [[package]]
 name = "mira"
-version = "0.350.2"
+version = "0.350.4"
 dependencies = [
  "aes-gcm",
  "ammonia",
@@ -4368,6 +4368,7 @@ dependencies = [
  "rpassword",
  "rubato",
  "rusqlite",
+ "rustls",
  "scraper",
  "seccompiler",
  "semver",

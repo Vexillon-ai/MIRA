@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::{Client, ClientBuilder};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::Path;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -141,10 +141,22 @@ fn to_outbound<'a>(messages: &'a [ChatMessage]) -> Vec<OpenRouterMessage<'a>> {
 
 // ─── Non-streaming response shape ────────────────────────────────────────
 
+// Token accounting is best-effort: a `usage` block in a shape we don't model must
+// never fail the response parse (which would lose the model's actual reply). Try to
+// deserialize it; on any mismatch, drop to None rather than erroring. Pairs with the
+// lenient numeric fields in WireUsage.  (GH #1)
+fn lenient_usage<'de, D>(d: D) -> Result<Option<crate::providers::usage::WireUsage>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|val| serde_json::from_value(val).ok()))
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenRouterResponse {
     choices: Vec<OpenRouterResponseChoice>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_usage")]
     usage: Option<crate::providers::usage::WireUsage>,
 }
 
@@ -180,7 +192,7 @@ struct InboundToolFn {
 #[derive(Debug, Deserialize)]
 struct OpenRouterStreamResponse {
     choices: Vec<OpenRouterChoice>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_usage")]
     usage: Option<crate::providers::usage::WireUsage>,
 }
 
@@ -334,12 +346,22 @@ impl OpenRouterProvider {
             ));
         }
 
-        let parsed: OpenRouterResponse = response
-            .json()
-            .await
-            .map_err(|e| crate::MiraError::ProviderError(
-                format!("Failed to parse OpenRouter response: {}", e)
-            ))?;
+        // Read the body as text first, then deserialize, so a parse failure can log
+        // a bounded snippet of what OpenRouter actually sent. Previously this was an
+        // opaque `.json()` with no diagnostics: when a response field deviated (e.g. a
+        // null token count in `usage`), the whole turn failed and — because every
+        // tool-enabled round re-hits the same parse — the chat became permanently
+        // unusable with no clue why (GH #1). `usage` is now also parsed leniently so
+        // accounting quirks never fail the response; the snippet remains for any
+        // residual cause.
+        let body = response.text().await.map_err(|e| crate::MiraError::ProviderError(
+            format!("Failed to read OpenRouter response body: {}", e)
+        ))?;
+        let parsed: OpenRouterResponse = serde_json::from_str(&body).map_err(|e| {
+            let snippet: String = body.chars().take(600).collect();
+            warn!("OpenRouter: failed to parse response body: {e}. Body (truncated): {snippet}");
+            crate::MiraError::ProviderError(format!("Failed to parse OpenRouter response: {}", e))
+        })?;
 
         let choice = parsed.choices.into_iter().next().ok_or_else(|| {
             crate::MiraError::ProviderError("OpenRouter returned empty choices".to_string())
@@ -516,5 +538,49 @@ mod tests {
     fn test_from_env_returns_none_without_key() {
         unsafe { std::env::remove_var("OPENROUTER_API_KEY"); }
         assert!(OpenRouterProvider::from_env("gpt-4".to_string()).is_none());
+    }
+
+    #[test]
+    fn tool_call_response_with_null_usage_parses() {
+        // The GH #1 shape: a tool-enabled (non-streaming) response whose `usage`
+        // block carries null token counts. This previously failed the whole parse
+        // ("error decoding response body") and, because every tool round re-hits it,
+        // bricked the chat. It must now parse, yield the tool call, and tolerate usage.
+        let json = r#"{
+            "id": "gen-123",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" }
+                    }]
+                }
+            }],
+            "usage": { "prompt_tokens": null, "completion_tokens": null, "total_tokens": null }
+        }"#;
+        let parsed: OpenRouterResponse =
+            serde_json::from_str(json).expect("tool-call response with null usage must parse");
+        let choice = parsed.choices.into_iter().next().unwrap();
+        let calls = choice.message.tool_calls.expect("tool_calls present");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn response_with_garbage_usage_still_yields_the_reply() {
+        // Even a wholly unexpected `usage` shape must not lose the reply.
+        let json = r#"{
+            "choices": [{ "message": { "role": "assistant", "content": "hello" } }],
+            "usage": "unexpected-string"
+        }"#;
+        let parsed: OpenRouterResponse =
+            serde_json::from_str(json).expect("garbage usage must degrade to None, not fail");
+        assert!(parsed.usage.is_none());
+        assert_eq!(parsed.choices[0].message.content.as_deref(), Some("hello"));
     }
 }
