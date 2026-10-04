@@ -124,6 +124,7 @@ oauth2       = { version = "5", default-features = false, features = ["reqwest",
 # the IMAP poller wrap its TCP stream without pulling new crates.
 tokio-rustls = "0.26"
 webpki-roots = "1"
+rustls = "0.23.37"
 
 # Async traits
 async-trait = "0.1.83"
