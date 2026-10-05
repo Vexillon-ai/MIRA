@@ -285,7 +285,7 @@ async fn run_one_question(
                     }
 
                     if wiki_enabled {
-                        crate::agent::wiki_hook::run_wiki_extraction(
+                        crate::agent::wiki_hook::run_wiki_extraction_with_context(
                             Arc::clone(&wiki_registry),
                             Arc::clone(extract_provider),
                             BENCH_USER.to_string(),
@@ -294,6 +294,7 @@ async fn run_one_question(
                             user_msg,
                             assistant_msg.clone(),
                             wiki_cfg.clone(),
+                            crate::providers::ProviderRequestContext { session_id: Some(conv_id.clone()) },
                         ).await;
                     }
                 }

@@ -35,6 +35,7 @@ interface Config {
     ollama?:      { url?: string; default_model?: string; timeout_secs?: number }
     lmstudio?:    { url?: string; default_model?: string; timeout_secs?: number }
     openrouter?:  { api_key?: string; base_url?: string; default_model?: string }
+    opencode?:    { enabled?: boolean; api_key?: string; base_url?: string; default_model?: string; timeout_secs?: number }
   }
   agent?: {
     tool_mode?: string
@@ -1248,6 +1249,7 @@ function ProvidersTab({
               { value: 'ollama',         label: 'Ollama (local)' },
               { value: 'lmstudio',       label: 'LM Studio (local)' },
               { value: 'openrouter',     label: 'OpenRouter' },
+              { value: 'opencode',       label: 'OpenCode Go' },
               { value: 'openai',         label: 'OpenAI' },
               { value: 'deepseek',       label: 'DeepSeek' },
               { value: 'moonshot',       label: 'Moonshot (Kimi)' },
@@ -1333,6 +1335,14 @@ function ProvidersTab({
         defaultBaseUrl="https://api.openai.com/v1"
         modelPlaceholder="gpt-4o-mini"
         apiKeyHint="Obtain at https://platform.openai.com/api-keys."
+        str={str} set={set} num={num}
+      />
+      <OpenAiCompatProviderSection
+        title="OpenCode Go"
+        slug="opencode"
+        defaultBaseUrl="https://opencode.ai/zen/go/v1"
+        modelPlaceholder="glm-5.3-flash"
+        apiKeyHint="OpenCode Go API key. Obtain it from your OpenCode Go account."
         str={str} set={set} num={num}
       />
       <OpenAiCompatProviderSection

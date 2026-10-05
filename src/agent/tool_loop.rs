@@ -109,6 +109,18 @@ pub async fn run_tool_loop(
 // tool call's arguments before execution (useful for stamping caller
 // identity the LLM doesn't get to see or change).
 pub async fn run_tool_loop_with_context(
+    provider: &Arc<dyn ModelProvider>, tools: &Arc<ToolRegistry>, messages: &mut Vec<ChatMessage>,
+    options: &GenerationOptions, mode: &ToolMode, max_rounds: usize, tx: &mpsc::Sender<StreamEvent>,
+    allowed_tool_names: Option<&[String]>, inject_args: &serde_json::Map<String, serde_json::Value>,
+    event_ctx: ToolEventCtx<'_>, expander: Option<&dyn crate::agent::tool_select::ToolExpander>,
+    expand_pool: Option<&[String]>, tool_result_cap_bytes: usize,
+) -> Result<(String, TokenUsage), MiraError> {
+    run_tool_loop_with_provider_context(provider, tools, messages, options, mode, max_rounds, tx,
+        allowed_tool_names, inject_args, event_ctx, expander, expand_pool, tool_result_cap_bytes,
+        &crate::providers::ProviderRequestContext::default()).await
+}
+
+pub async fn run_tool_loop_with_provider_context(
     provider:           &Arc<dyn ModelProvider>,
     tools:              &Arc<ToolRegistry>,
     messages:           &mut Vec<ChatMessage>,
@@ -132,13 +144,14 @@ pub async fn run_tool_loop_with_context(
     // overflows the model. The UI still receives the full result — only the copy
     // returned to the model is clamped. See `clamp_tool_result`.
     tool_result_cap_bytes: usize,
+    request_context: &crate::providers::ProviderRequestContext,
 ) -> Result<(String, TokenUsage), MiraError> {
 
     if *mode == ToolMode::Disabled || tools.is_empty() {
         // gate the single streaming call too, otherwise
         // the no-tools path bypasses the policy engine entirely.
         gate_llm_call(tools, provider, inject_args).await?;
-        return run_streaming_no_tools(provider, messages, options, tx).await;
+        return run_streaming_no_tools(provider, messages, options, tx, request_context).await;
     }
 
     // Owned, mutable active allowlist so the `find_tools` meta-tool can grow it
@@ -229,7 +242,7 @@ pub async fn run_tool_loop_with_context(
         // the whole turn with no reply, retry once without tools when a
         // tool-enabled call fails. A model that genuinely supports tools never
         // hits this: its first call succeeds.
-        let resp = match provider.generate(messages, &opts_with_tools).await {
+        let resp = match provider.generate_with_context(messages, &opts_with_tools, request_context).await {
             Ok(r) => r,
             Err(e) if opts_with_tools.tools.is_some() => {
                 warn!(
@@ -239,7 +252,7 @@ pub async fn run_tool_loop_with_context(
                 let mut opts_no_tools = opts_with_tools.clone();
                 opts_no_tools.tools = None;
                 opts_no_tools.tool_choice = None;
-                provider.generate(messages, &opts_no_tools).await?
+                provider.generate_with_context(messages, &opts_no_tools, request_context).await?
             }
             Err(e) => return Err(e),
         };
@@ -496,7 +509,7 @@ pub async fn run_tool_loop_with_context(
     // text channel; streaming that verbatim leaks `<|channel|>…<|call|>`
     // control tokens to the UI (it reads as the assistant parroting the user's
     // own answers). Generate fully, sanitize, then replay the clean text.
-    let resp    = provider.generate(messages, &final_opts).await?;
+    let resp    = provider.generate_with_context(messages, &final_opts, request_context).await?;
     if let Some(fb) = &resp.fallback {
         let _ = tx.send(StreamEvent::Warning(fallback_warning_message(fb))).await;
     }
@@ -904,12 +917,13 @@ async fn run_streaming_no_tools(
     messages: &[ChatMessage],
     options:  &GenerationOptions,
     tx:       &mpsc::Sender<StreamEvent>,
+    request_context: &crate::providers::ProviderRequestContext,
 ) -> Result<(String, TokenUsage), MiraError> {
     let tx_inner = tx.clone();
     let mut on_token = move |tok: String| {
         let _ = tx_inner.try_send(StreamEvent::Token(tok));
     };
-    let resp = provider.generate_stream(messages, options, &mut on_token).await?;
+    let resp = provider.generate_stream_with_context(messages, options, &mut on_token, request_context).await?;
     if let Some(fb) = &resp.fallback {
         let _ = tx.send(StreamEvent::Warning(fallback_warning_message(fb))).await;
     }

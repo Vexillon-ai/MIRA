@@ -20,7 +20,10 @@ pub mod profile_file;
 pub mod prompt;
 pub mod schema;
 
-pub use extractor::{apply_ops, extract_updates_from_transcript, ExtractedUpdates, Op};
+pub use extractor::{
+    apply_ops, extract_updates_from_transcript, extract_updates_from_transcript_with_context,
+    ExtractedUpdates, Op,
+};
 pub use preamble::{build_profile_preamble, ProfilePreambleCache};
 pub use profile_file::{profile_md_heading, profile_md_path, read_profile_md, write_profile_section, ProfileMdError, PROFILE_SECTIONS};
 pub use prompt::build_onboarding_prompt;

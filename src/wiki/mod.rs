@@ -46,7 +46,7 @@ pub mod store;
 
 pub use applier::WikiApplier;
 pub use audit::WikiAuditDb;
-pub use extractor::extract_wiki_ops;
+pub use extractor::{extract_wiki_ops, extract_wiki_ops_with_context};
 pub use frontmatter::{PageFrontmatter, ProvenanceEntry, Writer};
 pub use ops::{LogKind, OpStatus, Provenance, WikiOp, WikiOpEnvelope, WikiScope};
 pub use page::WikiPage;

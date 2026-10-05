@@ -493,7 +493,7 @@ fn default_wiki_auto_apply_above() -> Option<f32> { Some(0.7) }
 
 // ── Provider configs ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvidersConfig {
     #[serde(default)]
     pub ollama: OllamaConfig,
@@ -512,6 +512,10 @@ pub struct ProvidersConfig {
     // empty config block is a no-op.
     #[serde(default)]
     pub openai: OpenAiConfig,
+
+    /// OpenCode Go, exposed through its OpenAI-compatible API.
+    #[serde(default = "default_opencode_config")]
+    pub opencode: OpenAiConfig,
 
     #[serde(default)]
     pub deepseek: DeepSeekConfig,
@@ -551,6 +555,25 @@ pub struct ProvidersConfig {
     // faster/cheaper.
     #[serde(default)]
     pub gemini: GeminiConfig,
+}
+
+impl Default for ProvidersConfig {
+    fn default() -> Self {
+        Self {
+            ollama: OllamaConfig::default(),
+            lmstudio: LmStudioConfig::default(),
+            openrouter: OpenRouterConfig::default(),
+            openai: OpenAiConfig::default(),
+            opencode: default_opencode_config(),
+            deepseek: DeepSeekConfig::default(),
+            moonshot: MoonshotConfig::default(),
+            groq: GroqConfig::default(),
+            xai: XaiConfig::default(),
+            openai_compat: OpenAiCompatProviderConfig::default(),
+            anthropic: AnthropicConfig::default(),
+            gemini: GeminiConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -848,6 +871,17 @@ impl Default for OpenAiCompatProviderConfig {
 
 fn default_provider_timeout() -> u64 { 120 }
 fn default_auth_style()       -> String { "bearer".into() }
+
+fn default_opencode_config() -> OpenAiConfig {
+    OpenAiConfig {
+        enabled: true,
+        api_key: None,
+        base_url: "https://opencode.ai/zen/go/v1".into(),
+        default_model: "glm-5.3-flash".into(),
+        available_models: Vec::new(),
+        timeout_secs: default_provider_timeout(),
+    }
+}
 
 fn default_openai_url()       -> String { "https://api.openai.com/v1".into() }
 fn default_openai_model()     -> String { "gpt-4o-mini".into() }
@@ -4256,6 +4290,7 @@ impl MiraConfig {
             "lmstudio"   => &p.lmstudio.default_model,
             "openrouter" => &p.openrouter.default_model,
             "openai"     => &p.openai.default_model,
+            "opencode"   => &p.opencode.default_model,
             "deepseek"   => &p.deepseek.default_model,
             "moonshot"   => &p.moonshot.default_model,
             "groq"       => &p.groq.default_model,
@@ -5461,5 +5496,18 @@ mod tests {
         // A non-~/.mira value (explicit custom path) is honored as-is regardless.
         assert_eq!(resolve_state_path("/var/log/mira.log"), PathBuf::from("/var/log/mira.log"));
         unsafe { std::env::remove_var("MIRA_DATA_DIR"); }
+    }
+}
+
+#[cfg(test)]
+mod opencode_config_tests {
+    use super::ProvidersConfig;
+
+    #[test]
+    fn opencode_defaults_to_zen_openai_compatible_endpoint() {
+        let p = ProvidersConfig::default();
+        assert_eq!(p.opencode.base_url, "https://opencode.ai/zen/go/v1");
+        assert_eq!(p.opencode.default_model, "glm-5.3-flash");
+        assert!(p.opencode.api_key.is_none());
     }
 }
