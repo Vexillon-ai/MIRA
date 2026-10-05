@@ -33,7 +33,7 @@ services:
     # Unattended first-run setup — uncomment + fill in, then `docker compose up`.
     # (Skipped automatically once a config exists on the volume.)
     # environment:
-    #   MIRA_SETUP_PROVIDER: anthropic         # ollama|lmstudio|anthropic|openai|openrouter|gemini|deepseek|groq|xai
+    #   MIRA_SETUP_PROVIDER: anthropic         # ollama|lmstudio|anthropic|openai|openrouter|opencode|gemini|deepseek|groq|xai
     #   MIRA_SETUP_API_KEY: "sk-…"             # for cloud providers
     #   MIRA_SETUP_MODEL: claude-sonnet-4-6    # set to skip the live provider test
     #   MIRA_SETUP_ADMIN_USER: admin
