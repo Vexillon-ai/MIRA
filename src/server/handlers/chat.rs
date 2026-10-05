@@ -21,7 +21,7 @@ use crate::auth::{AuthUser, LocalAuthService};
 use crate::history::{HistoryStore, NewConversation, NewMessage, MessageRole};
 use crate::notifications::{NotificationBus, Notification, NotificationKind};
 use crate::onboarding::{
-    apply_ops, build_onboarding_prompt, extract_updates_from_transcript,
+    apply_ops, build_onboarding_prompt, extract_updates_from_transcript_with_context,
     OnboardingSchema, ProfilePreambleCache,
 };
 use crate::server::handlers::onboarding::DataDir;
@@ -522,6 +522,7 @@ pub async fn chat_handler(
                                     Arc::clone(&auth_for_task),
                                     conv_id_c.clone(),
                                     user_id.clone(),
+                                    crate::providers::ProviderRequestContext { session_id: Some(session_id.clone()) },
                                 ).await;
                                 if extractor_flipped && !primary_flipped {
                                     let _ = tx.send(Ok(
@@ -927,6 +928,7 @@ async fn run_onboarding_extractor(
     auth:     Arc<LocalAuthService>,
     conv_id:  String,
     user_id:  String,
+    request_context: crate::providers::ProviderRequestContext,
 ) -> bool {
     let schema = match OnboardingSchema::bundled() {
         Ok(s)  => s,
@@ -957,11 +959,12 @@ async fn run_onboarding_extractor(
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let updates = extract_updates_from_transcript(
+    let updates = extract_updates_from_transcript_with_context(
         &provider,
         &schema,
         &transcript,
         &progress,
+        &request_context,
     ).await;
 
     if !updates.ops.is_empty() {

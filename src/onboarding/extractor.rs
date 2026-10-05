@@ -105,6 +105,20 @@ pub async fn extract_updates_from_transcript(
     transcript:        &[ChatMessage],
     current_progress:  &Value,
 ) -> ExtractedUpdates {
+    extract_updates_from_transcript_with_context(
+        provider, schema, transcript, current_progress,
+        &crate::providers::ProviderRequestContext::default(),
+    ).await
+}
+
+/// Context-aware variant used by chat turns whose provider requires per-session metadata.
+pub async fn extract_updates_from_transcript_with_context(
+    provider:          &Arc<dyn ModelProvider>,
+    schema:            &OnboardingSchema,
+    transcript:        &[ChatMessage],
+    current_progress:  &Value,
+    request_context:   &crate::providers::ProviderRequestContext,
+) -> ExtractedUpdates {
     if transcript.iter().all(|m| !matches!(m.role, MessageRole::User | MessageRole::Assistant)) {
         // Nothing to extract from — all system messages.
         return ExtractedUpdates::default();
@@ -131,7 +145,7 @@ pub async fn extract_updates_from_transcript(
 
     let response = match tokio::time::timeout(
         EXTRACTOR_TIMEOUT,
-        provider.generate(&messages, &opts),
+        provider.generate_with_context(&messages, &opts, request_context),
     ).await {
         Ok(Ok(r))  => r.content,
         Ok(Err(e)) => {
@@ -685,6 +699,43 @@ mod tests {
     /// apply_ops wiring writes to the DB end-to-end.
     struct CannedProvider(Mutex<Vec<String>>);
 
+    struct ContextRecordingProvider {
+        seen: Arc<Mutex<Option<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ContextRecordingProvider {
+        fn name(&self) -> &str { "context-test" }
+
+        async fn generate(
+            &self,
+            _msgs: &[ChatMessage],
+            _opts: &GenerationOptions,
+        ) -> Result<GenerationResponse, MiraError> {
+            Ok(GenerationResponse {
+                content: r#"{"records":[],"skips":[],"completed_groups":[],"finalize":false}"#.into(),
+                tool_calls: None,
+                reasoning: None,
+                usage: TokenUsage::default(),
+                provider_id: ProviderId::Local("context-test".into()),
+                model_name: "context-test".into(),
+                fallback: None,
+            })
+        }
+
+        async fn generate_with_context(
+            &self,
+            msgs: &[ChatMessage],
+            opts: &GenerationOptions,
+            context: &crate::providers::ProviderRequestContext,
+        ) -> Result<GenerationResponse, MiraError> {
+            *self.seen.lock().unwrap() = Some(context.session_id.clone());
+            self.generate(msgs, opts).await
+        }
+
+        async fn health_check(&self) -> bool { true }
+    }
+
     impl CannedProvider {
         fn new(responses: Vec<String>) -> Self {
             Self(Mutex::new(responses))
@@ -711,6 +762,19 @@ mod tests {
             })
         }
         async fn health_check(&self) -> bool { true }
+    }
+
+    #[tokio::test]
+    async fn onboarding_extractor_forwards_conversation_request_context() {
+        let seen = Arc::new(Mutex::new(None));
+        let provider: Arc<dyn ModelProvider> = Arc::new(ContextRecordingProvider { seen: Arc::clone(&seen) });
+        let transcript = vec![ChatMessage::user("I am ready to get started")];
+        let context = crate::providers::ProviderRequestContext { session_id: Some("web-conv-42".into()) };
+        let result = extract_updates_from_transcript_with_context(
+            &provider, &schema(), &transcript, &json!({}), &context,
+        ).await;
+        assert!(result.ops.is_empty());
+        assert_eq!(*seen.lock().unwrap(), Some(Some("web-conv-42".into())));
     }
 
     async fn setup_end_to_end() -> (tempfile::TempDir, String, Arc<ToolRegistry>, Arc<LocalAuthService>) {

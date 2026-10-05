@@ -25,6 +25,61 @@ use crate::wiki::frontmatter::{PageFrontmatter, Writer};
 use crate::wiki::ops::{LogKind, WikiOp};
 use crate::wiki::paths::WikiPath;
 
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use crate::providers::ProviderRequestContext;
+    use crate::types::{GenerationResponse, ProviderId, TokenUsage};
+
+    struct ContextRecordingProvider {
+        seen: Arc<Mutex<Option<Option<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for ContextRecordingProvider {
+        fn name(&self) -> &str { "context-test" }
+
+        async fn generate(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &GenerationOptions,
+        ) -> Result<GenerationResponse, crate::MiraError> {
+            Ok(GenerationResponse {
+                content: r#"{"wiki_ops":[]}"#.into(),
+                tool_calls: None,
+                reasoning: None,
+                usage: TokenUsage::default(),
+                provider_id: ProviderId::Local("context-test".into()),
+                model_name: "context-test".into(),
+                fallback: None,
+            })
+        }
+
+        async fn generate_with_context(
+            &self,
+            messages: &[ChatMessage],
+            options: &GenerationOptions,
+            context: &ProviderRequestContext,
+        ) -> Result<GenerationResponse, crate::MiraError> {
+            *self.seen.lock().unwrap() = Some(context.session_id.clone());
+            self.generate(messages, options).await
+        }
+
+        async fn health_check(&self) -> bool { true }
+    }
+
+    #[tokio::test]
+    async fn wiki_extractor_forwards_conversation_request_context() {
+        let seen = Arc::new(Mutex::new(None));
+        let provider: Arc<dyn ModelProvider> = Arc::new(ContextRecordingProvider { seen: Arc::clone(&seen) });
+        let context = ProviderRequestContext { session_id: Some("web-conv-42".into()) };
+        let ops = extract_wiki_ops_with_context(&provider, "I like tea", "Noted", &[], 0.5, 3, &context).await;
+        assert!(ops.is_empty());
+        assert_eq!(*seen.lock().unwrap(), Some(Some("web-conv-42".into())));
+    }
+}
+
 /// Upper bound on the extractor call. Mirrors the memory extractor.
 const WIKI_EXTRACTOR_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -69,6 +124,22 @@ pub async fn extract_wiki_ops(
     min_confidence: f32,
     max_ops: usize,
 ) -> Vec<(WikiOp, f32)> {
+    extract_wiki_ops_with_context(
+        provider, user_msg, assistant_msg, existing_pages, min_confidence, max_ops,
+        &crate::providers::ProviderRequestContext::default(),
+    ).await
+}
+
+/// Context-aware variant used for per-conversation extraction calls.
+pub async fn extract_wiki_ops_with_context(
+    provider: &Arc<dyn ModelProvider>,
+    user_msg: &str,
+    assistant_msg: &str,
+    existing_pages: &[WikiPath],
+    min_confidence: f32,
+    max_ops: usize,
+    request_context: &crate::providers::ProviderRequestContext,
+) -> Vec<(WikiOp, f32)> {
     let messages = vec![
         ChatMessage::system(build_system_prompt(existing_pages)),
         ChatMessage::user(build_user_prompt(user_msg, assistant_msg)),
@@ -84,7 +155,7 @@ pub async fn extract_wiki_ops(
 
     let response = match tokio::time::timeout(
         WIKI_EXTRACTOR_TIMEOUT,
-        provider.generate(&messages, &opts),
+        provider.generate_with_context(&messages, &opts, request_context),
     ).await {
         Ok(Ok(r))  => r.content,
         Ok(Err(e)) => {

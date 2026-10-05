@@ -28,6 +28,7 @@
         "lmstudio",
         "openrouter",
         "openai",
+        "opencode",
         "deepseek",
         "moonshot",
         "groq",
@@ -180,6 +181,44 @@
             "timeout_secs": {
               "type": "integer",
               "minimum": 1
+            }
+          }
+        },
+        "opencode": {
+          "description": "OpenCode Go OpenAI-compatible API. Set api_key to enable; leave null to skip registration.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When false, skip registration. Default true."
+            },
+            "api_key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "OpenCode Go API key. Keep secrets out of source control."
+            },
+            "base_url": {
+              "type": "string",
+              "description": "OpenCode Go base URL; default https://opencode.ai/zen/go/v1."
+            },
+            "default_model": {
+              "type": "string",
+              "description": "Chat Completions compatible model identifier, for example glm-5.3-flash."
+            },
+            "available_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Models the admin has added for this provider \u2014 shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers."
+            },
+            "timeout_secs": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Request timeout in seconds."
             }
           }
         },

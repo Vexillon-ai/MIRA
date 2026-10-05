@@ -42,7 +42,7 @@
 
   // ── Primary provider ────────────────────────────────────────────────────────
   // Which AI provider MIRA uses by default for chat.
-  // Must be one of: "ollama" | "lmstudio" | "openrouter"
+  // Must match a configured provider, e.g. "ollama" | "lmstudio" | "openrouter" | "opencode"
   // Can be switched at runtime with: /provider-use <name>
   "primary_provider": "lmstudio",
 
@@ -83,6 +83,17 @@
       "base_url": "https://openrouter.ai/api/v1",
       // Default model. Browse the full list at https://openrouter.ai/models
       "default_model": "meta-llama/llama-3.2-3b-instruct"
+    },
+
+    // OpenCode Go — OpenAI-compatible hosted models (https://opencode.ai/zen/go)
+    // Add your key in api_key; model ids can be managed from /providers.
+    "opencode": {
+      "enabled": true,
+      "api_key": null,
+      "base_url": "https://opencode.ai/zen/go/v1",
+      "default_model": "glm-5.3-flash",
+      "available_models": [],
+      "timeout_secs": 120
     }
   },
 

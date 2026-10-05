@@ -314,6 +314,9 @@ impl OpenAiCompatClient {
     fn models_url(&self) -> String { format!("{}/models",           self.config.base_url) }
 
     fn apply_headers(&self, mut rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if self.config.provider_name == "opencode" {
+            rb = rb.header(reqwest::header::USER_AGENT, concat!("MIRA/", env!("CARGO_PKG_VERSION")));
+        }
         match &self.config.auth_header {
             AuthHeader::Bearer if !self.config.api_key.is_empty() => {
                 rb = rb.header("Authorization", format!("Bearer {}", self.config.api_key));
@@ -327,6 +330,15 @@ impl OpenAiCompatClient {
         }
         for h in &self.config.extra_headers {
             rb = rb.header(h.name, &h.value);
+        }
+        rb
+    }
+
+    fn apply_request_context(&self, mut rb: reqwest::RequestBuilder, context: Option<&crate::providers::ProviderRequestContext>) -> reqwest::RequestBuilder {
+        if self.config.provider_name == "opencode" {
+            if let Some(session) = context.and_then(|c| c.session_id.as_deref()) {
+                if !session.is_empty() { rb = rb.header("x-opencode-session", session); }
+            }
         }
         rb
     }
@@ -392,6 +404,7 @@ impl OpenAiCompatClient {
         &self,
         messages: &[ChatMessage],
         options:  &GenerationOptions,
+        context: Option<&crate::providers::ProviderRequestContext>,
     ) -> Result<GenerationResponse, crate::MiraError> {
         let url     = self.chat_url();
         let request = ChatRequest {
@@ -403,7 +416,7 @@ impl OpenAiCompatClient {
         debug!("{}: POST {url} (non-streaming, model={})",
                self.config.provider_name, self.config.model);
 
-        let response = self.apply_headers(self.http.post(&url).json(&request))
+        let response = self.apply_request_context(self.apply_headers(self.http.post(&url).json(&request)), context)
             .send().await
             .map_err(|e| crate::MiraError::ProviderError(
                 format!("{}: connect failed: {e}", self.config.provider_name)
@@ -465,6 +478,7 @@ impl OpenAiCompatClient {
         messages: &[ChatMessage],
         options:  &GenerationOptions,
         on_token: &mut (dyn FnMut(String) + Send),
+        context: Option<&crate::providers::ProviderRequestContext>,
     ) -> Result<GenerationResponse, crate::MiraError> {
         let url     = self.chat_url();
         let request = ChatRequest {
@@ -476,7 +490,7 @@ impl OpenAiCompatClient {
         debug!("{}: POST {url} (streaming, model={})",
                self.config.provider_name, self.config.model);
 
-        let response = self.apply_headers(self.http.post(&url).json(&request))
+        let response = self.apply_request_context(self.apply_headers(self.http.post(&url).json(&request)), context)
             .send().await
             .map_err(|e| crate::MiraError::ProviderError(
                 format!("{}: connect failed: {e}", self.config.provider_name)
@@ -575,7 +589,7 @@ impl ModelProvider for OpenAiCompatClient {
         messages: &[ChatMessage],
         options:  &GenerationOptions,
     ) -> Result<GenerationResponse, crate::MiraError> {
-        self.generate_non_stream(messages, options).await
+        self.generate_non_stream(messages, options, None).await
     }
 
     async fn generate_stream(
@@ -584,7 +598,18 @@ impl ModelProvider for OpenAiCompatClient {
         options:  &GenerationOptions,
         on_token: &mut (dyn FnMut(String) + Send),
     ) -> Result<GenerationResponse, crate::MiraError> {
-        self.do_stream(messages, options, on_token).await
+        self.do_stream(messages, options, on_token, None).await
+    }
+
+    async fn generate_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        context: &crate::providers::ProviderRequestContext) -> Result<GenerationResponse, crate::MiraError> {
+        self.generate_non_stream(messages, options, Some(context)).await
+    }
+
+    async fn generate_stream_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        on_token: &mut (dyn FnMut(String) + Send), context: &crate::providers::ProviderRequestContext)
+        -> Result<GenerationResponse, crate::MiraError> {
+        self.do_stream(messages, options, on_token, Some(context)).await
     }
 
     async fn health_check(&self) -> bool {
@@ -691,6 +716,18 @@ mod tests {
             .build().unwrap();
         assert!(req.headers().get("authorization").is_none(),
             "empty api_key under Bearer should not emit auth header");
+    }
+
+    #[test]
+    fn opencode_request_context_adds_session_and_mira_user_agent() {
+        let client = OpenAiCompatClient::new(cfg("opencode", "https://opencode.ai/zen/v1"));
+        let ctx = crate::providers::ProviderRequestContext { session_id: Some("web-conv-42".into()) };
+        let req = client.apply_request_context(client.apply_headers(client.http.post("http://localhost/test")), Some(&ctx)).build().unwrap();
+        assert_eq!(req.headers().get("x-opencode-session").and_then(|v| v.to_str().ok()), Some("web-conv-42"));
+        assert_eq!(req.headers().get(reqwest::header::USER_AGENT).unwrap(), concat!("MIRA/", env!("CARGO_PKG_VERSION")));
+        let ordinary = OpenAiCompatClient::new(cfg("openai", "https://api.openai.com/v1"));
+        let req = ordinary.apply_request_context(ordinary.http.post("http://localhost/test"), Some(&ctx)).build().unwrap();
+        assert!(req.headers().get("x-opencode-session").is_none());
     }
 
     #[test]

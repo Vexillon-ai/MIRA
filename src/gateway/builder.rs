@@ -1968,6 +1968,7 @@ pub(crate) fn build_provider_chain(
         }
     }
     register_openai_compat!("openai",   config.providers.openai);
+    register_openai_compat!("opencode", config.providers.opencode);
     register_openai_compat!("deepseek", config.providers.deepseek);
     register_openai_compat!("moonshot", config.providers.moonshot);
     register_openai_compat!("groq",     config.providers.groq);
@@ -2274,6 +2275,8 @@ pub(crate) fn build_single_provider(
         }
         "openai" => { let c = &config.providers.openai;
             compat("openai", keyed(&c.api_key)?, c.base_url.clone(), model_of(&c.default_model), c.timeout_secs) }
+        "opencode" => { let c = &config.providers.opencode;
+            compat("opencode", keyed(&c.api_key)?, c.base_url.clone(), model_of(&c.default_model), c.timeout_secs) }
         "deepseek" => { let c = &config.providers.deepseek;
             compat("deepseek", keyed(&c.api_key)?, c.base_url.clone(), model_of(&c.default_model), c.timeout_secs) }
         "moonshot" => { let c = &config.providers.moonshot;
@@ -3373,9 +3376,12 @@ mod failover_policy_tests {
         // used to silently fall back to the default chain).
         c.providers.anthropic.api_key = Some("sk-test".into());
         c.providers.deepseek.api_key  = Some("sk-test".into());
+        c.providers.opencode.api_key = Some("opencode-test-key".into());
         c.providers.gemini.api_key    = Some("sk-test".into());
         assert!(build_single_provider(&c, "anthropic", Some("claude-x")).is_some());
         assert!(build_single_provider(&c, "deepseek", None).is_some());
+        let opencode = build_single_provider(&c, "opencode", Some("opencode/test-model")).expect("OpenCode builds");
+        assert_eq!(opencode.name(), "opencode");
         assert!(build_single_provider(&c, "gemini", None).is_some());
         // Unknown slug → None.
         assert!(build_single_provider(&c, "nope", None).is_none());

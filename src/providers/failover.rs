@@ -162,6 +162,41 @@ impl ModelProvider for FailoverProvider {
         Err(crate::MiraError::AllProvidersUnavailable(reasons.join("; ")))
     }
 
+    async fn generate_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        ctx: &crate::providers::ProviderRequestContext) -> Result<GenerationResponse, crate::MiraError> {
+        let reason = match self.primary.generate_with_context(messages, options, ctx).await {
+            Ok(r) => { self.note_primary_ok(); return Ok(r); }, Err(e) => short_reason(&e),
+        };
+        let mut reasons = vec![format!("{}={}", self.primary.name(), reason)];
+        for fb in &self.fallbacks {
+            match fb.generate_with_context(messages, options, ctx).await {
+                Ok(mut r) => { self.note_primary_down(&reason, fb.name()); r.fallback = Some(FallbackNotice {
+                    from: self.primary.name().into(), to: fb.name().into(), reason: reason.clone() }); return Ok(r); },
+                Err(e) => reasons.push(format!("{}={}", fb.name(), short_reason(&e))),
+            }
+        }
+        self.note_primary_down(&reason, "none (all providers failed)");
+        Err(crate::MiraError::AllProvidersUnavailable(reasons.join("; ")))
+    }
+
+    async fn generate_stream_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        on_token: &mut (dyn FnMut(String) + Send), ctx: &crate::providers::ProviderRequestContext)
+        -> Result<GenerationResponse, crate::MiraError> {
+        let reason = match self.primary.generate_stream_with_context(messages, options, on_token, ctx).await {
+            Ok(r) => { self.note_primary_ok(); return Ok(r); }, Err(e) => short_reason(&e),
+        };
+        let mut reasons = vec![format!("{}={}", self.primary.name(), reason)];
+        for fb in &self.fallbacks {
+            match fb.generate_stream_with_context(messages, options, on_token, ctx).await {
+                Ok(mut r) => { self.note_primary_down(&reason, fb.name()); r.fallback = Some(FallbackNotice {
+                    from: self.primary.name().into(), to: fb.name().into(), reason: reason.clone() }); return Ok(r); },
+                Err(e) => reasons.push(format!("{}={}", fb.name(), short_reason(&e))),
+            }
+        }
+        self.note_primary_down(&reason, "none (all providers failed)");
+        Err(crate::MiraError::AllProvidersUnavailable(reasons.join("; ")))
+    }
+
     async fn health_check(&self) -> bool {
         if self.primary.health_check().await { return true; }
         for fallback in &self.fallbacks {

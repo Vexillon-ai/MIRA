@@ -1370,7 +1370,7 @@ impl AgentCore {
         // large result that arrives during it; on a small local window one big
         // result overflows the model. 0 (unbudgeted cloud/legacy) = no clamp.
         let tool_result_cap_bytes = effective_ctx;
-        let (response_text, usage) = tool_loop::run_tool_loop_with_context(
+        let (response_text, usage) = tool_loop::run_tool_loop_with_provider_context(
             provider,
             &self.tools,
             &mut messages,
@@ -1384,6 +1384,7 @@ impl AgentCore {
             expander,
             expand_pool,
             tool_result_cap_bytes,
+            &crate::providers::ProviderRequestContext { session_id: Some(session_id.to_string()) },
         ).await?;
 
         // ── 4. Emit Done ──────────────────────────────────────────────────────
@@ -1541,8 +1542,9 @@ impl AgentCore {
                         safety: Some(safety),
                         degradations: self.degradations.get().map(Arc::clone),
                     };
-                    crate::companion::engagement::spawn_post_hook(
+                    crate::companion::engagement::spawn_post_hook_with_context(
                         assessor,
+                        crate::providers::ProviderRequestContext { session_id: Some(session_id.to_string()) },
                         user_id.to_string(),
                         Some(session_id.to_string()),
                         Some(uuid::Uuid::now_v7().to_string()),
@@ -1569,7 +1571,7 @@ impl AgentCore {
         {
             if let Some(registry) = self.wiki.get() {
                 let turn_id = uuid::Uuid::now_v7().to_string();
-                wiki_hook::post_hook(
+                wiki_hook::post_hook_with_context(
                     Arc::clone(registry),
                     Arc::clone(provider),
                     user_id.to_string(),
@@ -1578,6 +1580,7 @@ impl AgentCore {
                     input.to_string(),
                     response_text,
                     self.config.wiki.auto_extract.clone(),
+                    crate::providers::ProviderRequestContext { session_id: Some(session_id.to_string()) },
                 );
             }
         }
@@ -1732,6 +1735,7 @@ fn runtime_identity_hint(config: &MiraConfig) -> String {
         "lmstudio"   => ("LM Studio (a local model server)", p.lmstudio.default_model.as_str()),
         "ollama"     => ("Ollama (a local model server)",    p.ollama.default_model.as_str()),
         "openrouter" => ("OpenRouter",                       p.openrouter.default_model.as_str()),
+        "opencode"   => ("OpenCode Go",                      p.opencode.default_model.as_str()),
         "anthropic"  => ("Anthropic's API",                  p.anthropic.default_model.as_str()),
         "gemini"     => ("Google's Gemini API",              p.gemini.default_model.as_str()),
         "openai"     => ("the OpenAI API",                   p.openai.default_model.as_str()),

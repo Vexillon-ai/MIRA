@@ -61,43 +61,13 @@ impl GuardedProvider {
     }
 }
 
-#[async_trait]
-impl ModelProvider for GuardedProvider {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    fn guards_degeneracy(&self) -> bool { true }
-
-    async fn generate(
-        &self,
-        messages: &[ChatMessage],
-        options: &GenerationOptions,
-    ) -> Result<GenerationResponse, crate::MiraError> {
-        let resp = self.inner.generate(messages, options).await?;
-        // Non-streaming: no incremental abort possible (the whole reply already
-        // arrived), but still gate the fan-out — a degenerate reply must not be
-        // returned as a normal result, and it counts as a provider error. Inspect
-        // BOTH channels: a reasoning model can degenerate entirely in its thinking
-        // stream (empty `content`, garbage in `reasoning_content`).
-        if response_is_degenerate(&resp.content, resp.reasoning.as_deref(), &self.cfg) {
-            warn!(
-                "degeneracy guard: provider '{}' returned degenerate output \
-                 (content {} chars, reasoning {} chars); treating as provider error",
-                self.inner.name(),
-                resp.content.len(),
-                resp.reasoning.as_deref().map_or(0, str::len),
-            );
-            return Err(Self::tripped_error());
-        }
-        Ok(resp)
-    }
-
-    async fn generate_stream(
+impl GuardedProvider {
+    async fn generate_stream_guarded(
         &self,
         messages: &[ChatMessage],
         options: &GenerationOptions,
         on_token: &mut (dyn FnMut(String) + Send),
+        request_context: &crate::providers::ProviderRequestContext,
     ) -> Result<GenerationResponse, crate::MiraError> {
         // Run the inner stream on its own task so we can ABORT it — and thereby
         // drop the HTTP stream and free the backend slot — the instant degeneracy
@@ -106,6 +76,7 @@ impl ModelProvider for GuardedProvider {
         let inner = self.inner.clone();
         let msgs = messages.to_vec();
         let opts = options.clone();
+        let request_context = request_context.clone();
         // Unbounded so the inner task's synchronous `on_token` never blocks the
         // async runtime; tokens are tiny and the parent drains immediately.
         let (tok_tx, mut tok_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -113,7 +84,7 @@ impl ModelProvider for GuardedProvider {
             let mut fwd = move |t: String| {
                 let _ = tok_tx.send(t);
             };
-            inner.generate_stream(&msgs, &opts, &mut fwd).await
+            inner.generate_stream_with_context(&msgs, &opts, &mut fwd, &request_context).await
         });
 
         let mut detector = DegeneracyDetector::new(self.cfg.clone());
@@ -157,6 +128,66 @@ impl ModelProvider for GuardedProvider {
                 "degeneracy guard: stream task failed to join: {join}"
             ))),
         }
+    }
+
+
+}
+
+#[async_trait]
+impl ModelProvider for GuardedProvider {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn guards_degeneracy(&self) -> bool { true }
+
+    async fn generate(
+        &self,
+        messages: &[ChatMessage],
+        options: &GenerationOptions,
+    ) -> Result<GenerationResponse, crate::MiraError> {
+        let resp = self.inner.generate(messages, options).await?;
+        // Non-streaming: no incremental abort possible (the whole reply already
+        // arrived), but still gate the fan-out — a degenerate reply must not be
+        // returned as a normal result, and it counts as a provider error. Inspect
+        // BOTH channels: a reasoning model can degenerate entirely in its thinking
+        // stream (empty `content`, garbage in `reasoning_content`).
+        if response_is_degenerate(&resp.content, resp.reasoning.as_deref(), &self.cfg) {
+            warn!(
+                "degeneracy guard: provider '{}' returned degenerate output \
+                 (content {} chars, reasoning {} chars); treating as provider error",
+                self.inner.name(),
+                resp.content.len(),
+                resp.reasoning.as_deref().map_or(0, str::len),
+            );
+            return Err(Self::tripped_error());
+        }
+        Ok(resp)
+    }
+
+    async fn generate_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        ctx: &crate::providers::ProviderRequestContext) -> Result<GenerationResponse, crate::MiraError> {
+        let resp = self.inner.generate_with_context(messages, options, ctx).await?;
+        if response_is_degenerate(&resp.content, resp.reasoning.as_deref(), &self.cfg) {
+            return Err(Self::tripped_error());
+        }
+        Ok(resp)
+    }
+
+    async fn generate_stream(
+        &self,
+        messages: &[ChatMessage],
+        options: &GenerationOptions,
+        on_token: &mut (dyn FnMut(String) + Send),
+    ) -> Result<GenerationResponse, crate::MiraError> {
+        self.generate_stream_guarded(messages, options, on_token,
+            &crate::providers::ProviderRequestContext::default()).await
+    }
+
+    async fn generate_stream_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        on_token: &mut (dyn FnMut(String) + Send), ctx: &crate::providers::ProviderRequestContext)
+        -> Result<GenerationResponse, crate::MiraError> {
+        self.generate_stream_guarded(messages, options, on_token, ctx).await
     }
 
     async fn health_check(&self) -> bool {
