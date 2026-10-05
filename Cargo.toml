@@ -2,7 +2,7 @@
 name = "mira"
 # First public release: 0.272.0 = "public beta 1" (tag v0.272.0; GitHub release
 # marked pre-release). Post-beta fixes continue from 0.272.1.
-version = "0.350.4"
+version = "0.350.5"
 edition = "2024"
 description = "Multi-tasking Intelligent Responsive Assistant - A personal AI agent framework"
 authors = ["Tarek El Diab"]
@@ -95,6 +95,12 @@ rmcp = { version = "1.7", features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
+    # Give rmcp's own reqwest (a different major version than ours, so our TLS
+    # feature doesn't reach it) a rustls backend, or remote MCP servers over HTTPS
+    # fail before the handshake with "invalid URL, scheme is not http" (GH #6).
+    # `-no-provider` reuses the process-level CryptoProvider we install in main()
+    # (one rustls 0.23 in the graph), rather than bundling a second provider.
+    "reqwest-tls-no-provider",
 ] }
 
 # Email channel (Q2 #8, slice E1+E3) — per-user IMAP/SMTP mailbox as
@@ -206,8 +212,18 @@ jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_r
 # bare `tls-rustls`, which no longer selects one.
 ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ring"] }
 
+# rustls 0.23 process-level default CryptoProvider. The binary links TWO rustls
+# providers — aws-lc-rs (reqwest, jsonwebtoken) and ring (ldap3, lettre) — so rustls
+# cannot auto-select a default. Any path that builds a rustls config from defaults then
+# panics at runtime ("Could not automatically determine the process-level
+# CryptoProvider"); the Discord gateway's tokio-tungstenite WSS connect is the first
+# such path, which aborted the process and crash-looped under systemd. We take rustls
+# as a direct dep only to install aws-lc-rs as the process default once at startup —
+# see CryptoProvider::install_default() at the top of main().  (GH #2)
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+
 # PDF parsing (future tool)
-lopdf = "0.34"
+lopdf = "0.42"
 
 # Web tools (Tier 2) — readable article extraction + CSS-selector HTML parsing
 # default feature pulls in an old reqwest+native-tls; we only need the extractor

@@ -432,6 +432,13 @@ impl McpClient {
                 let url = cfg.url.as_deref().ok_or_else(|| MiraError::ConfigError(
                     format!("mcp server '{}': http transport requires `url`", cfg.name)
                 ))?;
+                // Remote MCP over HTTPS relies on rmcp's own reqwest (a different major
+                // version than MIRA's, so MIRA's TLS feature doesn't reach it) having a
+                // TLS backend. That is enabled via the `reqwest-tls-no-provider` feature
+                // on the rmcp dependency (Cargo.toml), which uses the process-level
+                // CryptoProvider installed in main(). Without it, rmcp's default client
+                // had no TLS connector and `https://` URLs failed before the handshake
+                // with "invalid URL, scheme is not http" (GH #6).
                 let transport = StreamableHttpClientTransport::from_uri(url.to_string());
                 handler.serve(transport).await
                     .map_err(|e| MiraError::ConfigError(format!(
@@ -459,3 +466,5 @@ fn type_name_of(v: &Value) -> &'static str {
         Value::Object(_) => "object",
     }
 }
+
+
