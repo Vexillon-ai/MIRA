@@ -2148,6 +2148,14 @@ pub struct AgentConfig {
     #[serde(default)]
     pub degeneracy_guard: DegeneracyGuardConfig,
 
+    // Empty-completion retry. A provider that returns a successful but empty
+    // completion (no content, no tool_calls) gets the completion re-issued a
+    // bounded number of times (a load-balancing gateway routes the retry to a
+    // different upstream), then the turn fails gracefully instead of showing a
+    // blank reply. Enabled by default.
+    #[serde(default)]
+    pub empty_response_retry: EmptyResponseRetryConfig,
+
     #[serde(default)]
     pub tools: ToolsConfig,
 
@@ -2302,6 +2310,7 @@ impl Default for AgentConfig {
             prompt_cache_enabled: false,
             compaction: CompactionConfig::default(),
             degeneracy_guard: DegeneracyGuardConfig::default(),
+            empty_response_retry: EmptyResponseRetryConfig::default(),
             tools:             ToolsConfig::default(),
             tool_selection:    ToolSelectionConfig::default(),
             reasoning:         ReasoningConfig::default(),
@@ -3875,6 +3884,34 @@ impl Default for DegeneracyGuardConfig {
         }
     }
 }
+/// Empty-completion retry settings (`agent.empty_response_retry`). Some providers
+/// intermittently return a *successful* completion with no content and no
+/// tool_calls (a silent blank — e.g. an OpenRouter upstream returning empty for a
+/// model while another upstream returns fine). MIRA re-issues the completion up to
+/// `max_retries` times — on a load-balancing gateway that routes to a possibly-
+/// different upstream — then fails the turn gracefully rather than showing an empty
+/// reply. A real tool-call turn (empty content WITH tool_calls) is never treated as
+/// empty. Applies to every LLM call (chat, auto-title, the extractors).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmptyResponseRetryConfig {
+    /// Master switch. Default true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Maximum re-issues after an empty completion before failing the turn.
+    /// Default 2 (so up to 3 attempts total). Kept small to stay within the
+    /// per-turn token/latency budget.
+    #[serde(default = "default_empty_retry_max_retries")]
+    pub max_retries: u32,
+}
+
+impl Default for EmptyResponseRetryConfig {
+    fn default() -> Self {
+        Self { enabled: true, max_retries: default_empty_retry_max_retries() }
+    }
+}
+fn default_empty_retry_max_retries() -> u32 { 2 }
+
 fn default_max_tool_round_tokens() -> u32   { 2048 }
 fn default_max_response_tokens()   -> u32   { 16384 }
 

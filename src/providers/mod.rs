@@ -12,6 +12,7 @@ pub mod anthropic;
 pub mod gemini;
 pub mod failover;
 pub mod degeneracy;
+pub mod empty_guard;
 pub mod signal_cli;
 pub mod catalog;
 pub mod overlays;

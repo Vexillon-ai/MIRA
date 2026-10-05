@@ -1352,6 +1352,22 @@
             }
           }
         },
+        "empty_response_retry": {
+          "description": "Empty-completion retry: some providers intermittently return a successful chat completion with no content and no tool_calls (a silent blank, e.g. an OpenRouter upstream returning empty for a model while another upstream returns fine). MIRA re-issues the completion up to max_retries times — on a load-balancing gateway the retry routes to a possibly-different upstream — then fails the turn gracefully instead of showing an empty reply, counting it as a provider error for failover/health. A real tool-call turn (empty content WITH tool_calls) is never treated as empty. Applies to every LLM call (chat, auto-title, the memory/wiki extractors).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Master switch for empty-completion retry. Default true.",
+              "type": "boolean"
+            },
+            "max_retries": {
+              "description": "Maximum re-issues after an empty completion before failing the turn. Default 2 (up to 3 attempts total). Kept small to stay within the per-turn token/latency budget.",
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
         "avatar": {
           "description": "Assistant avatar. Encoded as 'preset:<key>' for bundled icons, or 'upload:<ext>' when a file exists at {data_dir}/avatars/agent.{ext}. Null = built-in MIRA logo.",
           "type": [

@@ -2123,11 +2123,18 @@ pub(crate) fn build_provider_chain(
         Arc::new(chain)
     };
 
-    // Wrap the assembled chain in the degenerate-output guard (outermost), so a
-    // wedged model's repetitive/garbage output is aborted early and surfaced as a
-    // failed turn + provider error — for EVERY call path built from this chain
-    // (chat, extractors, Guardian, tool loops). Inert when disabled.
-    Ok(crate::providers::degeneracy::guard(chain, config.agent.degeneracy_guard.clone()))
+    // Wrap the assembled chain in the degenerate-output guard, so a wedged model's
+    // repetitive/garbage output is aborted early and surfaced as a failed turn +
+    // provider error — for EVERY call path built from this chain (chat, extractors,
+    // Guardian, tool loops). Inert when disabled.
+    let guarded = crate::providers::degeneracy::guard(chain, config.agent.degeneracy_guard.clone());
+
+    // Then the empty-completion retry guard (outermost): a provider that returns a
+    // successful but blank completion (no content, no tool_calls) has the completion
+    // re-issued a bounded number of times — a load-balancing gateway routes the retry
+    // to a different upstream — before the turn fails gracefully instead of showing an
+    // empty reply. Also covers every call path from this chain. Inert when disabled.
+    Ok(crate::providers::empty_guard::guard(guarded, config.agent.empty_response_retry.clone()))
 }
 
 /// Startup guardrail: warn if MIRA's context budget (`agent.context_length_tokens`)
