@@ -150,6 +150,7 @@ pub async fn dispatch_inbound(
     ));
 
     let turn_ctx = TurnContext {
+        provider_request_context: None,
         system_prompt_override,
         allowed_tool_names,
         inject_tool_args: inject,
