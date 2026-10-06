@@ -1,0 +1,97 @@
+name: "PR check"
+
+# Build + test gate for pull requests from contributors.
+#
+# Mirrors the upstream CI's per-push checks: the web SPA build, a --locked
+# release build of the binary, the library unit tests, and the offline
+# integration smoke tests. Runs with a read-only token and no secrets — code
+# from a pull request is untrusted until a maintainer has reviewed it.
+#
+# Note: this repo is a sanitized public mirror. Accepted pull requests are also
+# imported upstream and built there before they ship in a release.
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # Some vendored C deps ship a pre-3.5 cmake_minimum_required that CMake 4.x rejects.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+jobs:
+  web:
+    name: Web UI build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: npm ci + build
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+  rust:
+    name: Build + test (linux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The release build plus the test build need more disk than a stock
+      # runner has free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # Ubuntu 24.04 runners block unprivileged user namespaces via AppArmor,
+      # which the Linux code_run sandbox (and its tests) rely on.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake libclang-dev pkg-config
+          for d in /usr/lib/llvm-*/lib; do [ -e "$d/libclang.so" ] && echo "LIBCLANG_PATH=$d" >> "$GITHUB_ENV"; done
+
+      # rust-toolchain.toml pins the exact compiler; rustup installs it on first use.
+      - name: Toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes the cache; PRs read it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Manifest and lockfile agree
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Build (release, --locked)
+        run: cargo build --release --locked --bin mira
+
+      - name: Unit tests
+        run: cargo test --locked --lib
+
+      - name: Integration smoke tests
+        run: cargo test --locked --test api_smoke --test fresh_install_smoke
