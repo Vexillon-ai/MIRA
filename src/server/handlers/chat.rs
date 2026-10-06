@@ -801,6 +801,7 @@ fn build_onboarding_turn_context(
     inject.insert("_conversation_id".to_string(), serde_json::Value::String(conv_id.to_owned()));
 
     TurnContext {
+        provider_request_context: None,
         system_prompt_override: Some(system_prompt),
         allowed_tool_names:     Some(allowed),
         inject_tool_args:       inject,

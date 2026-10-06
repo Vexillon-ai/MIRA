@@ -44,6 +44,7 @@ use crate::MiraError;
 // without permanently mutating `AgentCore`.
 #[derive(Debug, Default, Clone)]
 pub struct TurnContext {
+    pub provider_request_context: Option<crate::providers::ProviderRequestContext>,
     // Replaces the base system prompt for this turn. Memory context is still
     // appended on top, so callers can treat this as "persona + instructions"
     // and expect memory to layer in.
@@ -1370,6 +1371,10 @@ impl AgentCore {
         // large result that arrives during it; on a small local window one big
         // result overflows the model. 0 (unbudgeted cloud/legacy) = no clamp.
         let tool_result_cap_bytes = effective_ctx;
+        let provider_request_context = context.provider_request_context.clone()
+            .unwrap_or_else(|| crate::providers::ProviderRequestContext {
+                session_id: Some(session_id.to_string()),
+            });
         let (response_text, usage) = tool_loop::run_tool_loop_with_provider_context(
             provider,
             &self.tools,
@@ -1384,7 +1389,7 @@ impl AgentCore {
             expander,
             expand_pool,
             tool_result_cap_bytes,
-            &crate::providers::ProviderRequestContext { session_id: Some(session_id.to_string()) },
+            &provider_request_context,
         ).await?;
 
         // ── 4. Emit Done ──────────────────────────────────────────────────────
@@ -1810,6 +1815,38 @@ mod tests {
         async fn health_check(&self) -> bool { true }
     }
 
+    struct ContextCapturingProvider {
+        seen: std::sync::Arc<std::sync::Mutex<Option<crate::providers::ProviderRequestContext>>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ContextCapturingProvider {
+        fn name(&self) -> &str { "context-capturing" }
+
+        async fn generate(&self, _m: &[ChatMessage], _o: &GenerationOptions)
+            -> Result<GenerationResponse, MiraError>
+        {
+            Ok(GenerationResponse {
+                content: "ok".into(), tool_calls: None, reasoning: None,
+                usage: TokenUsage::default(), provider_id: ProviderId::Local("context-capturing".into()),
+                model_name: "context-capturing".into(), fallback: None,
+            })
+        }
+
+        async fn generate_stream_with_context(
+            &self,
+            messages: &[ChatMessage],
+            options: &GenerationOptions,
+            on_token: &mut (dyn FnMut(String) + Send),
+            context: &crate::providers::ProviderRequestContext,
+        ) -> Result<GenerationResponse, MiraError> {
+            *self.seen.lock().unwrap() = Some(context.clone());
+            self.generate_stream(messages, options, on_token).await
+        }
+
+        async fn health_check(&self) -> bool { true }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     async fn make_core(reply: &str) -> Arc<AgentCore> {
@@ -1834,6 +1871,33 @@ mod tests {
         let sessions = Arc::new(SessionStore::new());
 
         Arc::new(AgentCore::new(config, provider, memory, tools, sessions))
+    }
+
+    #[tokio::test]
+    async fn provider_context_reaches_background_style_turn() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let mut cfg = MiraConfig::default();
+        cfg.agent.tool_mode = "disabled".to_string();
+        cfg.data_dir = dir.path().to_string_lossy().to_string();
+        cfg.memory.embedding.provider = "lmstudio".to_string();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let provider = Arc::new(ContextCapturingProvider { seen: seen.clone() }) as Arc<dyn ModelProvider>;
+        let memory = Arc::new(MemorySystem::new_keyword_only(dir.path().join("memory.db")).unwrap());
+        let core = Arc::new(AgentCore::new(
+            Arc::new(cfg), provider, memory, Arc::new(ToolRegistry::new()), Arc::new(SessionStore::new()),
+        ));
+        let context = TurnContext {
+            provider_request_context: Some(crate::providers::ProviderRequestContext {
+                session_id: Some("companion-alice".into()),
+            }),
+            ..TurnContext::default()
+        };
+        let rx = core.process_with_context(
+            "history-conversation", "alice", "web", "background briefing", None, context,
+        ).await.unwrap();
+        let _ = AgentCore::collect_response(rx).await;
+        assert_eq!(seen.lock().unwrap().as_ref().and_then(|c| c.session_id.as_deref()), Some("companion-alice"));
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────

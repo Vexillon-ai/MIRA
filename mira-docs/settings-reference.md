@@ -15,7 +15,7 @@
 
 ## primary_provider
 
-- **`primary_provider`** (string; one of: `ollama`, `lmstudio`, `openrouter`, `openai`, `deepseek`, `moonshot`, `groq`, `xai`, `openai_compat`, `anthropic`, `gemini`) — The AI provider MIRA uses for chat by default. Must match the slug of a configured provider under `providers`. Can be switched at runtime with /provider-use.
+- **`primary_provider`** (string; one of: `ollama`, `lmstudio`, `openrouter`, `openai`, `opencode`, `deepseek`, `moonshot`, `groq`, `xai`, `openai_compat`, `anthropic`, `gemini`) — The AI provider MIRA uses for chat by default. Must match the slug of a configured provider under `providers`. Can be switched at runtime with /provider-use.
 
 ## failover_providers
 
@@ -51,6 +51,13 @@ _AI provider connection and model settings. Only configure the providers you int
 - **`providers.openai.default_model`** (string) — Examples: gpt-4o, gpt-4o-mini, o1, o3-mini.
 - **`providers.openai.available_models`** (array) — Models the admin has added for this provider — shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers.
 - **`providers.openai.timeout_secs`** (integer) — 
+- **`providers.opencode`** (object) — OpenCode Go OpenAI-compatible API. Set api_key to enable; leave null to skip registration.
+- **`providers.opencode.enabled`** (boolean) — When false, skip registration. Default true.
+- **`providers.opencode.api_key`** (string) — OpenCode Go API key. Keep secrets out of source control.
+- **`providers.opencode.base_url`** (string) — OpenCode Go base URL; default https://opencode.ai/zen/go/v1.
+- **`providers.opencode.default_model`** (string) — Chat Completions compatible model identifier, for example glm-5.3-flash.
+- **`providers.opencode.available_models`** (array) — Models the admin has added for this provider — shown in the chat-page dropdown and anywhere a model can be picked. Empty = treat default_model as the sole entry. Populated via the catalog's Add button on /providers.
+- **`providers.opencode.timeout_secs`** (integer) — Request timeout in seconds.
 - **`providers.deepseek`** (object) — DeepSeek (https://platform.deepseek.com). OpenAI-compatible. Default model deepseek-chat; deepseek-reasoner for R1-style chain-of-thought.
 - **`providers.deepseek.enabled`** (boolean) — When false, skip registration. Default true.
 - **`providers.deepseek.api_key`** (string) — 
