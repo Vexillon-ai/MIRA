@@ -13,7 +13,8 @@ Pull requests are still welcome here. Here's what happens to yours:
 
 1. **You open a pull request** against `main`.
 2. **Automated checks run:** a web UI build, a `--locked` release build, and the
-   test suite.
+   test suite. On your first PR you'll also be asked to sign our
+   [CLA](#contributor-license-agreement).
 3. **A maintainer reviews it.** We may ask for changes.
 4. **Once accepted, it's carried upstream.** Your change is imported into the
    source repository (you stay the author), built and tested there.
@@ -66,7 +67,17 @@ Please **don't** open a public issue or pull request for security
 vulnerabilities. Report them privately via GitHub's
 [security advisory form](https://github.com/Vexillon-ai/MIRA/security/advisories/new).
 
+## Contributor License Agreement
+
+Before we can accept your first pull request, you need to sign the **MIRA
+Contributor License Agreement (CLA)**. The CLA bot will comment on your PR with a
+link, and signing takes one click with your GitHub account. You only sign once.
+It covers all your future contributions.
+
+The CLA is a **license, not a copyright transfer**: you keep the copyright in your
+work. It lets the project keep its licensing options open, and it commits us to
+keep every accepted contribution available under the open-source license.
+
 ## License
 
-MIRA is licensed under the [GNU AGPL v3.0 or later](../LICENSE). By
-contributing, you agree that your contributions are licensed under the same terms.
+MIRA is licensed under the [GNU AGPL v3.0 or later](../LICENSE).
