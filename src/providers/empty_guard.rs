@@ -143,6 +143,69 @@ impl ModelProvider for EmptyRetryProvider {
         }
     }
 
+    async fn generate_with_context(
+        &self,
+        messages: &[ChatMessage],
+        options:  &GenerationOptions,
+        context:  &crate::providers::ProviderRequestContext,
+    ) -> Result<GenerationResponse, crate::MiraError> {
+        let mut attempt = 0u32;
+        loop {
+            let resp = self.inner.generate_with_context(messages, options, context).await?;
+            if !is_empty_completion(&resp) {
+                return Ok(resp);
+            }
+            attempt += 1;
+            if attempt > self.max_retries {
+                warn!(
+                    "empty-retry: provider '{}' returned an empty completion on all {} \
+                     attempt(s); failing the turn as a provider error",
+                    self.inner.name(), attempt
+                );
+                return Err(Self::exhausted_error(attempt));
+            }
+            warn!(
+                "empty-retry: provider '{}' returned an empty completion; re-issuing \
+                 (retry {}/{})",
+                self.inner.name(), attempt, self.max_retries
+            );
+        }
+    }
+
+    async fn generate_stream_with_context(
+        &self,
+        messages: &[ChatMessage],
+        options:  &GenerationOptions,
+        on_token: &mut (dyn FnMut(String) + Send),
+        context:  &crate::providers::ProviderRequestContext,
+    ) -> Result<GenerationResponse, crate::MiraError> {
+        // An empty stream forwards no content tokens to `on_token`, so re-issuing
+        // and forwarding the next attempt's tokens never double-prints anything.
+        let mut attempt = 0u32;
+        loop {
+            let resp = self.inner.generate_stream_with_context(
+                messages, options, on_token, context,
+            ).await?;
+            if !is_empty_completion(&resp) {
+                return Ok(resp);
+            }
+            attempt += 1;
+            if attempt > self.max_retries {
+                warn!(
+                    "empty-retry: provider '{}' streamed an empty completion on all {} \
+                     attempt(s); failing the turn as a provider error",
+                    self.inner.name(), attempt
+                );
+                return Err(Self::exhausted_error(attempt));
+            }
+            warn!(
+                "empty-retry: provider '{}' streamed an empty completion; re-issuing \
+                 (retry {}/{})",
+                self.inner.name(), attempt, self.max_retries
+            );
+        }
+    }
+
     async fn health_check(&self) -> bool { self.inner.health_check().await }
 }
 
@@ -150,6 +213,7 @@ impl ModelProvider for EmptyRetryProvider {
 mod tests {
     use super::*;
     use crate::types::{ProviderId, TokenUsage, ToolCall};
+    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn resp(content: &str, tool_calls: Option<Vec<ToolCall>>, reasoning: Option<&str>) -> GenerationResponse {
@@ -191,6 +255,74 @@ mod tests {
         async fn health_check(&self) -> bool { true }
     }
 
+    struct ContextFlakyProvider {
+        non_stream_calls: AtomicUsize,
+        stream_calls: AtomicUsize,
+        empties: usize,
+        contexts: Mutex<Vec<String>>,
+    }
+
+    impl ContextFlakyProvider {
+        fn record_context(&self, context: &crate::providers::ProviderRequestContext) {
+            self.contexts.lock().unwrap().push(
+                context.session_id.clone().unwrap_or_default(),
+            );
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for ContextFlakyProvider {
+        fn name(&self) -> &str { "context-flaky" }
+
+        async fn generate(&self, _m: &[ChatMessage], _o: &GenerationOptions)
+            -> Result<GenerationResponse, crate::MiraError> {
+            Ok(resp("unused", None, None))
+        }
+
+        async fn generate_with_context(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &GenerationOptions,
+            context: &crate::providers::ProviderRequestContext,
+        ) -> Result<GenerationResponse, crate::MiraError> {
+            self.record_context(context);
+            let n = self.non_stream_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(if n < self.empties {
+                resp("", None, None)
+            } else {
+                resp("real answer", None, None)
+            })
+        }
+
+        async fn generate_stream_with_context(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &GenerationOptions,
+            on_token: &mut (dyn FnMut(String) + Send),
+            context: &crate::providers::ProviderRequestContext,
+        ) -> Result<GenerationResponse, crate::MiraError> {
+            self.record_context(context);
+            let n = self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            if n < self.empties {
+                Ok(resp("", None, None))
+            } else {
+                on_token("real answer".to_string());
+                Ok(resp("real answer", None, None))
+            }
+        }
+
+        async fn health_check(&self) -> bool { true }
+    }
+
+    fn context_flaky(empties: usize) -> Arc<ContextFlakyProvider> {
+        Arc::new(ContextFlakyProvider {
+            non_stream_calls: AtomicUsize::new(0),
+            stream_calls: AtomicUsize::new(0),
+            empties,
+            contexts: Mutex::new(Vec::new()),
+        })
+    }
+
     #[tokio::test]
     async fn retries_past_empties_then_succeeds() {
         let inner = Arc::new(FlakyProvider { calls: AtomicUsize::new(0), empties: 2 });
@@ -216,5 +348,36 @@ mod tests {
         let r = g.generate(&[], &GenerationOptions::default()).await.unwrap();
         assert!(r.content.is_empty(), "disabled: the empty passes straight through");
         assert_eq!(inner.calls.load(Ordering::SeqCst), 1, "no retries when disabled");
+    }
+
+    #[tokio::test]
+    async fn context_survives_non_streaming_empty_retry() {
+        let inner = context_flaky(1);
+        let g = guard(inner.clone(), EmptyResponseRetryConfig { enabled: true, max_retries: 1 });
+        let context = crate::providers::ProviderRequestContext {
+            session_id: Some("session-42".into()),
+        };
+        let response = g.generate_with_context(&[], &GenerationOptions::default(), &context)
+            .await.unwrap();
+        assert_eq!(response.content, "real answer");
+        assert_eq!(inner.non_stream_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(inner.contexts.lock().unwrap().as_slice(), ["session-42", "session-42"]);
+    }
+
+    #[tokio::test]
+    async fn context_survives_streaming_empty_retry_without_duplicate_tokens() {
+        let inner = context_flaky(1);
+        let g = guard(inner.clone(), EmptyResponseRetryConfig { enabled: true, max_retries: 1 });
+        let context = crate::providers::ProviderRequestContext {
+            session_id: Some("session-42".into()),
+        };
+        let mut visible = String::new();
+        let response = g.generate_stream_with_context(
+            &[], &GenerationOptions::default(), &mut |token| visible.push_str(&token), &context,
+        ).await.unwrap();
+        assert_eq!(response.content, "real answer");
+        assert_eq!(visible, "real answer");
+        assert_eq!(inner.stream_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(inner.contexts.lock().unwrap().as_slice(), ["session-42", "session-42"]);
     }
 }
