@@ -621,6 +621,30 @@ mod tests {
     }
 
     #[test]
+    fn prompt_cache_is_never_serialized_onto_the_wire() {
+        // Regression (GH mirror issue #11): `prompt_cache` is an internal
+        // Anthropic-only hint. It `#[serde(flatten)]`s through GenerationOptions
+        // into the OpenAI-shaped request body; strict backends (OpenAI) reject
+        // the call with "400 — Unrecognized request argument supplied:
+        // prompt_cache". It must never appear in the serialized body, whether
+        // true or false.
+        for flag in [false, true] {
+            let opts = GenerationOptions { prompt_cache: flag, ..Default::default() };
+            let req = ChatRequest {
+                model:    "test-model",
+                messages: vec![],
+                stream:   false,
+                options:  &opts,
+            };
+            let v = serde_json::to_value(&req).unwrap();
+            assert!(
+                v.get("prompt_cache").is_none(),
+                "prompt_cache leaked onto the wire (flag={flag}): {v}"
+            );
+        }
+    }
+
+    #[test]
     fn client_constructs_from_config() {
         let c = OpenAiCompatClient::new(cfg("openai", "https://api.openai.com/v1"));
         assert_eq!(c.provider_name(), "openai");

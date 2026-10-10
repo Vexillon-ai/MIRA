@@ -91,7 +91,16 @@ pub struct GenerationOptions {
     /// with `cache_control` so identical prefixes on later turns are read from
     /// cache. Providers with automatic prefix caching (OpenAI, Gemini) ignore
     /// it. Set from `agent.prompt_cache_enabled`. Defaults to `false`.
-    #[serde(default)]
+    ///
+    /// `skip_serializing`: this is an internal hint consumed programmatically
+    /// by the Anthropic wire layer, NOT a wire parameter. The OpenAI-shaped
+    /// providers (openai_compat, openrouter, lmstudio, ollama) `#[serde(flatten)]`
+    /// `GenerationOptions` straight into their request bodies; without this skip,
+    /// `prompt_cache` leaks onto `/v1/chat/completions` and strict backends
+    /// (OpenAI itself) reject the call with `400 — Unrecognized request argument
+    /// supplied: prompt_cache`. Deserialization is preserved so config/API can
+    /// still set it.
+    #[serde(default, skip_serializing)]
     pub prompt_cache: bool,
 }
 

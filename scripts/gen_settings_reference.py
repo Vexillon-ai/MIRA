@@ -91,7 +91,7 @@ def emit_children(props: dict, prefix: str, out: list, top: frozenset):
 
 
 def generate() -> str:
-    schema = json.loads(SCHEMA.read_text())
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
     props = schema.get("properties", {})
     top = frozenset(props.keys())
     lines = [HEADER]
@@ -116,13 +116,17 @@ def generate() -> str:
 def main():
     content = generate()
     if "--check" in sys.argv:
-        current = OUT.read_text() if OUT.exists() else ""
+        # Compare raw bytes so a CRLF copy is reported stale (the schema-coverage
+        # test matches LF-delimited "## <key>" headers).
+        current = OUT.read_bytes().decode("utf-8") if OUT.exists() else ""
         if current != content:
             print("settings-reference.md is STALE — run scripts/gen_settings_reference.py", file=sys.stderr)
             sys.exit(1)
         print("settings-reference.md is up to date.")
         return
-    OUT.write_text(content)
+    # Always LF, even on Windows: a CRLF copy fails the schema-coverage test.
+    with OUT.open("w", encoding="utf-8", newline="\n") as fh:
+        fh.write(content)
     print(f"wrote {OUT.relative_to(ROOT)}")
 
 
