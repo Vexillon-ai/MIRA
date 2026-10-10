@@ -72,6 +72,10 @@ surveillance. Mention it once; keep it brief.]";
 // preventing a new conversation row per fire.
 const CHECKIN_CONV_TITLE: &str = "Companion check-ins";
 
+fn companion_provider_session_id(user_id: &str) -> String {
+    format!("companion-{user_id}")
+}
+
 // Concrete outcome of one fire, returned to the scheduler so it can
 // stamp `last_checkin_at` only on success.
 #[derive(Debug)]
@@ -317,6 +321,9 @@ impl CompanionDispatcher {
         //  in history; we add the assistant text in this code path
         //  ourselves).
         let turn_ctx = TurnContext {
+            provider_request_context: Some(crate::providers::ProviderRequestContext {
+                session_id: Some(companion_provider_session_id(user_id)),
+            }),
             // Constrain the tool set — this is a check-in, not a
             // task. Leaving the full chat palette in lets the model
             // accidentally fire web_fetch or recall when it should
@@ -692,6 +699,9 @@ impl CompanionDispatcher {
         };
 
         let turn_ctx = TurnContext {
+            provider_request_context: Some(crate::providers::ProviderRequestContext {
+                session_id: Some(companion_provider_session_id(user_id)),
+            }),
             // Same restriction as check-ins — the briefing is content,
             // not a tool-calling moment. Empty allowlist + the
             // explicit "do not call tools" line in the cue.

@@ -22,6 +22,10 @@ pub(crate) mod errors;
 use async_trait::async_trait;
 use crate::types::{ChatMessage, GenerationOptions, GenerationResponse};
 
+/// Metadata scoped to a single conversation turn. Auxiliary requests use the default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderRequestContext { pub session_id: Option<String> }
+
 /// Make an OpenAI-style base URL forgiving about the API version path.
 ///
 /// The OpenAI-compatible endpoints (`/chat/completions`, `/models`) live under
@@ -72,6 +76,12 @@ pub trait ModelProvider: Send + Sync {
         options:  &GenerationOptions,
     ) -> Result<GenerationResponse, crate::MiraError>;
 
+    /// Context-aware call; existing providers ignore request metadata by default.
+    async fn generate_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        _context: &ProviderRequestContext) -> Result<GenerationResponse, crate::MiraError> {
+        self.generate(messages, options).await
+    }
+
     /// Generate a response and call `on_token` for each token as it arrives.
     ///
     /// Returns the complete `GenerationResponse` after streaming finishes.
@@ -86,6 +96,12 @@ pub trait ModelProvider: Send + Sync {
         let resp = self.generate(messages, options).await?;
         on_token(resp.content.clone());
         Ok(resp)
+    }
+
+    async fn generate_stream_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        on_token: &mut (dyn FnMut(String) + Send), _context: &ProviderRequestContext)
+        -> Result<GenerationResponse, crate::MiraError> {
+        self.generate_stream(messages, options, on_token).await
     }
 
     /// Whether this provider wraps generation in the degenerate-output guard.

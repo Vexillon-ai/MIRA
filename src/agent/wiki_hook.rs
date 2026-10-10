@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 use crate::config::WikiAutoExtractConfig;
 use crate::providers::ModelProvider;
 use crate::wiki::{
-    extract_wiki_ops, frontmatter, Provenance, WikiPath, WikiRegistry, WikiSystem,
+    extract_wiki_ops_with_context, frontmatter, Provenance, WikiPath, WikiRegistry, WikiSystem,
 };
 
 /// ~4 chars per token is the conventional cheap heuristic. Real-world
@@ -215,12 +215,31 @@ pub fn post_hook(
     assistant_msg: String,
     cfg: WikiAutoExtractConfig,
 ) {
+    post_hook_with_context(
+        registry, provider, user_id, conversation_id, turn_id, user_msg, assistant_msg, cfg,
+        crate::providers::ProviderRequestContext::default(),
+    );
+}
+
+/// Context-aware variant used by AgentCore for conversation-scoped providers.
+pub fn post_hook_with_context(
+    registry: Arc<WikiRegistry>,
+    provider: Arc<dyn ModelProvider>,
+    user_id: String,
+    conversation_id: String,
+    turn_id: String,
+    user_msg: String,
+    assistant_msg: String,
+    cfg: WikiAutoExtractConfig,
+    request_context: crate::providers::ProviderRequestContext,
+) {
     if cfg.mode.eq_ignore_ascii_case("off") {
         debug!("wiki post_hook: mode=off, skipping");
         return;
     }
-    tokio::spawn(run_wiki_extraction(
+    tokio::spawn(run_wiki_extraction_with_context(
         registry, provider, user_id, conversation_id, turn_id, user_msg, assistant_msg, cfg,
+        request_context,
     ));
 }
 
@@ -238,6 +257,24 @@ pub async fn run_wiki_extraction(
     assistant_msg: String,
     cfg: WikiAutoExtractConfig,
 ) {
+    run_wiki_extraction_with_context(
+        registry, provider, user_id, conversation_id, turn_id, user_msg, assistant_msg, cfg,
+        crate::providers::ProviderRequestContext::default(),
+    ).await;
+}
+
+/// Awaitable context-aware core for [`post_hook_with_context`].
+pub async fn run_wiki_extraction_with_context(
+    registry: Arc<WikiRegistry>,
+    provider: Arc<dyn ModelProvider>,
+    user_id: String,
+    conversation_id: String,
+    turn_id: String,
+    user_msg: String,
+    assistant_msg: String,
+    cfg: WikiAutoExtractConfig,
+    request_context: crate::providers::ProviderRequestContext,
+) {
     if cfg.mode.eq_ignore_ascii_case("off") {
         return;
     }
@@ -249,13 +286,14 @@ pub async fn run_wiki_extraction(
         }
     };
     let existing = wiki.store().list_pages().unwrap_or_default();
-    let ops = extract_wiki_ops(
+    let ops = extract_wiki_ops_with_context(
         &provider,
         &user_msg,
         &assistant_msg,
         &existing,
         cfg.min_confidence,
         cfg.max_ops_per_turn,
+        &request_context,
     ).await;
 
     if ops.is_empty() {
