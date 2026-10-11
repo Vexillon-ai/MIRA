@@ -157,6 +157,14 @@ impl GuestManager {
         })
     }
 
+    /// The guest's profile timezone, if their seed set one. Lets the mint
+    /// response carry the tz so the web UI renders calendar/automation times in
+    /// the user's zone from the first paint, not the browser's. `None` when no
+    /// profile tz is set (e.g. a plain, non-demo instance).
+    pub fn profile_timezone(&self, user_id: &str) -> Option<String> {
+        self.auth.get_profile(user_id).ok().flatten().and_then(|p| p.timezone)
+    }
+
     /// Resolve a configured seed dir: absolute as-is, else relative to the data
     /// dir.
     fn resolve_seed_dir(&self, dir: &str) -> PathBuf {

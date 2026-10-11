@@ -105,9 +105,12 @@ pub async fn login_handler(
         Err(_) => (StatusCode::UNAUTHORIZED, "Invalid credentials").into_response(),
         Ok((pair, user)) => {
             let cookie = set_refresh_cookie(&pair.refresh_token, 7 * 24 * 3600);
+            let tz = auth.get_profile(&user.id).ok().flatten().and_then(|p| p.timezone);
+            let mut user_resp = UserResponse::from(user);
+            user_resp.timezone = tz;
             let body = axum::Json(LoginResponse {
                 access_token: pair.access_token,
-                user:         UserResponse::from(user),
+                user:         user_resp,
             });
             let mut resp = body.into_response();
             resp.headers_mut().insert(
@@ -205,8 +208,13 @@ pub async fn refresh_handler(
 
 // ── GET /api/auth/me ──────────────────────────────────────────────────────────
 
-pub async fn me_handler(AuthUser(user): AuthUser) -> impl IntoResponse {
-    axum::Json(UserResponse::from(user)).into_response()
+pub async fn me_handler(
+    AuthUser(user): AuthUser,
+    Extension(auth): Extension<Arc<LocalAuthService>>,
+) -> impl IntoResponse {
+    let mut resp = UserResponse::from(user);
+    resp.timezone = auth.get_profile(&resp.id).ok().flatten().and_then(|p| p.timezone);
+    axum::Json(resp).into_response()
 }
 
 // ── QR device pairing (mobile onboarding, 0.282.0) ─────────────────────────────
@@ -611,6 +619,9 @@ pub async fn guest_handler() -> impl IntoResponse {
     match mgr.mint().await {
         Ok(session) => {
             let (name, base_url) = mgr.server_info();
+            let tz = mgr.profile_timezone(&session.user.id);
+            let mut user_resp = UserResponse::from(session.user);
+            user_resp.timezone = tz;
             let resp = GuestSessionResponse {
                 server: GuestServerInfo {
                     name: name.to_string(),
@@ -620,7 +631,7 @@ pub async fn guest_handler() -> impl IntoResponse {
                 token_type:       "Bearer",
                 expires_at_ms:    session.expires_at_ms,
                 session_ttl_secs: session.session_ttl_secs,
-                user:             UserResponse::from(session.user),
+                user:             user_resp,
             };
             (StatusCode::CREATED, Json(resp)).into_response()
         }

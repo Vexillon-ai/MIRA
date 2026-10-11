@@ -38,6 +38,10 @@ export interface User {
   phone: string | null
   preferred_contact: string | null
   avatar: string | null
+  /** IANA timezone from the user's profile (e.g. "Pacific/Auckland"), when set.
+   *  Lets the UI render calendar + automation times in the user's own zone
+   *  instead of the browser's. Absent → fall back to the browser timezone. */
+  timezone?: string | null
   voice_prefs: VoicePrefsMap
 }
 

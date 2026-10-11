@@ -57,6 +57,13 @@ pub struct UserResponse {
     pub phone:             Option<String>,
     pub preferred_contact: Option<String>,
     pub avatar:            Option<String>,
+    /// The user's IANA timezone from their profile (e.g. "Pacific/Auckland"),
+    /// when set. Lets the web UI render calendar + automation times in the
+    /// user's own timezone instead of the browser's. `None` → the UI falls back
+    /// to the browser timezone. Populated by handlers that have profile access
+    /// (`/api/auth/me`, login, guest mint); defaults to `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone:          Option<String>,
     /// Per-channel voice preferences keyed by channel id (`web`, `tui`,
     /// `telegram`, `signal`, plus any plugin-registered channels). Each
     /// entry can override the response policy, voice id, or both.
@@ -78,6 +85,7 @@ impl From<User> for UserResponse {
             phone:             u.phone,
             preferred_contact: u.preferred_contact,
             avatar:            u.avatar,
+            timezone:          None,
             voice_prefs:       parse_user_prefs(u.voice_prefs.as_deref()),
         }
     }

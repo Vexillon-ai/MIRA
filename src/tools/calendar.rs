@@ -141,7 +141,10 @@ impl Tool for CalendarListEventsTool {
          Returns native MIRA events plus any events mirrored from an \
          external calendar (CalDAV / Google / Outlook) when sync is \
          configured. Times must be ISO-8601 strings or epoch ms; defaults \
-         to the next 30 days when no range is given."
+         to the next 30 days when no range is given. Each event includes \
+         `when_local`, a ready-to-read local date/time string — ALWAYS quote \
+         it verbatim when telling the user when something is; never compute or \
+         convert weekdays or times yourself from the raw timestamps."
     }
     fn tier(&self) -> Tier { Tier::Pure }
     fn args_schema(&self) -> Value {
@@ -169,11 +172,32 @@ impl Tool for CalendarListEventsTool {
         let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).clamp(1, 500);
 
         let events = self.store.list_events(&caller, from, to, limit)?;
+        // Enrich each event with `when_local` — a ready-to-read local-time string
+        // in the caller's timezone (e.g. "Sunday 11 Oct, 5:06 PM NZDT"). Small
+        // models otherwise convert the raw epoch-ms themselves and routinely get
+        // the weekday and time wrong; the model is told to use `when_local`
+        // verbatim and never compute dates itself.
+        let tz_parsed: Option<chrono_tz::Tz> = tz.and_then(|t| t.parse().ok());
+        let events_json: Vec<Value> = events.iter().map(|e| {
+            let mut v = serde_json::to_value(e).unwrap_or_else(|_| json!({}));
+            if let (Some(tzp), Some(obj)) = (tz_parsed, v.as_object_mut()) {
+                if let Some(dt) = Utc.timestamp_millis_opt(e.starts_at).single() {
+                    let local = dt.with_timezone(&tzp);
+                    let s = if e.all_day {
+                        local.format("%A %-d %b (all day)").to_string()
+                    } else {
+                        local.format("%A %-d %b, %-I:%M %p %Z").to_string()
+                    };
+                    obj.insert("when_local".into(), json!(s));
+                }
+            }
+            v
+        }).collect();
         let body = json!({
             "from":   from,
             "to":     to,
-            "count":  events.len(),
-            "events": events,
+            "count":  events_json.len(),
+            "events": events_json,
         });
         Ok(ToolResult::success(body.to_string()))
     }

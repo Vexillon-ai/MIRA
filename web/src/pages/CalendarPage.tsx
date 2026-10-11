@@ -63,11 +63,18 @@ function fromLocalInput(s: string): number {
   return new Date(s).getTime()
 }
 
-function fmtDateTime(ms: number, allDay: boolean) {
+function fmtDateTime(ms: number, allDay: boolean, tz?: string) {
   const d = new Date(ms)
   return allDay
-    ? d.toLocaleDateString()
-    : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+    ? d.toLocaleDateString(undefined, { timeZone: tz })
+    : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short', timeZone: tz })
+}
+
+// Short "h:mm AM" time in the user's profile timezone (falls back to the
+// browser zone when `tz` is undefined). Keeps calendar times consistent with
+// what the agent and the user's profile consider "local".
+function fmtTime(ms: number, tz?: string) {
+  return new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', timeZone: tz })
 }
 
 // ── Per-user calendar connection ──────────────────────────────────────────────
@@ -211,6 +218,9 @@ function CalDavConnectPanel({ connected }: { connected: boolean }) {
 export default function CalendarPage() {
   const qc       = useQueryClient()
   const { user } = useAuthStore()
+  // Render calendar times in the user's profile timezone (falls back to the
+  // browser zone when unset), so they match the agent + the user's locale.
+  const userTz = user?.timezone ?? undefined
   const isAdmin  = user?.role === 'admin'
   const [params, setParams] = useSearchParams()
 
@@ -569,8 +579,7 @@ export default function CalendarPage() {
                       {scoped && <Users size={9} style={{ opacity: 0.85, flexShrink: 0 }} />}
                       {!ev.all_day && (
                         <span style={{ fontSize: 9, opacity: 0.7, flexShrink: 0 }}>
-                          {new Date(ev.starts_at).toLocaleTimeString(undefined,
-                            { hour: '2-digit', minute: '2-digit' })}
+                          {fmtTime(ev.starts_at, userTz)}
                         </span>
                       )}
                       {ev.summary}
@@ -582,12 +591,11 @@ export default function CalendarPage() {
                       to="/automations"
                       className={`${styles.item} ${styles.itemAutomation}`}
                       onClick={(e) => e.stopPropagation()}
-                      title={`${s.name} — fires ${new Date((s.next_run_at ?? 0) * 1000).toLocaleString()}`}
+                      title={`${s.name} — fires ${new Date((s.next_run_at ?? 0) * 1000).toLocaleString(undefined, { timeZone: userTz })}`}
                     >
                       <Bot size={9} style={{ opacity: 0.8 }} />
                       <span style={{ fontSize: 9, opacity: 0.7, flexShrink: 0 }}>
-                        {new Date((s.next_run_at ?? 0) * 1000).toLocaleTimeString(undefined,
-                          { hour: '2-digit', minute: '2-digit' })}
+                        {fmtTime((s.next_run_at ?? 0) * 1000, userTz)}
                       </span>
                       {s.name}
                     </Link>
@@ -596,11 +604,11 @@ export default function CalendarPage() {
                     <div
                       className={`${styles.item} ${styles.itemBriefing}`}
                       onClick={(e) => e.stopPropagation()}
-                      title={`MIRA will send your morning briefing at ${new Date(briefingsByDay.get(day.toDateString())!).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`}
+                      title={`MIRA will send your morning briefing at ${fmtTime(briefingsByDay.get(day.toDateString())!, userTz)}`}
                     >
                       <Sunrise size={9} style={{ opacity: 0.85 }} />
                       <span style={{ fontSize: 9, opacity: 0.7, flexShrink: 0 }}>
-                        {new Date(briefingsByDay.get(day.toDateString())!).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                        {fmtTime(briefingsByDay.get(day.toDateString())!, userTz)}
                       </span>
                       Briefing
                     </div>
@@ -629,11 +637,11 @@ export default function CalendarPage() {
             </div>
             <div className={styles.detailLine}>
               <strong>Starts</strong>
-              <span>{fmtDateTime(selectedEvent.starts_at, selectedEvent.all_day)}</span>
+              <span>{fmtDateTime(selectedEvent.starts_at, selectedEvent.all_day, userTz)}</span>
             </div>
             <div className={styles.detailLine}>
               <strong>Ends</strong>
-              <span>{fmtDateTime(selectedEvent.ends_at, selectedEvent.all_day)}</span>
+              <span>{fmtDateTime(selectedEvent.ends_at, selectedEvent.all_day, userTz)}</span>
             </div>
             {selectedEvent.location && (
               <div className={styles.detailLine}>

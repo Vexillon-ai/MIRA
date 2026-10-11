@@ -629,7 +629,7 @@ function ScheduleRow({
           )}
         </div>
         <div className={styles.rowMeta}>
-          <span>Next: {fmtTs(sched.next_run_at)} ({fmtRelative(sched.next_run_at)})</span>
+          <span>Next: {fmtTsInTz(sched.next_run_at, sched.timezone)} ({fmtRelative(sched.next_run_at)})</span>
           <span>·</span>
           <span>Runs: {sched.run_count}</span>
           {sched.failure_count > 0 && (
@@ -792,7 +792,7 @@ function DetailDrawer({
           </div>
           <div className={styles.detailLine}>
             <strong>Next run</strong>
-            <span>{fmtTs(sched.next_run_at)} ({fmtRelative(sched.next_run_at)})</span>
+            <span>{fmtTsInTz(sched.next_run_at, sched.timezone)} ({fmtRelative(sched.next_run_at)})</span>
           </div>
           <div className={styles.detailLine}>
             <strong>Run count</strong>
