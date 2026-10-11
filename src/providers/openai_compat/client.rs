@@ -59,6 +59,8 @@ pub struct OpenAiCompatConfig {
     pub auth_header: AuthHeader,
     /// Extra request headers (e.g. OpenRouter's attribution pair).
     pub extra_headers: Vec<ExtraHeader>,
+    /// Optional header carrying a provider-specific request session.
+    pub session_header: Option<&'static str>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -314,9 +316,6 @@ impl OpenAiCompatClient {
     fn models_url(&self) -> String { format!("{}/models",           self.config.base_url) }
 
     fn apply_headers(&self, mut rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if self.config.provider_name == "opencode" {
-            rb = rb.header(reqwest::header::USER_AGENT, concat!("MIRA/", env!("CARGO_PKG_VERSION")));
-        }
         match &self.config.auth_header {
             AuthHeader::Bearer if !self.config.api_key.is_empty() => {
                 rb = rb.header("Authorization", format!("Bearer {}", self.config.api_key));
@@ -335,7 +334,7 @@ impl OpenAiCompatClient {
     }
 
     fn apply_request_context(&self, mut rb: reqwest::RequestBuilder, context: Option<&crate::providers::ProviderRequestContext>) -> reqwest::RequestBuilder {
-        if self.config.provider_name == "opencode" {
+        if let Some(session_header) = self.config.session_header {
             // OpenCode Go requires this header on every chat-completions
             // request. Keep the MIRA session when one is available so normal
             // chats retain request continuity and prompt-cache routing; the
@@ -345,7 +344,7 @@ impl OpenAiCompatClient {
                 .filter(|session| !session.is_empty())
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("mira-{}", uuid::Uuid::new_v4()));
-            rb = rb.header("x-opencode-session", session);
+            rb = rb.header(session_header, session);
         }
         rb
     }
@@ -649,6 +648,7 @@ mod tests {
             timeout_secs:  30,
             auth_header:   AuthHeader::Bearer,
             extra_headers: vec![],
+            session_header: None,
         }
     }
 
@@ -727,7 +727,13 @@ mod tests {
 
     #[test]
     fn opencode_request_context_preserves_explicit_session_and_mira_user_agent() {
-        let client = OpenAiCompatClient::new(cfg("opencode", "https://opencode.ai/zen/v1"));
+        let mut opencode_cfg = cfg("not-opencode", "https://opencode.ai/zen/v1");
+        opencode_cfg.session_header = Some("x-opencode-session");
+        opencode_cfg.extra_headers = vec![ExtraHeader {
+            name: "User-Agent",
+            value: concat!("MIRA/", env!("CARGO_PKG_VERSION")).to_string(),
+        }];
+        let client = OpenAiCompatClient::new(opencode_cfg);
         let ctx = crate::providers::ProviderRequestContext { session_id: Some("web-conv-42".into()) };
         let req = client.apply_request_context(client.apply_headers(client.http.post("http://localhost/test")), Some(&ctx)).build().unwrap();
         assert_eq!(req.headers().get("x-opencode-session").and_then(|v| v.to_str().ok()), Some("web-conv-42"));
@@ -739,7 +745,9 @@ mod tests {
 
     #[test]
     fn opencode_requests_without_session_get_unique_fallback_sessions() {
-        let client = OpenAiCompatClient::new(cfg("opencode", "https://opencode.ai/zen/v1"));
+        let mut opencode_cfg = cfg("not-opencode", "https://opencode.ai/zen/v1");
+        opencode_cfg.session_header = Some("x-opencode-session");
+        let client = OpenAiCompatClient::new(opencode_cfg);
 
         let non_stream = client.apply_request_context(
             client.http.post("http://localhost/test"),
@@ -768,6 +776,26 @@ mod tests {
                 .build().unwrap();
             assert!(req.headers().get("x-opencode-session").is_none());
         }
+    }
+
+    #[test]
+    fn session_header_is_configured_independently_of_provider_name() {
+        let mut configured = cfg("arbitrary-provider", "https://example.test/v1");
+        configured.session_header = Some("x-custom-session");
+        let ctx = crate::providers::ProviderRequestContext {
+            session_id: Some("session-42".into()),
+        };
+        let req = OpenAiCompatClient::new(configured)
+            .apply_request_context(reqwest::Client::new().post("http://localhost/test"), Some(&ctx))
+            .build().unwrap();
+        assert_eq!(req.headers().get("x-custom-session").and_then(|v| v.to_str().ok()), Some("session-42"));
+
+        let mut disabled = cfg("opencode", "https://example.test/v1");
+        disabled.session_header = None;
+        let req = OpenAiCompatClient::new(disabled)
+            .apply_request_context(reqwest::Client::new().post("http://localhost/test"), Some(&ctx))
+            .build().unwrap();
+        assert!(req.headers().get("x-opencode-session").is_none());
     }
 
     #[test]

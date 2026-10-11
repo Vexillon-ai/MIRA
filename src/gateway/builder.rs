@@ -1888,7 +1888,7 @@ pub(crate) fn build_provider_chain(
         lmstudio::LmStudioProvider,
         local::OllamaProvider,
         openrouter::OpenRouterProvider,
-        openai_compat::{AuthHeader, OpenAiCompatClient, OpenAiCompatConfig},
+        openai_compat::{AuthHeader, ExtraHeader, OpenAiCompatClient, OpenAiCompatConfig},
         anthropic::AnthropicProvider,
         gemini::GeminiProvider,
     };
@@ -1959,7 +1959,15 @@ pub(crate) fn build_provider_chain(
                         model:         $cfg.default_model.clone(),
                         timeout_secs:  $cfg.timeout_secs,
                         auth_header:   AuthHeader::Bearer,
-                        extra_headers: vec![],
+                        extra_headers: if $slug == "opencode" {
+                            vec![ExtraHeader {
+                                name: "User-Agent",
+                                value: concat!("MIRA/", env!("CARGO_PKG_VERSION")).to_string(),
+                            }]
+                        } else { vec![] },
+                        session_header: if $slug == "opencode" {
+                            Some("x-opencode-session")
+                        } else { None },
                     }).with_degeneracy(config.agent.degeneracy_guard.clone());
                     providers.push(($slug, Box::new(client)));
                     info!("Provider: {} registered (model={})", $slug, $cfg.default_model);
@@ -2047,6 +2055,7 @@ pub(crate) fn build_provider_chain(
                     timeout_secs:  cc.timeout_secs,
                     auth_header:   auth,
                     extra_headers: vec![],
+                    session_header: None,
                 }).with_degeneracy(config.agent.degeneracy_guard.clone());
                 providers.push(("openai_compat", Box::new(client)));
                 info!("Provider: openai_compat '{}' registered (url={}, model={})",
@@ -2232,7 +2241,7 @@ pub(crate) fn build_single_provider(
         lmstudio::LmStudioProvider,
         local::OllamaProvider,
         openrouter::OpenRouterProvider,
-        openai_compat::{AuthHeader, OpenAiCompatClient, OpenAiCompatConfig},
+        openai_compat::{AuthHeader, ExtraHeader, OpenAiCompatClient, OpenAiCompatConfig},
         anthropic::AnthropicProvider,
         gemini::GeminiProvider,
     };
@@ -2247,7 +2256,14 @@ pub(crate) fn build_single_provider(
     let compat = |name: &str, key: String, base_url: String, model: String, timeout: u64| -> P {
         Arc::new(OpenAiCompatClient::new(OpenAiCompatConfig {
             provider_name: name.into(), base_url, api_key: key, model,
-            timeout_secs: timeout, auth_header: AuthHeader::Bearer, extra_headers: vec![],
+            timeout_secs: timeout, auth_header: AuthHeader::Bearer,
+            extra_headers: if name == "opencode" {
+                vec![ExtraHeader {
+                    name: "User-Agent",
+                    value: concat!("MIRA/", env!("CARGO_PKG_VERSION")).to_string(),
+                }]
+            } else { vec![] },
+            session_header: if name == "opencode" { Some("x-opencode-session") } else { None },
         }).with_degeneracy(config.agent.degeneracy_guard.clone()))
     };
 

@@ -54,7 +54,9 @@ pub async fn providers_health(
     Extension(live_cfg): Extension<Arc<LiveConfig>>,
 ) -> impl IntoResponse {
     use crate::providers::ModelProvider;
-    use crate::providers::openai_compat::{AuthHeader, OpenAiCompatClient, OpenAiCompatConfig};
+    use crate::providers::openai_compat::{
+        AuthHeader, ExtraHeader, OpenAiCompatClient, OpenAiCompatConfig,
+    };
 
     let cfg = live_cfg.get().await;
 
@@ -135,7 +137,15 @@ pub async fn providers_health(
                         model:         $cfg.default_model.clone(),
                         timeout_secs:  $cfg.timeout_secs,
                         auth_header:   AuthHeader::Bearer,
-                        extra_headers: vec![],
+                        extra_headers: if $slug == "opencode" {
+                            vec![ExtraHeader {
+                                name: "User-Agent",
+                                value: concat!("MIRA/", env!("CARGO_PKG_VERSION")).to_string(),
+                            }]
+                        } else { vec![] },
+                        session_header: if $slug == "opencode" {
+                            Some("x-opencode-session")
+                        } else { None },
                     };
                     let url   = $cfg.base_url.clone();
                     let model = $cfg.default_model.clone();
@@ -230,6 +240,7 @@ pub async fn providers_health(
                     timeout_secs:  cc.timeout_secs,
                     auth_header:   auth,
                     extra_headers: vec![],
+                    session_header: None,
                 };
                 let name  = cc.name.clone();
                 let url   = cc.base_url.clone();
@@ -691,7 +702,7 @@ pub async fn provider_catalog(
         apply_overlay, load_any, load_if_fresh, save_catalog, ModelCatalog,
     };
     use crate::providers::openai_compat::{
-        AuthHeader, OpenAiCompatClient, OpenAiCompatConfig,
+        AuthHeader, ExtraHeader, OpenAiCompatClient, OpenAiCompatConfig,
     };
     use crate::providers::anthropic::AnthropicProvider;
     use crate::providers::gemini::GeminiProvider;
@@ -735,6 +746,7 @@ pub async fn provider_catalog(
                 timeout_secs:  p.timeout_secs,
                 auth_header:   AuthHeader::Bearer,
                 extra_headers: vec![],
+                session_header: None,
             });
             client.fetch_model_ids().await
         }
@@ -743,7 +755,12 @@ pub async fn provider_catalog(
             let client = OpenAiCompatClient::new(OpenAiCompatConfig {
                 provider_name: "opencode".into(), base_url: p.base_url.clone(),
                 api_key: p.api_key.clone().unwrap_or_default(), model: p.default_model.clone(),
-                timeout_secs: p.timeout_secs, auth_header: AuthHeader::Bearer, extra_headers: vec![],
+                timeout_secs: p.timeout_secs, auth_header: AuthHeader::Bearer,
+                extra_headers: vec![ExtraHeader {
+                    name: "User-Agent",
+                    value: concat!("MIRA/", env!("CARGO_PKG_VERSION")).to_string(),
+                }],
+                session_header: Some("x-opencode-session"),
             });
             client.fetch_model_ids().await
         }
@@ -758,6 +775,7 @@ pub async fn provider_catalog(
                 timeout_secs:  p.timeout_secs,
                 auth_header:   AuthHeader::Bearer,
                 extra_headers: vec![],
+                session_header: None,
             });
             client.fetch_model_ids().await
         }
@@ -772,6 +790,7 @@ pub async fn provider_catalog(
                 timeout_secs:  p.timeout_secs,
                 auth_header:   AuthHeader::Bearer,
                 extra_headers: vec![],
+                session_header: None,
             });
             client.fetch_model_ids().await
         }
@@ -786,6 +805,7 @@ pub async fn provider_catalog(
                 timeout_secs:  p.timeout_secs,
                 auth_header:   AuthHeader::Bearer,
                 extra_headers: vec![],
+                session_header: None,
             });
             client.fetch_model_ids().await
         }
@@ -800,6 +820,7 @@ pub async fn provider_catalog(
                 timeout_secs:  p.timeout_secs,
                 auth_header:   AuthHeader::Bearer,
                 extra_headers: vec![],
+                session_header: None,
             });
             client.fetch_model_ids().await
         }
@@ -822,6 +843,7 @@ pub async fn provider_catalog(
                 timeout_secs:  p.timeout_secs,
                 auth_header:   auth,
                 extra_headers: vec![],
+                session_header: None,
             });
             client.fetch_model_ids().await
         }
