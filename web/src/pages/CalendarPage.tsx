@@ -568,7 +568,7 @@ export default function CalendarPage() {
                     >
                       {scoped && <Users size={9} style={{ opacity: 0.85, flexShrink: 0 }} />}
                       {!ev.all_day && (
-                        <span style={{ fontSize: 9, opacity: 0.7 }}>
+                        <span style={{ fontSize: 9, opacity: 0.7, flexShrink: 0 }}>
                           {new Date(ev.starts_at).toLocaleTimeString(undefined,
                             { hour: '2-digit', minute: '2-digit' })}
                         </span>
@@ -585,7 +585,7 @@ export default function CalendarPage() {
                       title={`${s.name} — fires ${new Date((s.next_run_at ?? 0) * 1000).toLocaleString()}`}
                     >
                       <Bot size={9} style={{ opacity: 0.8 }} />
-                      <span style={{ fontSize: 9, opacity: 0.7 }}>
+                      <span style={{ fontSize: 9, opacity: 0.7, flexShrink: 0 }}>
                         {new Date((s.next_run_at ?? 0) * 1000).toLocaleTimeString(undefined,
                           { hour: '2-digit', minute: '2-digit' })}
                       </span>
@@ -599,7 +599,7 @@ export default function CalendarPage() {
                       title={`MIRA will send your morning briefing at ${new Date(briefingsByDay.get(day.toDateString())!).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`}
                     >
                       <Sunrise size={9} style={{ opacity: 0.85 }} />
-                      <span style={{ fontSize: 9, opacity: 0.7 }}>
+                      <span style={{ fontSize: 9, opacity: 0.7, flexShrink: 0 }}>
                         {new Date(briefingsByDay.get(day.toDateString())!).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
                       </span>
                       Briefing

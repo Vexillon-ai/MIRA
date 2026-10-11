@@ -479,7 +479,9 @@ export default function ChatPage() {
                     className={styles.tokenTotals}
                     title="Context tokens (in) · cumulative output tokens"
                   >
-                    {contextTokens}↑ {totalOutputTokens}↓ tok
+                    {contextTokens > 0 && <>{contextTokens}↑ </>}
+                    {totalOutputTokens > 0 && <>{totalOutputTokens}↓ </>}
+                    tok
                     {cost !== null && <> · {formatUsd(cost)}</>}
                   </span>
                 )

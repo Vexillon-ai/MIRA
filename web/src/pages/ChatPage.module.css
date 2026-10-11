@@ -940,6 +940,14 @@
   color: var(--text-secondary);
 }
 
+/* Touch devices have no physical keyboard, so Enter/Shift+Enter/Esc hints are
+   noise — hide them. Also doubles as the mobile-app test surface. */
+@media (pointer: coarse) {
+  .hint {
+    display: none;
+  }
+}
+
 /* ── Slice H — chat toolbar + wiki pills ──────────────────────────────────── */
 .chatToolbar {
   display: flex;
