@@ -43,10 +43,27 @@ function isSameDay(a: Date, b: Date) {
       && a.getMonth()    === b.getMonth()
       && a.getDate()     === b.getDate()
 }
-function eventTouchesDay(ev: CalendarEvent, day: Date): boolean {
-  const dayStart = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime()
-  const dayEnd   = dayStart + 24 * 3600_000 - 1
-  return ev.starts_at <= dayEnd && ev.ends_at >= dayStart
+// `YYYY-MM-DD` for the calendar date a grid cell represents (the cell Date is a
+// browser-local midnight, so its Y-M-D IS that square's date).
+function gridYmd(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+// `YYYY-MM-DD` for an instant, resolved in the user's timezone (falls back to
+// the browser zone when `tz` is undefined). en-CA yields ISO date order.
+function ymdInTz(ms: number, tz?: string): string {
+  try { return new Date(ms).toLocaleDateString('en-CA', { timeZone: tz }) }
+  catch { return gridYmd(new Date(ms)) }
+}
+// An event touches a grid day when that day's calendar date falls within the
+// event's [start, end] date range AS SEEN IN THE USER'S TIMEZONE — so an event
+// at 3 PM NZ lands in the NZ-date cell, not the browser's/UTC's. Lexical compare
+// of ISO date strings is chronological.
+function eventTouchesDay(ev: CalendarEvent, day: Date, tz?: string): boolean {
+  const dayKey   = gridYmd(day)
+  const startKey = ymdInTz(ev.starts_at, tz)
+  const endKey   = ymdInTz(ev.ends_at, tz)
+  return startKey <= dayKey && endKey >= dayKey
 }
 function fmtMonth(d: Date) {
   return d.toLocaleString(undefined, { month: 'long', year: 'numeric' })
@@ -283,7 +300,7 @@ export default function CalendarPage() {
       if (!s.next_run_at) continue
       const ms = s.next_run_at * 1000
       if (ms < range.from || ms >= range.to) continue
-      const key = new Date(ms).toDateString()
+      const key = ymdInTz(ms, userTz)
       const list = map.get(key) ?? []
       list.push(s)
       map.set(key, list)
@@ -292,7 +309,7 @@ export default function CalendarPage() {
       list.sort((a, b) => (a.next_run_at ?? 0) - (b.next_run_at ?? 0))
     }
     return map
-  }, [schedules, range.from, range.to])
+  }, [schedules, range.from, range.to, userTz])
 
   // Agenda overlay (cont.) — also project MIRA's own daily morning briefing onto
   // each upcoming day (read-only), from the user's own briefing settings, so the
@@ -312,7 +329,7 @@ export default function CalendarPage() {
       d.setHours(briefing.hour ?? 8, 0, 0, 0)
       const ms = d.getTime()
       if (ms < now || ms < range.from || ms >= range.to) continue
-      map.set(d.toDateString(), ms)
+      map.set(gridYmd(d), ms)
     }
     return map
   }, [briefing, cursor, range.from, range.to])
@@ -340,13 +357,13 @@ export default function CalendarPage() {
       grid.push(d)
     }
     for (const day of grid) {
-      const key  = day.toDateString()
-      const list = events.filter((e) => eventTouchesDay(e, day))
+      const key  = gridYmd(day)
+      const list = events.filter((e) => eventTouchesDay(e, day, userTz))
       list.sort((a, b) => a.starts_at - b.starts_at)
       map.set(key, list)
     }
     return map
-  }, [cursor, events])
+  }, [cursor, events, userTz])
 
   const today = new Date()
 
@@ -545,7 +562,7 @@ export default function CalendarPage() {
         <div className={styles.grid}>
           {grid.map((day) => {
             const inMonth = day.getMonth() === cursor.getMonth()
-            const items   = eventsByDay.get(day.toDateString()) ?? []
+            const items   = eventsByDay.get(gridYmd(day)) ?? []
             const visible = items.slice(0, 3)
             const more    = items.length - visible.length
             return (
@@ -585,7 +602,7 @@ export default function CalendarPage() {
                       {ev.summary}
                     </div>
                   )})}
-                  {(firesByDay.get(day.toDateString()) ?? []).map((s) => (
+                  {(firesByDay.get(gridYmd(day)) ?? []).map((s) => (
                     <Link
                       key={`fire-${s.id}`}
                       to="/automations"
@@ -600,15 +617,15 @@ export default function CalendarPage() {
                       {s.name}
                     </Link>
                   ))}
-                  {briefingsByDay.get(day.toDateString()) != null && (
+                  {briefingsByDay.get(gridYmd(day)) != null && (
                     <div
                       className={`${styles.item} ${styles.itemBriefing}`}
                       onClick={(e) => e.stopPropagation()}
-                      title={`MIRA will send your morning briefing at ${fmtTime(briefingsByDay.get(day.toDateString())!, userTz)}`}
+                      title={`MIRA will send your morning briefing at ${fmtTime(briefingsByDay.get(gridYmd(day))!, userTz)}`}
                     >
                       <Sunrise size={9} style={{ opacity: 0.85 }} />
                       <span style={{ fontSize: 9, opacity: 0.7, flexShrink: 0 }}>
-                        {fmtTime(briefingsByDay.get(day.toDateString())!, userTz)}
+                        {fmtTime(briefingsByDay.get(gridYmd(day))!, userTz)}
                       </span>
                       Briefing
                     </div>
