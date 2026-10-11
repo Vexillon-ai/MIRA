@@ -315,6 +315,7 @@ pub(crate) fn build_provider_for_alias(
             "lmstudio"   => p.lmstudio.default_model   = m,
             "openrouter" => p.openrouter.default_model = m,
             "openai"     => p.openai.default_model     = m,
+            "opencode"   => p.opencode.default_model   = m,
             "deepseek"   => p.deepseek.default_model   = m,
             "moonshot"   => p.moonshot.default_model   = m,
             "groq"       => p.groq.default_model       = m,
@@ -426,6 +427,18 @@ mod tests {
         assert!(resolver.executor_for("named:echo").is_none(), "disabled must not resolve");
         assert!(resolver.executor_for("named:ghost").is_none(), "unknown handle must not resolve");
         assert!(resolver.executor_for("com.mira.research").is_none(), "non-named id ignored");
+    }
+
+    #[test]
+    fn opencode_alias_model_override_builds() {
+        let mut config = crate::config::MiraConfig::default();
+        config.primary_provider = "opencode".into();
+        config.providers.opencode.enabled = true;
+        config.providers.opencode.api_key = Some("test-key".into());
+        config.providers.opencode.default_model = "test-model".into();
+
+        let provider = build_provider_for_alias(&config, "opencode", Some("override-model"));
+        assert!(provider.is_ok(), "OpenCode model aliases should build");
     }
 
     #[tokio::test]

@@ -442,6 +442,7 @@ fn build_provider_for(
             "lmstudio"   => p.lmstudio.default_model   = m,
             "openrouter" => p.openrouter.default_model = m,
             "openai"     => p.openai.default_model     = m,
+            "opencode"   => p.opencode.default_model   = m,
             "deepseek"   => p.deepseek.default_model   = m,
             "moonshot"   => p.moonshot.default_model   = m,
             "groq"       => p.groq.default_model       = m,
@@ -453,4 +454,21 @@ fn build_provider_for(
         }
     }
     crate::gateway::builder::build_provider_chain(&c, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_model_override_builds_provider_chain() {
+        let mut config = MiraConfig::default();
+        config.primary_provider = "opencode".into();
+        config.providers.opencode.enabled = true;
+        config.providers.opencode.api_key = Some("test-key".into());
+        config.providers.opencode.default_model = "test-model".into();
+
+        let provider = build_provider_for(&config, Some("opencode"), Some("override-model"));
+        assert!(provider.is_ok(), "OpenCode benchmark model override should build");
+    }
 }

@@ -316,6 +316,7 @@ fn provider_default_model(config: &MiraConfig, provider: &str) -> Option<String>
         "lmstudio"   => p.lmstudio.default_model.as_str(),
         "openrouter" => p.openrouter.default_model.as_str(),
         "openai"     => p.openai.default_model.as_str(),
+        "opencode"   => p.opencode.default_model.as_str(),
         "deepseek"   => p.deepseek.default_model.as_str(),
         "moonshot"   => p.moonshot.default_model.as_str(),
         "groq"       => p.groq.default_model.as_str(),
@@ -837,6 +838,12 @@ mod tests {
         let chk = model_check(&c);
         assert!(!chk.allowed && chk.locality == ModelLocality::Cloud);
 
+        // OpenCode Go is hosted as well and must remain refused by the
+        // Guardian's local-only safety check.
+        c.primary_provider = "opencode".into();
+        let chk = model_check(&c);
+        assert!(!chk.allowed && chk.locality == ModelLocality::Cloud);
+
         // Local loopback ollama → allowed (loopback).
         c.primary_provider = "ollama".into();
         c.providers.ollama.url = "http://127.0.0.1:11434".into();
@@ -916,6 +923,12 @@ mod tests {
         c.guardian = Default::default();
         c.providers.lmstudio.default_model = "".into();
         assert_eq!(tier_model(&c, GuardianTier::Routine), ("lmstudio".into(), None));
+
+        c.primary_provider = "opencode".into();
+        c.providers.opencode.default_model = "opencode-default".into();
+        c.guardian = Default::default();
+        assert_eq!(tier_model(&c, GuardianTier::Routine),
+                   ("opencode".into(), Some("opencode-default".into())));
     }
 
     #[test]
