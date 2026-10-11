@@ -24,7 +24,7 @@ use tracing::{info, warn};
 
 use crate::auth::{AdminUser, AuthUser};
 use crate::mcp::{
-    McpCatalogEntry, McpCatalogStore, McpServerRegistry, McpServerRow, McpServerStatus,
+    McpCatalogEntry, McpCatalogStore, McpServerRegistry, McpServerResponse, McpServerStatus,
     McpServerStore, NewMcpServer, UpdateMcpServer, UpsertCatalogEntry,
 };
 
@@ -43,10 +43,10 @@ pub async fn status(
 pub async fn list_servers(
     AuthUser(user):   AuthUser,
     Extension(store): Extension<Arc<McpServerStore>>,
-) -> Result<Json<Vec<McpServerRow>>, StatusCode> {
+) -> Result<Json<Vec<McpServerResponse>>, StatusCode> {
     let rows = store.list_for_user(&user.id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(rows))
+    Ok(Json(rows.into_iter().map(|row| row.response()).collect()))
 }
 
 // `POST /api/mcp/servers` — create a row owned by the caller. The
@@ -81,7 +81,7 @@ pub async fn create_server(
     // reconnect after install picks it up.)
     registry.reload().await;
 
-    let mut body = serde_json::to_value(&row)
+    let mut body = serde_json::to_value(row.response())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(dep) = dep_required {
         body["dependency_required"] = dep;
@@ -146,7 +146,7 @@ pub async fn update_server(
     Extension(registry): Extension<Arc<McpServerRegistry>>,
     Path(id):            Path<String>,
     Json(upd):           Json<UpdateMcpServer>,
-) -> Result<Json<McpServerRow>, (StatusCode, String)> {
+) -> Result<Json<McpServerResponse>, (StatusCode, String)> {
     let existing = store.get(&id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "not found".into()))?;
@@ -156,7 +156,7 @@ pub async fn update_server(
     let row = store.update(&id, upd)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     registry.reload().await;
-    Ok(Json(row))
+    Ok(Json(row.response()))
 }
 
 // `DELETE /api/mcp/servers/{id}` — owner-gated delete.

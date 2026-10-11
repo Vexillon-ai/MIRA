@@ -29,6 +29,7 @@ interface McpServerRow {
   transport:  string
   enabled:    boolean
   config_json: string
+  auth_token_configured: boolean
   created_at: number
   updated_at: number
 }
@@ -59,12 +60,14 @@ interface ServerForm {
   url:       string
   enabled:   boolean
   sampling_enabled: boolean
+  auth_token: string
+  auth_token_configured: boolean
 }
 
 function blankForm(): ServerForm {
   return {
     name: '', transport: 'stdio', command: '', args: '', env: '', url: '',
-    enabled: true, sampling_enabled: false,
+    enabled: true, sampling_enabled: false, auth_token: '', auth_token_configured: false,
   }
 }
 
@@ -85,6 +88,8 @@ function rowToForm(r: McpServerRow): ServerForm {
     url:       cfg.url ?? '',
     enabled:   r.enabled,
     sampling_enabled: Boolean(cfg.sampling_enabled),
+    auth_token: '',
+    auth_token_configured: r.auth_token_configured,
   }
 }
 
@@ -118,6 +123,8 @@ function catalogToForm(e: McpCatalogEntry): ServerForm {
     url:       e.url ?? '',
     enabled:   true,
     sampling_enabled: false,
+    auth_token: '',
+    auth_token_configured: false,
   }
 }
 
@@ -188,6 +195,7 @@ function formToPayload(f: ServerForm) {
     base.env     = env
   } else {
     base.url     = f.url.trim() || null
+    if (f.auth_token.trim()) base.auth_token = f.auth_token.trim()
   }
   return base
 }
@@ -574,10 +582,16 @@ function ServerEditor({
           </FormRow>
         </>
       ) : (
-        <FormRow label="URL" hint="Full Streamable-HTTP MCP endpoint.">
-          <input type="text" value={form.url} onChange={(e) => update({ url: e.target.value })}
-                 placeholder="https://mcp.example.com/v1" style={input} />
-        </FormRow>
+        <>
+          <FormRow label="URL" hint="Full Streamable-HTTP MCP endpoint.">
+            <input type="text" value={form.url} onChange={(e) => update({ url: e.target.value })}
+                   placeholder="https://mcp.example.com/v1" style={input} />
+          </FormRow>
+          <FormRow label="Bearer token" hint={form.id ? 'Leave empty to keep the existing token.' : 'Optional token sent as Authorization: Bearer.'}>
+                 <input type="password" value={form.auth_token} onChange={(e) => update({ auth_token: e.target.value })}
+                   placeholder={form.id ? (form.auth_token_configured ? 'Token already configured' : 'Optional') : 'Optional'} style={input} autoComplete="new-password" />
+          </FormRow>
+        </>
       )}
       <FormRow label="Enabled" hint="Disabled = skip connect on startup; tools disappear until re-enabled and MIRA restarts.">
         <input type="checkbox" checked={form.enabled} onChange={(e) => update({ enabled: e.target.checked })} />

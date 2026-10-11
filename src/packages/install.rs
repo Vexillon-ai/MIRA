@@ -126,6 +126,7 @@ fn build_mcp_server(
         args: spec.args,
         env,
         url: spec.url,
+        auth_token: None,
         enabled: true,
         sampling_enabled: spec.sampling_enabled,
     })

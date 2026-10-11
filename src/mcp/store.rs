@@ -11,6 +11,7 @@
 //! deployments don't lose their entries.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,7 +30,7 @@ use crate::config::McpServerConfig;
 // flat — the registry deserialises back into a [`McpServerConfig`]
 // at connect time. `transport` is hoisted so it can be queried/sorted
 // without parsing JSON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct McpServerRow {
     pub id:         String,
     pub user_id:    String,
@@ -41,7 +42,59 @@ pub struct McpServerRow {
     pub updated_at: i64,
 }
 
+impl fmt::Debug for McpServerRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("McpServerRow")
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("name", &self.name)
+            .field("transport", &self.transport)
+            .field("enabled", &self.enabled)
+            .field("config_json", &redacted_config_json(&self.config_json))
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpServerResponse {
+    pub id:         String,
+    pub user_id:    String,
+    pub name:       String,
+    pub transport:  String,
+    pub enabled:    bool,
+    pub config_json: String,
+    pub auth_token_configured: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 impl McpServerRow {
+    pub fn response(&self) -> McpServerResponse {
+        let token_configured = serde_json::from_str::<serde_json::Value>(&self.config_json)
+            .ok()
+            .and_then(|v| v.get("auth_token").and_then(|v| v.as_str()).map(|v| !v.is_empty()))
+            .unwrap_or(false);
+        McpServerResponse {
+            id: self.id.clone(), user_id: self.user_id.clone(), name: self.name.clone(),
+            transport: self.transport.clone(), enabled: self.enabled,
+            config_json: redacted_config_json(&self.config_json),
+            auth_token_configured: token_configured,
+            created_at: self.created_at, updated_at: self.updated_at,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn from_config_for_test(config: McpServerConfig) -> Self {
+        let config_json = serde_json::to_string(&config).unwrap();
+        Self {
+            id: "test-id".to_owned(), user_id: "test-user".to_owned(),
+            name: config.name, transport: config.transport, enabled: config.enabled,
+            config_json, created_at: 0, updated_at: 0,
+        }
+    }
+
     // Hydrate back into the [`McpServerConfig`] the registry knows
     // how to connect with. The owner's `user_id` is **not** part of
     // the config — it's tracked separately by the registry so a
@@ -67,7 +120,7 @@ impl McpServerRow {
 // computed/server-owned fields (id, timestamps). `user_id` is taken
 // from the authenticated caller, never accepted from the request
 // body, so an account can't create rows owned by someone else.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct NewMcpServer {
     pub name:      String,
     #[serde(default = "default_transport")]
@@ -80,6 +133,8 @@ pub struct NewMcpServer {
     pub env:       HashMap<String, String>,
     #[serde(default)]
     pub url:       Option<String>,
+    #[serde(default)]
+    pub auth_token: Option<String>,
     #[serde(default = "default_enabled")]
     pub enabled:   bool,
     // opt-in to sampling. Defaults false so a freshly-
@@ -89,10 +144,29 @@ pub struct NewMcpServer {
     pub sampling_enabled: bool,
 }
 
+impl fmt::Debug for NewMcpServer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let env = self.env.keys()
+            .map(|key| (key, "***"))
+            .collect::<HashMap<_, _>>();
+        f.debug_struct("NewMcpServer")
+            .field("name", &self.name)
+            .field("transport", &self.transport)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env", &env)
+            .field("url", &self.url)
+            .field("auth_token_configured", &self.auth_token.as_ref().is_some_and(|v| !v.is_empty()))
+            .field("enabled", &self.enabled)
+            .field("sampling_enabled", &self.sampling_enabled)
+            .finish()
+    }
+}
+
 fn default_transport() -> String { "stdio".to_string() }
 fn default_enabled() -> bool { true }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Clone, Deserialize, Default)]
 pub struct UpdateMcpServer {
     pub name:      Option<String>,
     pub transport: Option<String>,
@@ -100,6 +174,10 @@ pub struct UpdateMcpServer {
     pub args:      Option<Vec<String>>,
     pub env:       Option<HashMap<String, String>>,
     pub url:       Option<Option<String>>,
+    /// Empty or absent means retain the existing token. A non-empty value
+    /// replaces it. Explicit deletion is intentionally not supported yet.
+    #[serde(default)]
+    pub auth_token: Option<String>,
     pub enabled:   Option<bool>,
     pub sampling_enabled: Option<bool>,
 }
@@ -169,6 +247,7 @@ impl McpServerStore {
             args:      new.args.clone(),
             env:       new.env.clone(),
             url:       new.url.clone(),
+            auth_token: new.auth_token.filter(|v| !v.is_empty()),
             enabled:   new.enabled,
             sampling_enabled: new.sampling_enabled,
         };
@@ -349,8 +428,19 @@ impl McpServerStore {
         if let Some(transport) = upd.transport { cfg.transport = transport; }
         if let Some(command)   = upd.command   { cfg.command = command; }
         if let Some(args)      = upd.args      { cfg.args = args; }
-        if let Some(env)       = upd.env       { cfg.env = env; }
+        if let Some(env)       = upd.env       {
+            // API responses redact values as `***`. Merge rather than replace
+            // so omitted keys cannot delete existing environment secrets.
+            // An explicitly entered literal `***` remains ambiguous with the
+            // sentinel and is therefore treated as "retain" (see the test).
+            for (key, value) in env {
+                if value != "***" {
+                    cfg.env.insert(key, value);
+                }
+            }
+        }
         if let Some(url)       = upd.url       { cfg.url = url; }
+        if let Some(token)     = upd.auth_token.filter(|v| !v.is_empty()) { cfg.auth_token = Some(token); }
         if let Some(enabled)   = upd.enabled   { cfg.enabled = enabled; }
         if let Some(s)         = upd.sampling_enabled { cfg.sampling_enabled = s; }
 
@@ -406,4 +496,155 @@ fn row_to_server(row: &rusqlite::Row<'_>) -> rusqlite::Result<McpServerRow> {
         created_at:  row.get(6)?,
         updated_at:  row.get(7)?,
     })
+}
+
+fn redacted_config_json(raw: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return "{}".to_owned();
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.remove("auth_token");
+        if let Some(env) = object.get_mut("env").and_then(|env| env.as_object_mut()) {
+            for value in env.values_mut() {
+                *value = serde_json::Value::String("***".to_owned());
+            }
+        }
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{McpServerRow, McpServerStore, NewMcpServer, UpdateMcpServer};
+    use rusqlite::Connection;
+    use tempfile::tempdir;
+
+    fn store() -> (McpServerStore, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("auth.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE users (id TEXT PRIMARY KEY); INSERT INTO users VALUES ('synthetic-user');").unwrap();
+        drop(conn);
+        let store = McpServerStore::open(&path).unwrap();
+        (store, dir)
+    }
+
+    fn new_server(token: Option<&str>) -> NewMcpServer {
+        NewMcpServer {
+            name: "synthetic-server".to_owned(),
+            transport: "http".to_owned(),
+            command: None,
+            args: vec![],
+            env: Default::default(),
+            url: Some("https://mcp.example.test/v1".to_owned()),
+            auth_token: token.map(str::to_owned),
+            enabled: true,
+            sampling_enabled: false,
+        }
+    }
+
+    #[test]
+    fn response_redacts_token_and_reports_only_configuration_status() {
+        let row = McpServerRow::from_config_for_test(crate::config::McpServerConfig {
+            name: "synthetic-server".to_owned(),
+            transport: "http".to_owned(),
+            command: None,
+            args: vec![],
+            env: Default::default(),
+            url: Some("https://mcp.example.test/v1".to_owned()),
+            auth_token: Some("synthetic-response-token".to_owned()),
+            enabled: true,
+            sampling_enabled: false,
+        });
+
+        let response = row.response();
+        let serialized = serde_json::to_string(&response).unwrap();
+        assert!(response.auth_token_configured);
+        assert!(!response.config_json.contains("auth_token"));
+        assert!(!serialized.contains("synthetic-response-token"));
+    }
+
+    #[test]
+    fn response_redacts_environment_values() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("SYNTHETIC_API_KEY".to_owned(), "synthetic-env-secret".to_owned());
+        let row = McpServerRow::from_config_for_test(crate::config::McpServerConfig {
+            name: "synthetic-server".to_owned(), transport: "stdio".to_owned(),
+            command: Some("synthetic".to_owned()), args: vec![], env,
+            url: None, auth_token: None, enabled: true, sampling_enabled: false,
+        });
+        let response = row.response();
+        assert!(response.config_json.contains("SYNTHETIC_API_KEY"));
+        assert!(response.config_json.contains("***"));
+        assert!(!response.config_json.contains("synthetic-env-secret"));
+    }
+
+    #[test]
+    fn update_empty_token_retains_existing_token_and_new_token_replaces_it() {
+        let (store, _dir) = store();
+        let row = store.create("synthetic-user", new_server(Some("synthetic-old-token"))).unwrap();
+
+        let absent = store.update(&row.id, UpdateMcpServer::default()).unwrap();
+        assert_eq!(absent.to_config().unwrap().auth_token.as_deref(), Some("synthetic-old-token"));
+
+        let retained = store.update(&row.id, UpdateMcpServer {
+            auth_token: Some(String::new()),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(retained.to_config().unwrap().auth_token.as_deref(), Some("synthetic-old-token"));
+
+        let replaced = store.update(&row.id, UpdateMcpServer {
+            auth_token: Some("synthetic-new-token".to_owned()),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(replaced.to_config().unwrap().auth_token.as_deref(), Some("synthetic-new-token"));
+    }
+
+    #[test]
+    fn update_environment_sentinel_retains_existing_value() {
+        let (store, _dir) = store();
+        let mut server = new_server(None);
+        server.transport = "stdio".to_owned();
+        server.command = Some("synthetic".to_owned());
+        server.env.insert("SYNTHETIC_API_KEY".to_owned(), "synthetic-env-secret".to_owned());
+        let row = store.create("synthetic-user", server).unwrap();
+        let mut env = std::collections::HashMap::new();
+        env.insert("SYNTHETIC_API_KEY".to_owned(), "***".to_owned());
+
+        let updated = store.update(&row.id, UpdateMcpServer { env: Some(env), ..Default::default() }).unwrap();
+        assert_eq!(updated.to_config().unwrap().env.get("SYNTHETIC_API_KEY").map(String::as_str), Some("synthetic-env-secret"));
+    }
+
+    #[test]
+    fn update_environment_omission_retains_existing_values() {
+        let (store, _dir) = store();
+        let mut server = new_server(None);
+        server.transport = "stdio".to_owned();
+        server.command = Some("synthetic".to_owned());
+        server.env.insert("SYNTHETIC_API_KEY".to_owned(), "synthetic-env-secret".to_owned());
+        server.env.insert("SYNTHETIC_OTHER".to_owned(), "synthetic-other".to_owned());
+        let row = store.create("synthetic-user", server).unwrap();
+        let mut env = std::collections::HashMap::new();
+        env.insert("SYNTHETIC_API_KEY".to_owned(), "synthetic-updated".to_owned());
+
+        let updated = store.update(&row.id, UpdateMcpServer { env: Some(env), ..Default::default() }).unwrap();
+        let env = updated.to_config().unwrap().env;
+        assert_eq!(env.get("SYNTHETIC_API_KEY").map(String::as_str), Some("synthetic-updated"));
+        assert_eq!(env.get("SYNTHETIC_OTHER").map(String::as_str), Some("synthetic-other"));
+    }
+
+    #[test]
+    fn literal_sentinel_value_is_documented_as_ambiguous_and_retains_old_value() {
+        let (store, _dir) = store();
+        let mut server = new_server(None);
+        server.transport = "stdio".to_owned();
+        server.command = Some("synthetic".to_owned());
+        server.env.insert("SYNTHETIC_API_KEY".to_owned(), "synthetic-old".to_owned());
+        let row = store.create("synthetic-user", server).unwrap();
+        let mut env = std::collections::HashMap::new();
+        env.insert("SYNTHETIC_API_KEY".to_owned(), "***".to_owned());
+
+        let updated = store.update(&row.id, UpdateMcpServer { env: Some(env), ..Default::default() }).unwrap();
+        assert_eq!(updated.to_config().unwrap().env.get("SYNTHETIC_API_KEY").map(String::as_str), Some("synthetic-old"));
+    }
 }
