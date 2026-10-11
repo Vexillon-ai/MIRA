@@ -144,7 +144,10 @@ impl Tool for CalendarListEventsTool {
          to the next 30 days when no range is given. Each event includes \
          `when_local`, a ready-to-read local date/time string — ALWAYS quote \
          it verbatim when telling the user when something is; never compute or \
-         convert weekdays or times yourself from the raw timestamps."
+         convert weekdays or times yourself from the raw timestamps. The response \
+         also carries `from_local`/`to_local` (the range covered); if you describe \
+         the window you're reporting on, quote those — never work out week start/\
+         end dates yourself."
     }
     fn tier(&self) -> Tier { Tier::Pure }
     fn args_schema(&self) -> Value {
@@ -193,12 +196,25 @@ impl Tool for CalendarListEventsTool {
             }
             v
         }).collect();
-        let body = json!({
+        // Pre-formatted range bounds in the caller's tz. Models otherwise narrate
+        // the window ("Monday 12 to Sunday 19") by computing weekday maths and get
+        // it wrong — they must quote `from_local`/`to_local` instead of inventing
+        // week boundaries.
+        let fmt_day = |ms: Option<i64>| -> Option<String> {
+            let (tzp, ms) = (tz_parsed?, ms?);
+            Utc.timestamp_millis_opt(ms).single()
+                .map(|d| d.with_timezone(&tzp).format("%A %-d %b %Y").to_string())
+        };
+        let mut body = json!({
             "from":   from,
             "to":     to,
             "count":  events_json.len(),
             "events": events_json,
         });
+        if let Some(obj) = body.as_object_mut() {
+            if let Some(s) = fmt_day(from) { obj.insert("from_local".into(), json!(s)); }
+            if let Some(s) = fmt_day(to)   { obj.insert("to_local".into(),   json!(s)); }
+        }
         Ok(ToolResult::success(body.to_string()))
     }
 }
