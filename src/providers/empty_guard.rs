@@ -89,40 +89,21 @@ impl ModelProvider for EmptyRetryProvider {
         messages: &[ChatMessage],
         options:  &GenerationOptions,
     ) -> Result<GenerationResponse, crate::MiraError> {
-        let mut attempt = 0u32;
-        loop {
-            let resp = self.inner.generate(messages, options).await?;
-            if !is_empty_completion(&resp) {
-                return Ok(resp);
-            }
-            attempt += 1;
-            if attempt > self.max_retries {
-                warn!(
-                    "empty-retry: provider '{}' returned an empty completion on all {} \
-                     attempt(s); failing the turn as a provider error",
-                    self.inner.name(), attempt
-                );
-                return Err(Self::exhausted_error(attempt));
-            }
-            warn!(
-                "empty-retry: provider '{}' returned an empty completion; re-issuing \
-                 (retry {}/{})",
-                self.inner.name(), attempt, self.max_retries
-            );
-        }
+        self.generate_with_context(
+            messages, options,
+            &crate::providers::ProviderRequestContext::default(),
+        ).await
     }
 
-    async fn generate_stream(
+    async fn generate_with_context(
         &self,
         messages: &[ChatMessage],
         options:  &GenerationOptions,
-        on_token: &mut (dyn FnMut(String) + Send),
+        context:  &crate::providers::ProviderRequestContext,
     ) -> Result<GenerationResponse, crate::MiraError> {
-        // An empty stream forwards no content tokens to `on_token`, so re-issuing
-        // and forwarding the next attempt's tokens never double-prints anything.
         let mut attempt = 0u32;
         loop {
-            let resp = self.inner.generate_stream(messages, options, on_token).await?;
+            let resp = self.inner.generate_with_context(messages, options, context).await?;
             if !is_empty_completion(&resp) {
                 return Ok(resp);
             }
@@ -143,33 +124,16 @@ impl ModelProvider for EmptyRetryProvider {
         }
     }
 
-    async fn generate_with_context(
+    async fn generate_stream(
         &self,
         messages: &[ChatMessage],
         options:  &GenerationOptions,
-        context:  &crate::providers::ProviderRequestContext,
+        on_token: &mut (dyn FnMut(String) + Send),
     ) -> Result<GenerationResponse, crate::MiraError> {
-        let mut attempt = 0u32;
-        loop {
-            let resp = self.inner.generate_with_context(messages, options, context).await?;
-            if !is_empty_completion(&resp) {
-                return Ok(resp);
-            }
-            attempt += 1;
-            if attempt > self.max_retries {
-                warn!(
-                    "empty-retry: provider '{}' returned an empty completion on all {} \
-                     attempt(s); failing the turn as a provider error",
-                    self.inner.name(), attempt
-                );
-                return Err(Self::exhausted_error(attempt));
-            }
-            warn!(
-                "empty-retry: provider '{}' returned an empty completion; re-issuing \
-                 (retry {}/{})",
-                self.inner.name(), attempt, self.max_retries
-            );
-        }
+        self.generate_stream_with_context(
+            messages, options, on_token,
+            &crate::providers::ProviderRequestContext::default(),
+        ).await
     }
 
     async fn generate_stream_with_context(
@@ -183,9 +147,7 @@ impl ModelProvider for EmptyRetryProvider {
         // and forwarding the next attempt's tokens never double-prints anything.
         let mut attempt = 0u32;
         loop {
-            let resp = self.inner.generate_stream_with_context(
-                messages, options, on_token, context,
-            ).await?;
+            let resp = self.inner.generate_stream_with_context(messages, options, on_token, context).await?;
             if !is_empty_completion(&resp) {
                 return Ok(resp);
             }

@@ -146,7 +146,15 @@ impl ModelProvider for GuardedProvider {
         messages: &[ChatMessage],
         options: &GenerationOptions,
     ) -> Result<GenerationResponse, crate::MiraError> {
-        let resp = self.inner.generate(messages, options).await?;
+        self.generate_with_context(
+            messages, options,
+            &crate::providers::ProviderRequestContext::default(),
+        ).await
+    }
+
+    async fn generate_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        ctx: &crate::providers::ProviderRequestContext) -> Result<GenerationResponse, crate::MiraError> {
+        let resp = self.inner.generate_with_context(messages, options, ctx).await?;
         // Non-streaming: no incremental abort possible (the whole reply already
         // arrived), but still gate the fan-out — a degenerate reply must not be
         // returned as a normal result, and it counts as a provider error. Inspect
@@ -160,15 +168,6 @@ impl ModelProvider for GuardedProvider {
                 resp.content.len(),
                 resp.reasoning.as_deref().map_or(0, str::len),
             );
-            return Err(Self::tripped_error());
-        }
-        Ok(resp)
-    }
-
-    async fn generate_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
-        ctx: &crate::providers::ProviderRequestContext) -> Result<GenerationResponse, crate::MiraError> {
-        let resp = self.inner.generate_with_context(messages, options, ctx).await?;
-        if response_is_degenerate(&resp.content, resp.reasoning.as_deref(), &self.cfg) {
             return Err(Self::tripped_error());
         }
         Ok(resp)
