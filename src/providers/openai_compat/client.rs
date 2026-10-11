@@ -336,9 +336,16 @@ impl OpenAiCompatClient {
 
     fn apply_request_context(&self, mut rb: reqwest::RequestBuilder, context: Option<&crate::providers::ProviderRequestContext>) -> reqwest::RequestBuilder {
         if self.config.provider_name == "opencode" {
-            if let Some(session) = context.and_then(|c| c.session_id.as_deref()) {
-                if !session.is_empty() { rb = rb.header("x-opencode-session", session); }
-            }
+            // OpenCode Go requires this header on every chat-completions
+            // request. Keep the MIRA session when one is available so normal
+            // chats retain request continuity and prompt-cache routing; the
+            // context-free paths get a unique request-scoped fallback.
+            let session = context
+                .and_then(|c| c.session_id.as_deref())
+                .filter(|session| !session.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("mira-{}", uuid::Uuid::new_v4()));
+            rb = rb.header("x-opencode-session", session);
         }
         rb
     }
@@ -719,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_request_context_adds_session_and_mira_user_agent() {
+    fn opencode_request_context_preserves_explicit_session_and_mira_user_agent() {
         let client = OpenAiCompatClient::new(cfg("opencode", "https://opencode.ai/zen/v1"));
         let ctx = crate::providers::ProviderRequestContext { session_id: Some("web-conv-42".into()) };
         let req = client.apply_request_context(client.apply_headers(client.http.post("http://localhost/test")), Some(&ctx)).build().unwrap();
@@ -728,6 +735,39 @@ mod tests {
         let ordinary = OpenAiCompatClient::new(cfg("openai", "https://api.openai.com/v1"));
         let req = ordinary.apply_request_context(ordinary.http.post("http://localhost/test"), Some(&ctx)).build().unwrap();
         assert!(req.headers().get("x-opencode-session").is_none());
+    }
+
+    #[test]
+    fn opencode_requests_without_session_get_unique_fallback_sessions() {
+        let client = OpenAiCompatClient::new(cfg("opencode", "https://opencode.ai/zen/v1"));
+
+        let non_stream = client.apply_request_context(
+            client.http.post("http://localhost/test"),
+            None,
+        ).build().unwrap();
+        let streaming = client.apply_request_context(
+            client.http.post("http://localhost/test"),
+            Some(&crate::providers::ProviderRequestContext::default()),
+        ).build().unwrap();
+
+        let non_stream_session = non_stream.headers().get("x-opencode-session")
+            .and_then(|value| value.to_str().ok()).expect("fallback session header");
+        let streaming_session = streaming.headers().get("x-opencode-session")
+            .and_then(|value| value.to_str().ok()).expect("fallback session header");
+        assert!(non_stream_session.starts_with("mira-"));
+        assert!(streaming_session.starts_with("mira-"));
+        assert_ne!(non_stream_session, streaming_session,
+            "fallback sessions must be request-scoped, not global");
+    }
+
+    #[test]
+    fn non_opencode_providers_do_not_get_session_fallbacks() {
+        let client = OpenAiCompatClient::new(cfg("openai", "https://api.openai.com/v1"));
+        for context in [None, Some(&crate::providers::ProviderRequestContext::default())] {
+            let req = client.apply_request_context(client.http.post("http://localhost/test"), context)
+                .build().unwrap();
+            assert!(req.headers().get("x-opencode-session").is_none());
+        }
     }
 
     #[test]
