@@ -110,14 +110,14 @@ impl ModelProvider for EmptyRetryProvider {
             attempt += 1;
             if attempt > self.max_retries {
                 warn!(
-                    "empty-retry: provider '{}' streamed an empty completion on all {} \
+                    "empty-retry: provider '{}' returned an empty completion on all {} \
                      attempt(s); failing the turn as a provider error",
                     self.inner.name(), attempt
                 );
                 return Err(Self::exhausted_error(attempt));
             }
             warn!(
-                "empty-retry: provider '{}' streamed an empty completion; re-issuing \
+                "empty-retry: provider '{}' returned an empty completion; re-issuing \
                  (retry {}/{})",
                 self.inner.name(), attempt, self.max_retries
             );

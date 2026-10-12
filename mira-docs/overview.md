@@ -1,6 +1,6 @@
 # What MIRA is
 
-MIRA (Multi-tasking Intelligent Responsive Assistant) is a **self-hosted personal AI agent**. You run it on your own machine; it talks to whichever LLM provider you configure (Anthropic, OpenAI, OpenRouter, DeepSeek, Gemini, or a local/OpenAI-compatible server). Your conversations, memory, and data stay on your hardware.
+MIRA (Multi-tasking Intelligent Responsive Assistant) is a **self-hosted personal AI agent**. You run it on your own machine; it talks to whichever LLM provider you configure (Anthropic, OpenAI, OpenCode Go, OpenRouter, DeepSeek, Gemini, or a local/OpenAI-compatible server). Your conversations, memory, and data stay on your hardware.
 
 ## How MIRA is different from a chat app
 
