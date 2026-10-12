@@ -7,9 +7,10 @@ sidebar:
 
 **MIRA** (Multi-tasking Intelligent Responsive Assistant) is a **self-hosted
 personal AI agent**. You run it on your own machine; it talks to whichever LLM
-provider you configure — Anthropic, OpenAI, OpenRouter, DeepSeek, Gemini, or a
-local / OpenAI-compatible server. Your conversations, memory, and data stay on
-your hardware.
+provider you configure — Anthropic, OpenAI, OpenCode Go, OpenRouter, DeepSeek,
+Gemini, or a local / OpenAI-compatible server. MIRA stores its conversations,
+memory, and other data on your hardware, but prompts may be sent to hosted
+providers you configure.
 
 If you've used ChatGPT or Claude, MIRA will feel familiar to chat with — but it
 does several things a chat app doesn't.

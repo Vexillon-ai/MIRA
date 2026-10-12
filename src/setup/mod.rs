@@ -62,6 +62,7 @@ const PROVIDERS: &[ProviderSpec] = &[
     ProviderSpec { id: "anthropic",  label: "Anthropic (Claude)",        local: false },
     ProviderSpec { id: "openai",     label: "OpenAI",                    local: false },
     ProviderSpec { id: "openrouter", label: "OpenRouter",                local: false },
+    ProviderSpec { id: "opencode",  label: "OpenCode Go",                local: false },
     ProviderSpec { id: "gemini",     label: "Google Gemini",             local: false },
     ProviderSpec { id: "deepseek",   label: "DeepSeek",                  local: false },
     ProviderSpec { id: "groq",       label: "Groq",                      local: false },
@@ -422,6 +423,7 @@ fn apply(a: &Answers, config_path: &PathBuf) -> Result<(), Box<dyn Error>> {
     p.ollama.enabled = false;
     p.lmstudio.enabled = false;
     p.openrouter.enabled = false;
+    p.opencode.enabled = false;
     p.openai.enabled = false;
     p.deepseek.enabled = false;
     p.moonshot.enabled = false;
@@ -436,6 +438,7 @@ fn apply(a: &Answers, config_path: &PathBuf) -> Result<(), Box<dyn Error>> {
         "anthropic" => { p.anthropic.enabled = true; p.anthropic.api_key = a.api_key.clone(); p.anthropic.base_url = a.base_url.clone(); p.anthropic.default_model = a.model.clone(); }
         "openai" => { p.openai.enabled = true; p.openai.api_key = a.api_key.clone(); p.openai.base_url = a.base_url.clone(); p.openai.default_model = a.model.clone(); }
         "openrouter" => { p.openrouter.enabled = true; p.openrouter.api_key = a.api_key.clone(); p.openrouter.base_url = a.base_url.clone(); p.openrouter.default_model = a.model.clone(); }
+        "opencode" => { p.opencode.enabled = true; p.opencode.api_key = a.api_key.clone(); p.opencode.base_url = a.base_url.clone(); p.opencode.default_model = a.model.clone(); }
         "gemini" => { p.gemini.enabled = true; p.gemini.api_key = a.api_key.clone(); p.gemini.base_url = a.base_url.clone(); p.gemini.default_model = a.model.clone(); }
         "deepseek" => { p.deepseek.enabled = true; p.deepseek.api_key = a.api_key.clone(); p.deepseek.base_url = a.base_url.clone(); p.deepseek.default_model = a.model.clone(); }
         "groq" => { p.groq.enabled = true; p.groq.api_key = a.api_key.clone(); p.groq.base_url = a.base_url.clone(); p.groq.default_model = a.model.clone(); }
@@ -658,6 +661,7 @@ fn default_base(def: &MiraConfig, id: &str) -> String {
         "anthropic" => def.providers.anthropic.base_url.clone(),
         "openai" => def.providers.openai.base_url.clone(),
         "openrouter" => def.providers.openrouter.base_url.clone(),
+        "opencode" => def.providers.opencode.base_url.clone(),
         "gemini" => def.providers.gemini.base_url.clone(),
         "deepseek" => def.providers.deepseek.base_url.clone(),
         "groq" => def.providers.groq.base_url.clone(),
@@ -673,6 +677,7 @@ fn def_model(def: &MiraConfig, id: &str) -> String {
         "anthropic" => def.providers.anthropic.default_model.clone(),
         "openai" => def.providers.openai.default_model.clone(),
         "openrouter" => def.providers.openrouter.default_model.clone(),
+        "opencode" => def.providers.opencode.default_model.clone(),
         "gemini" => def.providers.gemini.default_model.clone(),
         "deepseek" => def.providers.deepseek.default_model.clone(),
         "groq" => def.providers.groq.default_model.clone(),
@@ -731,6 +736,16 @@ mod tests {
     fn parse_gemini_strips_prefix() {
         let j = serde_json::json!({"models":[{"name":"models/gemini-2.5-flash"}]});
         assert_eq!(parse_models("gemini", &j), vec!["gemini-2.5-flash"]);
+    }
+
+    #[test]
+    fn opencode_is_available_with_provider_defaults() {
+        let spec = PROVIDERS.iter().find(|p| p.id == "opencode").expect("OpenCode Go setup provider");
+        assert!(!spec.local);
+
+        let def = MiraConfig::default_with_path();
+        assert_eq!(default_base(&def, "opencode"), "https://opencode.ai/zen/go/v1");
+        assert_eq!(def_model(&def, "opencode"), "glm-5.3-flash");
     }
 
     #[test]

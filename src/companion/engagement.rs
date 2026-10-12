@@ -88,6 +88,32 @@ pub fn spawn_post_hook(
     // is written.
     no_store: bool,
 ) {
+    spawn_post_hook_with_context(
+        assessor,
+        crate::providers::ProviderRequestContext::default(),
+        user_id,
+        conversation_id,
+        turn_id,
+        user_msg,
+        assistant_msg,
+        user_tz,
+        no_store,
+    );
+}
+
+/// Context-aware variant used by AgentCore so OpenCode Go's request-scoped
+/// session header is present on this auxiliary call too.
+pub fn spawn_post_hook_with_context(
+    assessor: EngagementAssessor,
+    request_context: crate::providers::ProviderRequestContext,
+    user_id: String,
+    conversation_id: Option<String>,
+    turn_id: Option<String>,
+    user_msg: String,
+    assistant_msg: String,
+    user_tz: Option<String>,
+    no_store: bool,
+) {
     // A short turn is normally skipped (little signal, LLM cost isn't
     // worth it) — but a SHORT cry for help ("help", "die", "kill myself") is
     // exactly the distress case we must never drop. Only skip when the USER
@@ -104,7 +130,8 @@ pub fn spawn_post_hook(
     }
 
     tokio::spawn(async move {
-        let (label, severity) = match classify(&assessor.provider, &user_msg, &assistant_msg, assessor.degradations.as_ref()).await {
+        let (label, severity) = match classify(&assessor.provider, &user_msg, &assistant_msg,
+            &request_context, assessor.degradations.as_ref()).await {
             Some(c) => c,
             None => {
                 debug!("companion engagement: classifier produced no label for '{user_id}'");
@@ -189,6 +216,7 @@ async fn classify(
     provider: &Arc<dyn ModelProvider>,
     user_msg: &str,
     assistant_msg: &str,
+    request_context: &crate::providers::ProviderRequestContext,
     degradations: Option<&Arc<crate::health::degradation::DegradationTracker>>,
 ) -> Option<(EngagementLabel, Option<ConcernSeverity>)> {
     let messages = vec![
@@ -203,7 +231,7 @@ async fn classify(
 
     let response = match tokio::time::timeout(
         ENGAGEMENT_TIMEOUT,
-        provider.generate(&messages, &opts),
+        provider.generate_with_context(&messages, &opts, request_context),
     ).await {
         Ok(Ok(r))  => r.content,
         // The engagement classifier is also the DISTRESS detector — a
@@ -321,6 +349,54 @@ fn parse_severity(raw: &str) -> Option<ConcernSeverity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    struct ContextRecordingProvider {
+        seen: Arc<Mutex<Option<Option<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for ContextRecordingProvider {
+        fn name(&self) -> &str { "context-test" }
+
+        async fn generate(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &GenerationOptions,
+        ) -> Result<crate::types::GenerationResponse, crate::MiraError> {
+            Ok(crate::types::GenerationResponse {
+                content: "engaged".into(),
+                tool_calls: None,
+                reasoning: None,
+                usage: crate::types::TokenUsage::default(),
+                provider_id: crate::types::ProviderId::Local("context-test".into()),
+                model_name: "context-test".into(),
+                fallback: None,
+            })
+        }
+
+        async fn generate_with_context(
+            &self,
+            messages: &[ChatMessage],
+            options: &GenerationOptions,
+            context: &crate::providers::ProviderRequestContext,
+        ) -> Result<crate::types::GenerationResponse, crate::MiraError> {
+            *self.seen.lock().unwrap() = Some(context.session_id.clone());
+            self.generate(messages, options).await
+        }
+
+        async fn health_check(&self) -> bool { true }
+    }
+
+    #[tokio::test]
+    async fn classifier_forwards_conversation_request_context() {
+        let seen = Arc::new(Mutex::new(None));
+        let provider: Arc<dyn ModelProvider> = Arc::new(ContextRecordingProvider { seen: Arc::clone(&seen) });
+        let context = crate::providers::ProviderRequestContext { session_id: Some("web-conv-42".into()) };
+        let result = classify(&provider, "I am working on a project", "That sounds good", &context, None).await;
+        assert_eq!(result, Some((EngagementLabel::Engaged, None)));
+        assert_eq!(*seen.lock().unwrap(), Some(Some("web-conv-42".into())));
+    }
 
     #[test]
     fn parse_label_handles_clean_output() {

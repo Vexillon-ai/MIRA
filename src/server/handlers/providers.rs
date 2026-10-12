@@ -54,7 +54,9 @@ pub async fn providers_health(
     Extension(live_cfg): Extension<Arc<LiveConfig>>,
 ) -> impl IntoResponse {
     use crate::providers::ModelProvider;
-    use crate::providers::openai_compat::{AuthHeader, OpenAiCompatClient, OpenAiCompatConfig};
+    use crate::providers::openai_compat::{
+        AuthHeader, ExtraHeader, OpenAiCompatClient, OpenAiCompatConfig,
+    };
 
     let cfg = live_cfg.get().await;
 
@@ -135,7 +137,15 @@ pub async fn providers_health(
                         model:         $cfg.default_model.clone(),
                         timeout_secs:  $cfg.timeout_secs,
                         auth_header:   AuthHeader::Bearer,
-                        extra_headers: vec![],
+                        extra_headers: if $slug == "opencode" {
+                            vec![ExtraHeader {
+                                name: "User-Agent",
+                                value: concat!("MIRA/", env!("CARGO_PKG_VERSION")).to_string(),
+                            }]
+                        } else { vec![] },
+                        session_header: if $slug == "opencode" {
+                            Some("x-opencode-session")
+                        } else { None },
                     };
                     let url   = $cfg.base_url.clone();
                     let model = $cfg.default_model.clone();
@@ -156,6 +166,7 @@ pub async fn providers_health(
         }
     }
     probe_openai_compat!("openai",   cfg.providers.openai);
+    probe_openai_compat!("opencode", cfg.providers.opencode);
     probe_openai_compat!("deepseek", cfg.providers.deepseek);
     probe_openai_compat!("moonshot", cfg.providers.moonshot);
     probe_openai_compat!("groq",     cfg.providers.groq);
@@ -229,6 +240,7 @@ pub async fn providers_health(
                     timeout_secs:  cc.timeout_secs,
                     auth_header:   auth,
                     extra_headers: vec![],
+                    session_header: None,
                 };
                 let name  = cc.name.clone();
                 let url   = cc.base_url.clone();
@@ -333,6 +345,7 @@ pub async fn providers_models(
     }
     push_cloud!("openrouter", cfg.providers.openrouter);
     push_cloud!("openai",     cfg.providers.openai);
+    push_cloud!("opencode",  cfg.providers.opencode);
     push_cloud!("anthropic",  cfg.providers.anthropic);
     push_cloud!("gemini",     cfg.providers.gemini);
     push_cloud!("deepseek",   cfg.providers.deepseek);
@@ -394,6 +407,7 @@ fn catalog_fetch_allowed(cfg: &crate::config::MiraConfig, slug: &str) -> bool {
         "ollama"     => p.ollama.enabled,
         "openrouter" => p.openrouter.enabled && has_key(&p.openrouter.api_key),
         "openai"     => p.openai.enabled     && has_key(&p.openai.api_key),
+        "opencode"   => p.opencode.enabled   && has_key(&p.opencode.api_key),
         "anthropic"  => p.anthropic.enabled  && has_key(&p.anthropic.api_key),
         "gemini"     => p.gemini.enabled     && has_key(&p.gemini.api_key),
         "deepseek"   => p.deepseek.enabled   && has_key(&p.deepseek.api_key),
@@ -688,7 +702,7 @@ pub async fn provider_catalog(
         apply_overlay, load_any, load_if_fresh, save_catalog, ModelCatalog,
     };
     use crate::providers::openai_compat::{
-        AuthHeader, OpenAiCompatClient, OpenAiCompatConfig,
+        AuthHeader, ExtraHeader, OpenAiCompatClient, OpenAiCompatConfig,
     };
     use crate::providers::anthropic::AnthropicProvider;
     use crate::providers::gemini::GeminiProvider;
@@ -732,6 +746,21 @@ pub async fn provider_catalog(
                 timeout_secs:  p.timeout_secs,
                 auth_header:   AuthHeader::Bearer,
                 extra_headers: vec![],
+                session_header: None,
+            });
+            client.fetch_model_ids().await
+        }
+        "opencode" => {
+            let p = &cfg.providers.opencode;
+            let client = OpenAiCompatClient::new(OpenAiCompatConfig {
+                provider_name: "opencode".into(), base_url: p.base_url.clone(),
+                api_key: p.api_key.clone().unwrap_or_default(), model: p.default_model.clone(),
+                timeout_secs: p.timeout_secs, auth_header: AuthHeader::Bearer,
+                extra_headers: vec![ExtraHeader {
+                    name: "User-Agent",
+                    value: concat!("MIRA/", env!("CARGO_PKG_VERSION")).to_string(),
+                }],
+                session_header: Some("x-opencode-session"),
             });
             client.fetch_model_ids().await
         }
@@ -746,6 +775,7 @@ pub async fn provider_catalog(
                 timeout_secs:  p.timeout_secs,
                 auth_header:   AuthHeader::Bearer,
                 extra_headers: vec![],
+                session_header: None,
             });
             client.fetch_model_ids().await
         }
@@ -760,6 +790,7 @@ pub async fn provider_catalog(
                 timeout_secs:  p.timeout_secs,
                 auth_header:   AuthHeader::Bearer,
                 extra_headers: vec![],
+                session_header: None,
             });
             client.fetch_model_ids().await
         }
@@ -774,6 +805,7 @@ pub async fn provider_catalog(
                 timeout_secs:  p.timeout_secs,
                 auth_header:   AuthHeader::Bearer,
                 extra_headers: vec![],
+                session_header: None,
             });
             client.fetch_model_ids().await
         }
@@ -788,6 +820,7 @@ pub async fn provider_catalog(
                 timeout_secs:  p.timeout_secs,
                 auth_header:   AuthHeader::Bearer,
                 extra_headers: vec![],
+                session_header: None,
             });
             client.fetch_model_ids().await
         }
@@ -810,6 +843,7 @@ pub async fn provider_catalog(
                 timeout_secs:  p.timeout_secs,
                 auth_header:   auth,
                 extra_headers: vec![],
+                session_header: None,
             });
             client.fetch_model_ids().await
         }
@@ -1000,7 +1034,18 @@ pub async fn provider_test(
     let messages = [ChatMessage::user("ping".to_string())];
     let opts = GenerationOptions { temperature: 0.0, max_tokens: Some(1), ..Default::default() };
     let started = Instant::now();
-    match provider.generate(&messages, &opts).await {
+    // OpenCode Go requires every chat-completions request to carry a session
+    // header. The Settings probe is not an AgentCore conversation, so give each
+    // probe an isolated request-scoped session rather than reusing user state.
+    let response = if slug == "opencode" {
+        let request_context = crate::providers::ProviderRequestContext {
+            session_id: Some(format!("mira-provider-test-{}", uuid::Uuid::now_v7())),
+        };
+        provider.generate_with_context(&messages, &opts, &request_context).await
+    } else {
+        provider.generate(&messages, &opts).await
+    };
+    match response {
         Ok(resp) => axum::Json(ProviderTestResult {
             ok: true, provider: slug,
             model: if resp.model_name.is_empty() { model_override.unwrap_or_default() } else { resp.model_name },

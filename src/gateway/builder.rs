@@ -1888,7 +1888,7 @@ pub(crate) fn build_provider_chain(
         lmstudio::LmStudioProvider,
         local::OllamaProvider,
         openrouter::OpenRouterProvider,
-        openai_compat::{AuthHeader, OpenAiCompatClient, OpenAiCompatConfig},
+        openai_compat::{AuthHeader, ExtraHeader, OpenAiCompatClient, OpenAiCompatConfig},
         anthropic::AnthropicProvider,
         gemini::GeminiProvider,
     };
@@ -1959,7 +1959,15 @@ pub(crate) fn build_provider_chain(
                         model:         $cfg.default_model.clone(),
                         timeout_secs:  $cfg.timeout_secs,
                         auth_header:   AuthHeader::Bearer,
-                        extra_headers: vec![],
+                        extra_headers: if $slug == "opencode" {
+                            vec![ExtraHeader {
+                                name: "User-Agent",
+                                value: concat!("MIRA/", env!("CARGO_PKG_VERSION")).to_string(),
+                            }]
+                        } else { vec![] },
+                        session_header: if $slug == "opencode" {
+                            Some("x-opencode-session")
+                        } else { None },
                     }).with_degeneracy(config.agent.degeneracy_guard.clone());
                     providers.push(($slug, Box::new(client)));
                     info!("Provider: {} registered (model={})", $slug, $cfg.default_model);
@@ -1968,6 +1976,7 @@ pub(crate) fn build_provider_chain(
         }
     }
     register_openai_compat!("openai",   config.providers.openai);
+    register_openai_compat!("opencode", config.providers.opencode);
     register_openai_compat!("deepseek", config.providers.deepseek);
     register_openai_compat!("moonshot", config.providers.moonshot);
     register_openai_compat!("groq",     config.providers.groq);
@@ -2046,6 +2055,7 @@ pub(crate) fn build_provider_chain(
                     timeout_secs:  cc.timeout_secs,
                     auth_header:   auth,
                     extra_headers: vec![],
+                    session_header: None,
                 }).with_degeneracy(config.agent.degeneracy_guard.clone());
                 providers.push(("openai_compat", Box::new(client)));
                 info!("Provider: openai_compat '{}' registered (url={}, model={})",
@@ -2231,7 +2241,7 @@ pub(crate) fn build_single_provider(
         lmstudio::LmStudioProvider,
         local::OllamaProvider,
         openrouter::OpenRouterProvider,
-        openai_compat::{AuthHeader, OpenAiCompatClient, OpenAiCompatConfig},
+        openai_compat::{AuthHeader, ExtraHeader, OpenAiCompatClient, OpenAiCompatConfig},
         anthropic::AnthropicProvider,
         gemini::GeminiProvider,
     };
@@ -2246,7 +2256,14 @@ pub(crate) fn build_single_provider(
     let compat = |name: &str, key: String, base_url: String, model: String, timeout: u64| -> P {
         Arc::new(OpenAiCompatClient::new(OpenAiCompatConfig {
             provider_name: name.into(), base_url, api_key: key, model,
-            timeout_secs: timeout, auth_header: AuthHeader::Bearer, extra_headers: vec![],
+            timeout_secs: timeout, auth_header: AuthHeader::Bearer,
+            extra_headers: if name == "opencode" {
+                vec![ExtraHeader {
+                    name: "User-Agent",
+                    value: concat!("MIRA/", env!("CARGO_PKG_VERSION")).to_string(),
+                }]
+            } else { vec![] },
+            session_header: if name == "opencode" { Some("x-opencode-session") } else { None },
         }).with_degeneracy(config.agent.degeneracy_guard.clone()))
     };
 
@@ -2274,6 +2291,8 @@ pub(crate) fn build_single_provider(
         }
         "openai" => { let c = &config.providers.openai;
             compat("openai", keyed(&c.api_key)?, c.base_url.clone(), model_of(&c.default_model), c.timeout_secs) }
+        "opencode" => { let c = &config.providers.opencode;
+            compat("opencode", keyed(&c.api_key)?, c.base_url.clone(), model_of(&c.default_model), c.timeout_secs) }
         "deepseek" => { let c = &config.providers.deepseek;
             compat("deepseek", keyed(&c.api_key)?, c.base_url.clone(), model_of(&c.default_model), c.timeout_secs) }
         "moonshot" => { let c = &config.providers.moonshot;
@@ -3373,9 +3392,12 @@ mod failover_policy_tests {
         // used to silently fall back to the default chain).
         c.providers.anthropic.api_key = Some("sk-test".into());
         c.providers.deepseek.api_key  = Some("sk-test".into());
+        c.providers.opencode.api_key = Some("opencode-test-key".into());
         c.providers.gemini.api_key    = Some("sk-test".into());
         assert!(build_single_provider(&c, "anthropic", Some("claude-x")).is_some());
         assert!(build_single_provider(&c, "deepseek", None).is_some());
+        let opencode = build_single_provider(&c, "opencode", Some("opencode/test-model")).expect("OpenCode builds");
+        assert_eq!(opencode.name(), "opencode");
         assert!(build_single_provider(&c, "gemini", None).is_some());
         // Unknown slug → None.
         assert!(build_single_provider(&c, "nope", None).is_none());

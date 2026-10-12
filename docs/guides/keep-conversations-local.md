@@ -16,8 +16,8 @@ When your primary model fails mid-turn, MIRA tries the next provider in its
 **failover chain**. By default that chain contains **only local providers** —
 LM Studio, Ollama, and an OpenAI-compatible endpoint whose URL is a
 loopback / private / `.local` address. Cloud providers (OpenAI, Anthropic,
-Gemini, OpenRouter, DeepSeek, Groq, xAI, Moonshot) are **never** used as a
-silent automatic fallback unless you explicitly add them.
+OpenCode Go, Gemini, OpenRouter, DeepSeek, Groq, xAI, Moonshot) are **never**
+used as a silent automatic fallback unless you explicitly add them.
 
 If every local provider is down and no cloud fallback is configured, MIRA
 returns a clear error — it does **not** reach for the cloud to "save" the turn.

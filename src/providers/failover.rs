@@ -85,9 +85,14 @@ impl ModelProvider for FailoverProvider {
         messages: &[ChatMessage],
         options: &GenerationOptions,
     ) -> Result<GenerationResponse, crate::MiraError> {
+        self.generate_with_context(messages, options, &crate::providers::ProviderRequestContext::default()).await
+    }
+
+    async fn generate_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        ctx: &crate::providers::ProviderRequestContext) -> Result<GenerationResponse, crate::MiraError> {
         // Try primary first
         debug!("Trying primary provider: {}", self.primary.name());
-        let primary_reason = match self.primary.generate(messages, options).await {
+        let primary_reason = match self.primary.generate_with_context(messages, options, ctx).await {
             Ok(response) => { self.note_primary_ok(); return Ok(response); }
             Err(e) => {
                 warn!("Primary provider '{}' failed: {}, trying fallbacks...",
@@ -101,7 +106,7 @@ impl ModelProvider for FailoverProvider {
         let mut reasons = vec![format!("{}={}", self.primary.name(), primary_reason)];
         for (i, fallback) in self.fallbacks.iter().enumerate() {
             debug!("Trying fallback {} ({})", i + 1, fallback.name());
-            match fallback.generate(messages, options).await {
+            match fallback.generate_with_context(messages, options, ctx).await {
                 Ok(mut response) => {
                     info!("Fallback provider '{}' succeeded", fallback.name());
                     self.note_primary_down(&primary_reason, fallback.name());
@@ -130,8 +135,17 @@ impl ModelProvider for FailoverProvider {
         options:  &GenerationOptions,
         on_token: &mut (dyn FnMut(String) + Send),
     ) -> Result<GenerationResponse, crate::MiraError> {
+        self.generate_stream_with_context(
+            messages, options, on_token,
+            &crate::providers::ProviderRequestContext::default(),
+        ).await
+    }
+
+    async fn generate_stream_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        on_token: &mut (dyn FnMut(String) + Send), ctx: &crate::providers::ProviderRequestContext)
+        -> Result<GenerationResponse, crate::MiraError> {
         debug!("Trying primary provider (streaming): {}", self.primary.name());
-        let primary_reason = match self.primary.generate_stream(messages, options, on_token).await {
+        let primary_reason = match self.primary.generate_stream_with_context(messages, options, on_token, ctx).await {
             Ok(r) => { self.note_primary_ok(); return Ok(r); }
             Err(e) => {
                 warn!("Primary provider '{}' stream failed: {}, trying fallbacks…", self.primary.name(), e);
@@ -141,7 +155,7 @@ impl ModelProvider for FailoverProvider {
         let mut reasons = vec![format!("{}={}", self.primary.name(), primary_reason)];
         for (i, fallback) in self.fallbacks.iter().enumerate() {
             debug!("Trying fallback {} ({}) for streaming", i + 1, fallback.name());
-            match fallback.generate_stream(messages, options, on_token).await {
+            match fallback.generate_stream_with_context(messages, options, on_token, ctx).await {
                 Ok(mut r) => {
                     info!("Fallback provider '{}' stream succeeded", fallback.name());
                     self.note_primary_down(&primary_reason, fallback.name());

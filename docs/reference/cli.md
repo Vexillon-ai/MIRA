@@ -67,7 +67,7 @@ Common flags:
   flags and environment.
 - `--force` — reconfigure even if a config already exists.
 - `--provider <ID>` — `ollama` | `lmstudio` | `anthropic` | `openai` |
-  `openrouter` | `gemini` | `deepseek` | `groq` | `xai`.
+  `openrouter` | `opencode` | `gemini` | `deepseek` | `groq` | `xai`.
 - `--api-key <KEY>` / `--base-url <URL>` / `--model <NAME>` — provider details.
 - `--admin-user <NAME>` / `--admin-pass <PASS>` — the bootstrap admin account.
 - `--bind <localhost|lan>` — bind locally (default) or on all interfaces.

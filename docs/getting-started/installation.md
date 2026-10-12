@@ -17,7 +17,8 @@ You'll need:
   small always-on box (a home server, a mini PC, a VPS) is ideal since MIRA is a
   long-running service.
 - **An LLM provider** — either an API key for a hosted provider (Anthropic,
-  OpenAI, OpenRouter, DeepSeek, Gemini) **or** a local OpenAI-compatible server
+  OpenAI, OpenCode Go, OpenRouter, DeepSeek, Gemini) **or** a local
+  OpenAI-compatible server
   (LM Studio, Ollama, llama.cpp). You'll enter this during setup; you can change
   or add providers later.
 

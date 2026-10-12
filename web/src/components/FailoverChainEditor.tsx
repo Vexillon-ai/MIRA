@@ -22,6 +22,7 @@ const PROVIDER_META: ProviderMeta[] = [
   { slug: 'ollama',        label: 'Ollama' },
   { slug: 'openai_compat', label: 'OpenAI-compatible (custom)' },
   { slug: 'openrouter',    label: 'OpenRouter' },
+  { slug: 'opencode',      label: 'OpenCode Go' },
   { slug: 'openai',        label: 'OpenAI' },
   { slug: 'deepseek',      label: 'DeepSeek' },
   { slug: 'moonshot',      label: 'Moonshot (Kimi)' },

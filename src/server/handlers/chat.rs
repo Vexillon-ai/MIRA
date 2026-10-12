@@ -21,11 +21,11 @@ use crate::auth::{AuthUser, LocalAuthService};
 use crate::history::{HistoryStore, NewConversation, NewMessage, MessageRole};
 use crate::notifications::{NotificationBus, Notification, NotificationKind};
 use crate::onboarding::{
-    apply_ops, build_onboarding_prompt, extract_updates_from_transcript,
+    apply_ops, build_onboarding_prompt, extract_updates_from_transcript_with_context,
     OnboardingSchema, ProfilePreambleCache,
 };
 use crate::server::handlers::onboarding::DataDir;
-use crate::providers::ModelProvider;
+use crate::providers::{ModelProvider, ProviderRequestContext};
 use crate::types::{ChatMessage as ProviderChatMessage, MessageRole as ProviderMessageRole};
 use crate::web::LiveConfig;
 
@@ -448,8 +448,18 @@ pub async fn chat_handler(
                                 let agent2  = Arc::clone(&agent);
                                 let msg_c   = message.clone();
                                 let preview = derive_title_from_message(&message);
+                                let title_context = ProviderRequestContext {
+                                    session_id: Some(session_id.clone()),
+                                };
                                 tokio::spawn(async move {
-                                    generate_auto_title(agent2, hist2, cid, msg_c, preview).await;
+                                    generate_auto_title_with_context(
+                                        agent2,
+                                        hist2,
+                                        cid.clone(),
+                                        msg_c,
+                                        preview,
+                                        title_context,
+                                    ).await;
                                 });
                             }
 
@@ -522,6 +532,7 @@ pub async fn chat_handler(
                                     Arc::clone(&auth_for_task),
                                     conv_id_c.clone(),
                                     user_id.clone(),
+                                    crate::providers::ProviderRequestContext { session_id: Some(session_id.clone()) },
                                 ).await;
                                 if extractor_flipped && !primary_flipped {
                                     let _ = tx.send(Ok(
@@ -790,6 +801,7 @@ fn build_onboarding_turn_context(
     inject.insert("_conversation_id".to_string(), serde_json::Value::String(conv_id.to_owned()));
 
     TurnContext {
+        provider_request_context: None,
         system_prompt_override: Some(system_prompt),
         allowed_tool_names:     Some(allowed),
         inject_tool_args:       inject,
@@ -927,6 +939,7 @@ async fn run_onboarding_extractor(
     auth:     Arc<LocalAuthService>,
     conv_id:  String,
     user_id:  String,
+    request_context: crate::providers::ProviderRequestContext,
 ) -> bool {
     let schema = match OnboardingSchema::bundled() {
         Ok(s)  => s,
@@ -957,11 +970,12 @@ async fn run_onboarding_extractor(
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let updates = extract_updates_from_transcript(
+    let updates = extract_updates_from_transcript_with_context(
         &provider,
         &schema,
         &transcript,
         &progress,
+        &request_context,
     ).await;
 
     if !updates.ops.is_empty() {
@@ -1028,6 +1042,45 @@ pub(crate) async fn generate_auto_title(
     first_message: String,
     fallback:      String,
 ) {
+    generate_auto_title_with_optional_context(
+        agent,
+        history,
+        conv_id,
+        first_message,
+        fallback,
+        None,
+    ).await;
+}
+
+// Context-aware variant used by the web chat path. Other callers retain the
+// legacy context-free behaviour because they do not have a provider session
+// identifier to forward here.
+pub(crate) async fn generate_auto_title_with_context(
+    agent:         Arc<AgentCore>,
+    history:       Arc<HistoryStore>,
+    conv_id:       String,
+    first_message: String,
+    fallback:      String,
+    context:       ProviderRequestContext,
+) {
+    generate_auto_title_with_optional_context(
+        agent,
+        history,
+        conv_id,
+        first_message,
+        fallback,
+        Some(context),
+    ).await;
+}
+
+async fn generate_auto_title_with_optional_context(
+    agent:         Arc<AgentCore>,
+    history:       Arc<HistoryStore>,
+    conv_id:       String,
+    first_message: String,
+    fallback:      String,
+    context:       Option<ProviderRequestContext>,
+) {
     use crate::types::{ChatMessage, GenerationOptions};
 
     let preview_len = first_message.len().min(500);
@@ -1066,7 +1119,12 @@ pub(crate) async fn generate_auto_title(
         ..Default::default()
     };
 
-    match agent.provider.generate(&messages, &opts).await {
+    let result = match context.as_ref() {
+        Some(context) => agent.provider.generate_with_context(&messages, &opts, context).await,
+        None => agent.provider.generate(&messages, &opts).await,
+    };
+
+    match result {
         Ok(resp) => {
             let title = sanitize_auto_title(&resp.content).unwrap_or(fallback);
             if let Err(e) = history.update_conversation_title(&conv_id, &title) {
