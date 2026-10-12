@@ -82,7 +82,8 @@ impl McpClient {
         url: &str,
         auth_token: Option<&str>,
     ) -> StreamableHttpClientTransportConfig {
-        let mut config = StreamableHttpClientTransportConfig::with_uri(url.to_owned());
+        let mut config =
+            StreamableHttpClientTransportConfig::with_uri(url.to_owned());
         if let Some(token) = auth_token.filter(|token| !token.is_empty()) {
             config = config.auth_header(token);
         }
@@ -483,7 +484,8 @@ mod tests {
 
     #[test]
     fn http_transport_config_omits_empty_token() {
-        let config = McpClient::http_transport_config("https://mcp.example.test/v1", Some(""));
+        let config =
+            McpClient::http_transport_config("https://mcp.example.test/v1", Some(""));
 
         assert!(config.auth_header.is_none());
     }
@@ -508,7 +510,10 @@ mod tests {
             reconnect_config.auth_token.as_deref(),
         );
 
-        assert_eq!(transport_config.auth_header.as_deref(), Some("synthetic-reconnect-token"));
+        assert_eq!(
+            transport_config.auth_header.as_deref(),
+            Some("synthetic-reconnect-token")
+        );
     }
 }
 

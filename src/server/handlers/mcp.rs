@@ -24,7 +24,8 @@ use tracing::{info, warn};
 
 use crate::auth::{AdminUser, AuthUser};
 use crate::mcp::{
-    McpCatalogEntry, McpCatalogStore, McpServerRegistry, McpServerResponse, McpServerStatus,
+    McpCatalogEntry, McpCatalogStore, McpServerRegistry, McpServerResponse,
+    McpServerStatus,
     McpServerStore, NewMcpServer, UpdateMcpServer, UpsertCatalogEntry,
 };
 

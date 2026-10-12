@@ -4934,7 +4934,9 @@ pub struct McpServerConfig {
 
 impl std::fmt::Debug for McpServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let env = self.env.keys()
+        let env = self
+            .env
+            .keys()
             .map(|key| (key, "***"))
             .collect::<std::collections::HashMap<_, _>>();
         f.debug_struct("McpServerConfig")
@@ -4944,7 +4946,10 @@ impl std::fmt::Debug for McpServerConfig {
             .field("args", &self.args)
             .field("env", &env)
             .field("url", &self.url)
-            .field("auth_token_configured", &self.auth_token.as_ref().is_some_and(|v| !v.is_empty()))
+            .field(
+                "auth_token_configured",
+                &self.auth_token.as_ref().is_some_and(|v| !v.is_empty()),
+            )
             .field("enabled", &self.enabled)
             .field("sampling_enabled", &self.sampling_enabled)
             .finish()
@@ -4958,10 +4963,16 @@ mod mcp_debug_tests {
     #[test]
     fn debug_output_redacts_auth_and_environment_values() {
         let mut env = std::collections::HashMap::new();
-        env.insert("SYNTHETIC_SECRET".to_owned(), "synthetic-env-secret".to_owned());
+        env.insert(
+            "SYNTHETIC_SECRET".to_owned(),
+            "synthetic-env-secret".to_owned(),
+        );
         let config = McpServerConfig {
-            name: "synthetic".to_owned(), transport: "http".to_owned(),
-            command: None, args: vec![], env,
+            name: "synthetic".to_owned(),
+            transport: "http".to_owned(),
+            command: None,
+            args: vec![],
+            env,
             url: Some("https://mcp.example.test/v1".to_owned()),
             auth_token: Some("synthetic-auth-token".to_owned()),
             enabled: true, sampling_enabled: false,
