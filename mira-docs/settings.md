@@ -6,6 +6,8 @@ MIRA has two kinds of settings, with different ownership and access.
 
 Server-wide configuration in `mira_config.json`: LLM providers + keys, channels, TTS/STT, agent behaviour, security, proxy, etc. The full, always-current list is in **`settings-reference.md`** (generated from the config schema).
 
+**Custom / OpenAI-compatible providers.** Besides the named providers (OpenAI, OpenRouter, OpenCode Go, Anthropic, Gemini, DeepSeek, Groq, xAI, Ollama, LM Studio), MIRA can talk to **any OpenAI-compatible endpoint** — a self-hosted gateway, vLLM/LiteLLM, a proxy, or a remote Ollama/LM Studio behind auth. Pick **"Custom (OpenAI-compatible)"** in the `mira setup` wizard (it prompts for the base URL, an auth style — Bearer / none / Azure — and a key), or set `providers.openai_compat` directly (`name`, `base_url`, `api_key`, `default_model`, `auth_style`) and point `primary_provider` at it.
+
 - **Who can view/change:** admins only.
 - **Where:** Settings UI (Server tab, provider/channel/voice sections), or `mira_config.json` directly. MIRA can also read and (for admins, with confirmation) change many of these on request.
 - **Secrets are redacted.** API keys, tokens, passwords, `jwt_secret`, per-channel `hmac_key`, etc. are never shown — MIRA will tell you whether one is *set* or *unset*, but never read the value back (it would otherwise leak into chat logs, voice notes, or relayed messages). You can overwrite a secret, but you can't read it.

@@ -67,6 +67,11 @@ const PROVIDERS: &[ProviderSpec] = &[
     ProviderSpec { id: "deepseek",   label: "DeepSeek",                  local: false },
     ProviderSpec { id: "groq",       label: "Groq",                      local: false },
     ProviderSpec { id: "xai",        label: "xAI (Grok)",                local: false },
+    // Generic catch-all: any OpenAI-compatible endpoint (self-hosted gateway,
+    // vLLM/LiteLLM, a proxy, a remote LM Studio/Ollama behind auth, …). Prompts
+    // for URL + auth style + key and wires `providers.openai_compat`. `id` MUST
+    // equal the registration slug so `primary_provider` routes to it.
+    ProviderSpec { id: "openai_compat", label: "Custom (OpenAI-compatible — your own URL + key)", local: false },
 ];
 
 /// The collected answers, ready to apply.
@@ -74,6 +79,9 @@ struct Answers {
     provider_id: String,
     api_key: Option<String>,
     base_url: String,
+    /// Auth style for the custom (`openai_compat`) provider: "bearer" | "none"
+    /// | "azure". Ignored for the fixed providers. Defaults to "bearer".
+    auth_style: String,
     model: String,
     admin_user: String,
     admin_pass: String,
@@ -210,9 +218,37 @@ fn interactive(opts: &SetupOptions, existing_admin: Option<String>) -> Result<Op
     // Provider details + a live test loop.
     let mut base_url = default_base(&def, spec.id);
     let mut api_key: Option<String> = None;
+    let mut auth_style = "bearer".to_string();
     let model: String;
     loop {
-        if spec.local {
+        if spec.id == "openai_compat" {
+            // Custom OpenAI-compatible endpoint: URL + auth style (+ key unless
+            // the endpoint is unsecured). Covers self-hosted gateways and a
+            // remote LM Studio/Ollama behind a reverse-proxy that adds auth.
+            base_url = Input::with_theme(&theme())
+                .with_prompt("Base URL (OpenAI-compatible, e.g. https://host:port/v1)")
+                .default(base_url.clone())
+                .interact_text()?;
+            let styles = [
+                "Bearer token (standard — Authorization: Bearer <key>)",
+                "No auth (unsecured endpoint)",
+                "Azure (api-key header)",
+            ];
+            let sidx = Select::with_theme(&theme())
+                .with_prompt("Authentication")
+                .items(&styles)
+                .default(0)
+                .interact()?;
+            auth_style = match sidx { 1 => "none", 2 => "azure", _ => "bearer" }.to_string();
+            if auth_style == "none" {
+                api_key = None;
+            } else {
+                let key = Password::with_theme(&theme())
+                    .with_prompt("API key")
+                    .interact()?;
+                api_key = Some(key);
+            }
+        } else if spec.local {
             base_url = Input::with_theme(&theme())
                 .with_prompt(format!("{} URL", spec.label))
                 .default(base_url.clone())
@@ -317,7 +353,7 @@ fn interactive(opts: &SetupOptions, existing_admin: Option<String>) -> Result<Op
         return Ok(None);
     }
 
-    Ok(Some(Answers { provider_id: spec.id.to_string(), api_key, base_url, model, admin_user, admin_pass, host, port, data_dir }))
+    Ok(Some(Answers { provider_id: spec.id.to_string(), api_key, base_url, auth_style, model, admin_user, admin_pass, host, port, data_dir }))
 }
 
 fn ask_model(opts: &SetupOptions, models: &[String]) -> Result<String, Box<dyn Error>> {
@@ -359,7 +395,10 @@ fn from_opts(opts: &SetupOptions, existing_admin: Option<String>) -> Result<Answ
         .or_else(|| env("MIRA_SETUP_BASE_URL"))
         .unwrap_or_else(|| default_base(&def, spec.id));
     let api_key = opts.api_key.clone().or_else(|| env("MIRA_SETUP_API_KEY"));
-    if !spec.local && api_key.is_none() {
+    // Custom (openai_compat) auth style; also governs whether a key is required.
+    let auth_style = env("MIRA_SETUP_AUTH_STYLE").unwrap_or_else(|| "bearer".to_string());
+    let key_optional = spec.local || (spec.id == "openai_compat" && auth_style == "none");
+    if !key_optional && api_key.is_none() {
         return Err(format!("provider '{provider_id}' needs --api-key (or MIRA_SETUP_API_KEY)").into());
     }
 
@@ -401,7 +440,7 @@ fn from_opts(opts: &SetupOptions, existing_admin: Option<String>) -> Result<Answ
         }
     };
 
-    Ok(Answers { provider_id: spec.id.to_string(), api_key, base_url, model, admin_user, admin_pass, host, port, data_dir })
+    Ok(Answers { provider_id: spec.id.to_string(), api_key, base_url, auth_style, model, admin_user, admin_pass, host, port, data_dir })
 }
 
 // ── apply (shared) ──────────────────────────────────────────────────────────
@@ -443,6 +482,18 @@ fn apply(a: &Answers, config_path: &PathBuf) -> Result<(), Box<dyn Error>> {
         "deepseek" => { p.deepseek.enabled = true; p.deepseek.api_key = a.api_key.clone(); p.deepseek.base_url = a.base_url.clone(); p.deepseek.default_model = a.model.clone(); }
         "groq" => { p.groq.enabled = true; p.groq.api_key = a.api_key.clone(); p.groq.base_url = a.base_url.clone(); p.groq.default_model = a.model.clone(); }
         "xai" => { p.xai.enabled = true; p.xai.api_key = a.api_key.clone(); p.xai.base_url = a.base_url.clone(); p.xai.default_model = a.model.clone(); }
+        "openai_compat" => {
+            p.openai_compat.enabled = true;
+            // `name` must equal the registration slug "openai_compat": routing
+            // matches `primary_provider` against that slug, and model resolution
+            // (`provider_default_model`) matches this block by `name` — keeping
+            // both "openai_compat" makes them agree.
+            p.openai_compat.name = "openai_compat".to_string();
+            p.openai_compat.base_url = a.base_url.clone();
+            p.openai_compat.api_key = a.api_key.clone();
+            p.openai_compat.default_model = a.model.clone();
+            p.openai_compat.auth_style = a.auth_style.clone();
+        }
         other => return Err(format!("unknown provider '{other}'").into()),
     }
 
