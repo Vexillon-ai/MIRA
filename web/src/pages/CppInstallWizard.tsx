@@ -126,9 +126,12 @@ function ActorIcon({ actor }: { actor: WizardStep['actor'] }) {
 }
 
 export default function CppInstallWizard({
-  file, manifest, component, trust, update, onDone, onClose,
+  file, sourceUrl, manifest, component, trust, update, onDone, onClose,
 }: {
-  file: File
+  /** The uploaded bundle. Exactly one of `file` / `sourceUrl` is set. */
+  file?: File
+  /** A package fetched by URL (Browse / install-by-URL). Fresh install only. */
+  sourceUrl?: string
   manifest: PackageSummary
   component: ComponentSummary
   trust: TrustLevel
@@ -177,9 +180,15 @@ export default function CppInstallWizard({
         }
         answers[f.key] = values[f.key]
       }
-      return isUpdate
-        ? packagesApi.cppUpdate(file, answers, { capabilityAck: capAck, trustAck, allowUntrusted: ack })
-        : packagesApi.cppInstall(file, answers, ack)
+      if (isUpdate) {
+        // Updating a channel provider re-runs capability/trust gates against the
+        // uploaded bundle; updating from a source URL isn't wired yet.
+        if (!file) throw new Error('To update a channel provider, download the .mirapkg and use Upload.')
+        return packagesApi.cppUpdate(file, answers, { capabilityAck: capAck, trustAck, allowUntrusted: ack })
+      }
+      return file
+        ? packagesApi.cppInstall(file, answers, ack)
+        : packagesApi.cppInstallUrl(sourceUrl!, answers, ack)
     },
     onSuccess: (s) => handleState(s),
     onError: (e: any) => toast.error(`Couldn't start: ${e?.response?.data?.error ?? e?.message ?? e}`),

@@ -1050,7 +1050,48 @@ pub async fn cpp_install_begin(
         Ok(t) => t,
         Err(e) => return bad(e),
     };
-    let (bytes, admin_input, allow_untrusted) = (up.bundle, up.config, up.allow_untrusted);
+    cpp_begin_from_bytes(up.bundle, up.config, up.allow_untrusted, &admin.id, &data_dir.0, &live_cfg, &mgr).await
+}
+
+// `POST /api/admin/packages/cpp/install-url` — begin a guided cpp_provider
+// install from a package fetched by URL (SSRF-guarded, admin-initiated egress),
+// so Browse / install-by-URL can install a channel provider instead of only a
+// file upload. Reuses the exact same begin path as the upload endpoint.
+#[derive(Debug, Deserialize)]
+pub struct CppInstallUrlRequest {
+    pub url: String,
+    #[serde(default)]
+    pub config: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub allow_untrusted: bool,
+}
+
+pub async fn cpp_install_begin_url(
+    AdminUser(admin): AdminUser,
+    Extension(data_dir): Extension<DataDir>,
+    Extension(live_cfg): Extension<Arc<LiveConfig>>,
+    Extension(mgr): Extension<ChannelManagerExt>,
+    Json(req): Json<CppInstallUrlRequest>,
+) -> Response {
+    let policy = package_fetch_policy(&live_cfg).await;
+    let bytes = match packages::fetch::fetch_bundle(&policy, &req.url, &admin.id).await {
+        Ok(b) => b,
+        Err(e) => return bad(e),
+    };
+    cpp_begin_from_bytes(bytes, req.config, req.allow_untrusted, &admin.id, &data_dir.0, &live_cfg, &mgr).await
+}
+
+// Shared begin: parse → verify → trust-gate → extract payload → run the wizard's
+// first turn. Used by both the multipart upload and the install-by-URL paths.
+async fn cpp_begin_from_bytes(
+    bytes:           Vec<u8>,
+    admin_input:     BTreeMap<String, serde_json::Value>,
+    allow_untrusted: bool,
+    admin_id:        &str,
+    data_dir:        &std::path::Path,
+    live_cfg:        &Arc<LiveConfig>,
+    mgr:             &ChannelManagerExt,
+) -> Response {
     let parsed = match packages::parse_bundle(&bytes) {
         Ok(p) => p,
         Err(e) => return bad(e),
@@ -1058,7 +1099,7 @@ pub async fn cpp_install_begin(
     if let Err(e) = parsed.manifest.validate() {
         return bad(e.to_string());
     }
-    let trust_path = TrustStore::default_path(&skills::default_skills_dir(&data_dir.0));
+    let trust_path = TrustStore::default_path(&skills::default_skills_dir(data_dir));
     let trust_store = TrustStore::load(&trust_path).unwrap_or_else(|_| TrustStore::empty());
     let trust = packages::verify_package(&parsed.manifest, &trust_store);
     if let Err(e) = packages::gate_install(&trust, &parsed.manifest, allow_untrusted) {
@@ -1072,12 +1113,12 @@ pub async fn cpp_install_begin(
     };
 
     // Open stores + extract payload (so it's on disk + ledgered for teardown).
-    let auth_db = data_dir.0.join("auth.db");
+    let auth_db = data_dir.join("auth.db");
     let channel_store = match ChannelAccountStore::open(&auth_db) {
         Ok(s) => s,
         Err(e) => return ise(e.to_string()),
     };
-    let secrets = match open_secrets(&data_dir.0) {
+    let secrets = match open_secrets(data_dir) {
         Ok(s) => s,
         Err(e) => return ise(e),
     };
@@ -1089,7 +1130,7 @@ pub async fn cpp_install_begin(
         Ok(s) => s,
         Err(e) => return ise(e.to_string()),
     };
-    let install_dir = data_dir.0.join("packages").join(&m.id);
+    let install_dir = data_dir.join("packages").join(&m.id);
     // Always create the install dir, even for a payload-free package — it's the
     // working dir for `command { run_by: mira }` and `mira.write_service` steps.
     if let Err(e) = std::fs::create_dir_all(&install_dir) {
@@ -1100,10 +1141,10 @@ pub async fn cpp_install_begin(
         return bad(format!("extract payload: {e}"));
     }
 
-    let base_url = base_url_from(&live_cfg).await;
+    let base_url = base_url_from(live_cfg).await;
     let host = LiveHost::new(channel_store, secrets, base_url);
     let pkg_id = m.id.clone();
-    let admin_id = admin.id.clone();
+    let admin_id = admin_id.to_string();
     let cs = component.config_schema.clone();
     let sg = component.setup_guide.clone();
     let install_dir_s = install_dir.to_string_lossy().to_string();
@@ -1133,7 +1174,7 @@ pub async fn cpp_install_begin(
         LedgerEntry::Files { dir: install_dir.to_string_lossy().to_string() },
     );
 
-    finish_turn(session, &data_dir.0, &pkg_store, &session_store, &mgr).await
+    finish_turn(session, data_dir, &pkg_store, &session_store, mgr).await
 }
 
 // `POST /api/admin/packages/cpp/update` — begin a guided update of an installed

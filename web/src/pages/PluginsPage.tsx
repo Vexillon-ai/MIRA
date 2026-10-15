@@ -223,7 +223,7 @@ export default function PluginsPage() {
                 )}
                 <button
                   className={styles.installBtn}
-                  disabled={installMut.isPending || !file || (preview.trust.level !== 'verified' && !ack)}
+                  disabled={installMut.isPending || (!file && !sourceUrl) || (preview.trust.level !== 'verified' && !ack)}
                   onClick={() => installMut.mutate()}
                 >
                   {installMut.isPending ? 'Installing…' : 'Install'}
@@ -233,9 +233,10 @@ export default function PluginsPage() {
           </div>
         )}
 
-        {preview && cppComponent && file && (
+        {preview && cppComponent && (file || sourceUrl) && (
           <CppInstallWizard
-            file={file}
+            file={file ?? undefined}
+            sourceUrl={sourceUrl ?? undefined}
             manifest={preview.manifest}
             component={cppComponent}
             trust={preview.trust}

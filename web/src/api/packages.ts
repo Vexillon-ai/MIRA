@@ -252,6 +252,15 @@ export const packagesApi = {
     return data
   },
 
+  /** Begin the cpp_provider wizard from a package fetched by URL (Browse /
+   *  install-by-URL for channel providers). Same WizardState as `cppInstall`. */
+  async cppInstallUrl(url: string, config: Record<string, any>, allowUntrusted = false): Promise<WizardState> {
+    const { data } = await api.post<WizardState>('/api/admin/packages/cpp/install-url', {
+      url, config, allow_untrusted: allowUntrusted,
+    })
+    return data
+  },
+
   /** Begin a guided update of an installed cpp_provider package. A 409 means a
    *  re-approval gate (capability/trust) is unmet — the error body carries the
    *  plan + which ack is needed. */

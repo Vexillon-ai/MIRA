@@ -1010,6 +1010,10 @@ pub fn build_router(
             .route("/api/admin/packages/cpp/install",
                    post(crate::server::handlers::packages::cpp_install_begin)
                        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
+            // Begin the cpp_provider wizard from a URL-fetched package (Browse /
+            // install-by-URL routing for channel providers).
+            .route("/api/admin/packages/cpp/install-url",
+                   post(crate::server::handlers::packages::cpp_install_begin_url))
             .route("/api/admin/packages/cpp/update",
                    post(crate::server::handlers::packages::cpp_update_begin))
             .route("/api/admin/packages/cpp/{id}/session",
