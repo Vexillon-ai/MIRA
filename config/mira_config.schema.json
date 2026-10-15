@@ -3124,6 +3124,43 @@
           }
         }
       }
+    },
+    "packages": {
+      "description": "Package distribution sources — admin-managed 'apt sources' for discovering and installing .mirapkg / .miraskill packages. Each source yields a signed index.json that MIRA fetches, verifies against the source's pinned key, and merges into the Plugins browse list.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sources": {
+          "description": "Discovery sources consulted on refresh. The first-party Vexillon source ships disabled until its package repo and signing key exist.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "description": "Human label shown in the UI and on each package's trust row.",
+                "type": "string"
+              },
+              "index_url": {
+                "description": "URL of the source's index.json (GitHub raw/Pages today; a registry API later serves the same schema).",
+                "type": "string"
+              },
+              "enabled": {
+                "description": "Whether this source is consulted on refresh.",
+                "type": "boolean"
+              },
+              "pinned_key": {
+                "description": "ed25519 public key (base64) the source's index signature must verify against. Empty means the index is fetched but surfaced as unverified; the per-artifact signature and trust store remain the authoritative trust decision either way.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "index_url"
+            ]
+          }
+        }
+      }
     }
   }
 }

@@ -201,6 +201,13 @@ pub struct MiraConfig {
     // server behaves exactly as before. See `RestrictedModeConfig`.
     #[serde(default)]
     pub restricted_mode: RestrictedModeConfig,
+
+    // 0.355.0 — package distribution sources.
+    // Admin-managed "apt sources" for discovering + installing
+    // `.mirapkg`/`.miraskill` packages. The first-party Vexillon source ships
+    // here (disabled until its repo + signing key exist).
+    #[serde(default)]
+    pub packages: PackagesConfig,
 }
 
 // Restricted Mode configuration. When `profile` names a built-in profile
@@ -3749,6 +3756,53 @@ fn default_max_action_secs()  -> u64   { 300 }
 
 // ── Default helpers ───────────────────────────────────────────────────────────
 
+// ── Package distribution ──────────────────────────
+
+/// Package discovery sources — admin-managed "apt sources" for `.mirapkg` /
+/// `.miraskill` distribution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackagesConfig {
+    /// Sources consulted on refresh. Each yields a signed catalog (`index.json`)
+    /// the client fetches, verifies against the source's pinned key, and merges
+    /// into the browse list (dedup by id).
+    #[serde(default = "default_package_sources")]
+    pub sources: Vec<PackageSource>,
+}
+
+impl Default for PackagesConfig {
+    fn default() -> Self { Self { sources: default_package_sources() } }
+}
+
+/// One discovery source. A GitHub raw/Pages `index.json` today; a registry API
+/// later serves the same schema, so only this URL/transport changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageSource {
+    /// Human label shown in the UI + on each package's trust row.
+    pub name: String,
+    /// URL of the source's `index.json`.
+    pub index_url: String,
+    /// Whether this source is consulted on refresh.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// ed25519 public key (base64) the source's index signature must verify
+    /// against — pinned so a tampered catalog can't redirect installs. Empty =
+    /// the index is fetched but surfaced as unverified; the per-artifact
+    /// signature + trust store stays the authoritative trust decision either way.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pinned_key: String,
+}
+
+fn default_package_sources() -> Vec<PackageSource> {
+    vec![PackageSource {
+        name:       "Vexillon".to_string(),
+        index_url:  "https://raw.githubusercontent.com/Vexillon-ai/mira-packages/main/index.json".to_string(),
+        // Disabled until the Vexillon-ai/mira-packages repo + signing key exist
+        // an admin enables it + pins the key then.
+        enabled:    false,
+        pinned_key: String::new(),
+    }]
+}
+
 fn default_config_version()  -> String  { "1".to_string() }
 fn default_data_dir()        -> String  { "~/.mira/data".to_string() }
 fn default_primary_provider()-> String  { "lmstudio".to_string() }
@@ -4465,6 +4519,7 @@ impl Default for MiraConfig {
             image:           ImageConfig::default(),
             video:           VideoConfig::default(),
             restricted_mode: RestrictedModeConfig::default(),
+            packages:        PackagesConfig::default(),
         }
     }
 }

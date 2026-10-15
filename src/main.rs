@@ -585,6 +585,15 @@ pub enum SkillAction {
         #[arg(long, value_name = "PATH")]
         out:  Option<std::path::PathBuf>,
     },
+    // Sign a package-source `index.json`, writing a detached `<path>.sig`.
+    // Used to publish a distribution source's catalog; the signature is verified by clients against the source's pinned key.
+    IndexSign {
+        // Path to the `index.json` to sign.
+        path: std::path::PathBuf,
+        // Path to a secret key file produced by `mira skill keygen`.
+        #[arg(long, value_name = "PATH")]
+        key:  std::path::PathBuf,
+    },
     // Manage encrypted env-var secrets used by subprocess adapters
     // (Claude Code, OpenCode). Values are stored in
     // `~/.mira/data/skill_secrets.db`, encrypted with the master
@@ -1219,6 +1228,7 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
             SkillAction::Keygen   { out }           => mira::skills::cli::SkillCliCommand::Keygen   { out: out.clone() },
             SkillAction::Sign     { path, key }     => mira::skills::cli::SkillCliCommand::Sign     { path: path.clone(), key: key.clone() },
             SkillAction::Package  { path, out }     => mira::skills::cli::SkillCliCommand::Package  { path: path.clone(), out: out.clone() },
+            SkillAction::IndexSign { path, key }    => mira::skills::cli::SkillCliCommand::IndexSign { path: path.clone(), key: key.clone() },
             SkillAction::Secret { .. } | SkillAction::RefreshBundled { .. } =>
                 unreachable!("handled above"),
         };

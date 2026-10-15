@@ -3133,7 +3133,7 @@ fn build_search_backends(
 
 // Translate the config-side HTTP policy into the in-process `HttpPolicyConfig`.
 // Lives in the builder so tool construction stays ignorant of config shape.
-fn build_http_policy_config(config: &MiraConfig) -> HttpPolicyConfig {
+pub(crate) fn build_http_policy_config(config: &MiraConfig) -> HttpPolicyConfig {
     let wf   = &config.agent.tools.web_fetch;
     let http = &config.security.http;
 

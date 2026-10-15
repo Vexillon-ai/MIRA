@@ -38,6 +38,7 @@ pub enum SkillCliCommand {
     Keygen   { out: Option<PathBuf> },
     Sign     { path: PathBuf, key: PathBuf },
     Package  { path: PathBuf, out: Option<PathBuf> },
+    IndexSign { path: PathBuf, key: PathBuf },
 }
 
 pub fn run(cmd: SkillCliCommand) -> Result<(), Box<dyn Error>> {
@@ -47,6 +48,7 @@ pub fn run(cmd: SkillCliCommand) -> Result<(), Box<dyn Error>> {
         SkillCliCommand::Keygen   { out }           => keygen(out.as_deref()),
         SkillCliCommand::Sign     { path, key }     => sign(&path, &key),
         SkillCliCommand::Package  { path, out }     => package(&path, out.as_deref()),
+        SkillCliCommand::IndexSign { path, key }    => index_sign(&path, &key),
     }
 }
 
@@ -266,6 +268,25 @@ fn read_key_file(path: &Path) -> Result<SigningKey, Box<dyn Error>> {
     let arr: [u8; 32] = bytes.as_slice().try_into()
         .map_err(|_| format!("`secret:` must decode to 32 bytes, got {}", bytes.len()))?;
     Ok(SigningKey::from_bytes(&arr))
+}
+
+// ─── index-sign ────────────────────────────────────
+
+fn index_sign(path: &Path, key_path: &Path) -> Result<(), Box<dyn Error>> {
+    let signing = read_key_file(key_path)?;
+    let bytes = fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+    let sig = crate::packages::index::sign_index(&bytes, &signing);
+    let sig_path = PathBuf::from(format!("{}.sig", path.display()));
+    fs::write(&sig_path, format!("{sig}\n"))
+        .map_err(|e| format!("can't write {}: {e}", sig_path.display()))?;
+    let fp = fingerprint_of(&signing.verifying_key());
+    println!("✓ signed {}", path.display());
+    println!("  → {}", sig_path.display());
+    println!("  key fingerprint: {fp}");
+    println!();
+    println!("Pin this key as the source's `pinned_key` (base64) in packages.sources");
+    println!("and publish index.json + index.json.sig side by side.");
+    Ok(())
 }
 
 // ─── sign ──────────────────────────────────────────────────────────────────

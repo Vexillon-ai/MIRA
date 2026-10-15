@@ -971,6 +971,21 @@ pub fn build_router(
             .route("/api/admin/packages/install",
                    post(crate::server::handlers::packages::install_package)
                        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
+            // D1 — install-from-URL: fetch a .mirapkg by URL (SSRF-guarded,
+            // admin-initiated egress) then the identical preview/install path.
+            .route("/api/admin/packages/preview-url",
+                   post(crate::server::handlers::packages::preview_package_url))
+            .route("/api/admin/packages/install-url",
+                   post(crate::server::handlers::packages::install_package_url))
+            // D2 — discovery: configured sources + the merged, signature-
+            // verified browse catalog (refreshes enabled sources on GET).
+            .route("/api/admin/packages/sources",
+                   get(crate::server::handlers::packages::list_package_sources))
+            .route("/api/admin/packages/catalog",
+                   get(crate::server::handlers::packages::package_catalog))
+            // D4 — installed packages with a semver-newer version in a source.
+            .route("/api/admin/packages/updates",
+                   get(crate::server::handlers::packages::package_updates))
             .route("/api/admin/packages/{id}",
                    delete(crate::server::handlers::packages::uninstall_package))
             .route("/api/admin/packages/{id}/disable",

@@ -14,6 +14,19 @@
 .upload:hover { border-color: var(--accent); color: var(--text-primary); }
 .upload input { display: none; }
 
+/* D1 — install-from-URL row */
+.urlRow { display: flex; gap: 8px; align-items: center; }
+.urlInput {
+  flex: 1; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--bg-base); color: var(--text-primary); font-size: 13px;
+}
+.urlInput:focus { outline: none; border-color: var(--accent); }
+.urlBtn {
+  padding: 10px 16px; border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--accent); color: var(--accent-contrast, #fff); cursor: pointer; font-size: 13px; white-space: nowrap;
+}
+.urlBtn:disabled { opacity: 0.55; cursor: default; }
+
 .card { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 16px; background: var(--bg-base); }
 .cardHead { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 .title { margin: 0 0 4px 0; font-size: 16px; font-weight: 600; }
@@ -142,3 +155,10 @@
 .diffGroup { display: flex; flex-direction: column; gap: 4px; }
 .diffHead { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
 .diffList { margin: 0; padding-left: 18px; font-size: 13px; color: var(--text-secondary); display: flex; flex-direction: column; gap: 2px; }
+
+/* D3 — Browse catalog */
+.browseHead { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.sourceLine { display: flex; flex-wrap: wrap; gap: 16px; margin: 4px 0 8px; font-size: 12px; }
+.pkgName { font-weight: 600; color: var(--text-primary); }
+.pkgId { color: var(--text-muted); font-size: 12px; font-family: var(--font-mono, monospace); }
+.cardActions { display: flex; justify-content: flex-end; margin-top: 8px; }

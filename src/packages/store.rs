@@ -29,6 +29,10 @@ pub enum LedgerEntry {
     McpServer { id: String },
     // A directory of extracted payload files (removed on uninstall).
     Files { dir: String },
+    // A skill directory this package activated into the global skills dir
+    // (`<data_dir>/skills/<skill_id>/`); teardown removes it + hot-reloads
+    // `skill_id` = the skill's manifest id.
+    SkillDir { skill_id: String, dir: String },
     // A secret this package stored in the vault under its package id.
     Secret { key: String },
     // A CPP/External channel account this package created (id = its uuid).

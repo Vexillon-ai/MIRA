@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -35,6 +35,10 @@ pub struct InstallOutcome {
     // app-tool surface (`ToolRegistry::set_app_tools`) so an app's tools go live
     // without a restart — the app analog of `mcp_server_ids`.
     pub app_ids: Vec<String>,
+    // Skill ids this package activated into the global skills dir. Lets the
+    // caller hot-reload the skill surface (`skills::runtime::reload_skills`) so a
+    // distributed skill goes live without a restart.
+    pub skill_ids: Vec<String>,
     // Non-fatal limitations surfaced to the admin (e.g. best-effort Tier-B egress).
     pub warnings: Vec<String>,
 }
@@ -175,6 +179,7 @@ pub fn install_package(
     let mut ledger: Ledger = Vec::new();
     let mut mcp_ids: Vec<String> = Vec::new();
     let mut app_ids: Vec<String> = Vec::new();
+    let mut skill_ids: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
     // 1. Extract payload files to <packages_dir>/<id>/ (path-safety already
@@ -238,11 +243,31 @@ pub fn install_package(
                 }
                 app_ids.push(m.id.clone());
             }
+            ComponentKind::Skill => {
+                // A skill component ships a skill directory (skill.toml +
+                // prompts/…) inside the payload. Activation = copy it into the
+                // GLOBAL skills dir so the loader + `reload_skills` pick it up
+                // (converging with skill self-authoring).
+                // `spec.path` names the subdir within the payload (default root).
+                match install_skill_component(component, &install_dir) {
+                    Ok((skill_id, dest)) => {
+                        ledger.push(LedgerEntry::SkillDir {
+                            skill_id: skill_id.clone(),
+                            dir: dest.to_string_lossy().to_string(),
+                        });
+                        skill_ids.push(skill_id);
+                    }
+                    Err(e) => {
+                        rollback(&ledger, mcp_store);
+                        return Err(e);
+                    }
+                }
+            }
             other => {
                 rollback(&ledger, mcp_store);
                 return Err(format!(
                     "component type {other:?} is not installable in this MIRA \
-                     (only mcp_server and app components are supported)"
+                     (mcp_server, app, and skill components are supported)"
                 ));
             }
         }
@@ -266,7 +291,63 @@ pub fn install_package(
             format!("record install: {e}")
         })?;
 
-    Ok(InstallOutcome { package, mcp_server_ids: mcp_ids, app_ids, warnings })
+    Ok(InstallOutcome { package, mcp_server_ids: mcp_ids, app_ids, skill_ids, warnings })
+}
+
+// Activate a `skill` component: copy its skill directory from the extracted
+// payload into the GLOBAL skills dir under the skill's own manifest id (the
+// loader requires dir name == manifest id). Returns (skill_id, dest_dir).
+// The skills dir is the `skills/` sibling of `packages/` under the data dir.
+fn install_skill_component(component: &Component, install_dir: &Path) -> Result<(String, PathBuf), String> {
+    let sub = component.spec.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    // Guard against a spec path escaping the payload.
+    if sub.contains("..") || Path::new(sub).is_absolute() {
+        return Err(format!("skill component path {sub:?} must be inside the payload"));
+    }
+    let src = if sub == "." { install_dir.to_path_buf() } else { install_dir.join(sub) };
+    let toml_path = src.join("skill.toml");
+    let toml = fs::read_to_string(&toml_path)
+        .map_err(|e| format!("skill component: read {}: {e}", toml_path.display()))?;
+    let manifest = crate::skills::SkillManifest::parse(&toml)
+        .map_err(|e| format!("skill component: invalid skill.toml: {e}"))?;
+    let skill_id = manifest.skill.id.clone();
+    // Reverse-DNS id, no path separators (defence in depth; the loader also
+    // rejects a dir/id mismatch).
+    if skill_id.is_empty() || skill_id.contains('/') || skill_id.contains('\\') || skill_id.contains("..") {
+        return Err(format!("skill component: unsafe skill id {skill_id:?}"));
+    }
+
+    let data_dir = install_dir
+        .parent()      // <data_dir>/packages
+        .and_then(|p| p.parent()) // <data_dir>
+        .ok_or("skill component: cannot locate data dir from packages dir")?;
+    let skills_dir = crate::skills::default_skills_dir(data_dir);
+    let dest = skills_dir.join(&skill_id);
+    if dest.exists() {
+        return Err(format!("a skill {skill_id:?} is already installed"));
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("skill component: mkdir {}: {e}", parent.display()))?;
+    }
+    copy_dir_recursive(&src, &dest).map_err(|e| format!("skill component: copy to {}: {e}", dest.display()))?;
+    Ok((skill_id, dest))
+}
+
+// Minimal recursive directory copy (payload → skills dir). Files only; the
+// payload is already path-safety-checked by parse_bundle.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 // Write a bundle's payload files under `install_dir`, stripping the top-level
@@ -604,6 +685,9 @@ fn rollback(ledger: &Ledger, mcp_store: &McpServerStore) {
             LedgerEntry::Files { dir } => {
                 let _ = fs::remove_dir_all(dir);
             }
+            LedgerEntry::SkillDir { dir, .. } => {
+                let _ = fs::remove_dir_all(dir);
+            }
             LedgerEntry::Secret { .. } => {}
             // Channel-account teardown needs the channel store + secret vault,
             // threaded in by the cpp_provider install path (, slice 5).
@@ -643,6 +727,9 @@ pub fn reverse_ledger(
                 let _ = secrets.delete(Scope::System, "", package_id, key);
             }
             LedgerEntry::Files { dir } => {
+                let _ = fs::remove_dir_all(dir);
+            }
+            LedgerEntry::SkillDir { dir, .. } => {
                 let _ = fs::remove_dir_all(dir);
             }
         }
@@ -882,6 +969,76 @@ mod tests {
         assert!(mcp_store.list_for_user("admin-1").unwrap().is_empty());
         assert!(pkg_store.get("com.example.nextcloud-mcp").unwrap().is_none());
         assert!(!install_dir.exists(), "extracted dir must be removed");
+    }
+
+    // D6 — install a `skill` component end-to-end: the skill dir is copied into
+    // the global skills dir under its manifest id, surfaced in skill_ids, and
+    // removed on uninstall.
+    #[test]
+    fn end_to_end_install_skill_component() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use rusqlite::Connection;
+
+        let manifest = r#"{
+          "format":"1","id":"com.example.jotpkg","name":"Jot","version":"1.0.0","publisher":"Example",
+          "components":[{"type":"skill","capabilities":{},"spec":{"path":"skill"}}]
+        }"#;
+        let skill_toml = "[skill]\nid = \"local.jot\"\nversion = \"0.1.0\"\n\
+                          display_name = \"Jot\"\ndescription = \"when jotting\"\n\n\
+                          [tools.guide]\nkind = \"prompt\"\ntemplate = \"prompts/main.md\"\n";
+
+        let mut tar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
+        let entries: [(&str, &[u8]); 3] = [
+            ("com.example.jotpkg/package.json", manifest.as_bytes()),
+            ("com.example.jotpkg/skill/skill.toml", skill_toml.as_bytes()),
+            ("com.example.jotpkg/skill/prompts/main.md", b"Write the note.\n"),
+        ];
+        for (path, data) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, path, data).unwrap();
+        }
+        let bundle = tar.into_inner().unwrap().finish().unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("auth.db");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE users(id TEXT PRIMARY KEY); INSERT INTO users(id) VALUES('admin-1');",
+            ).unwrap();
+        }
+        let mcp_store = McpServerStore::open(&db).unwrap();
+        let pkg_store = PackageStore::open(&db).unwrap();
+        let pkgs_dir = dir.path().join("packages");
+
+        let parsed = crate::packages::parse_bundle(&bundle).unwrap();
+        let trust = crate::packages::verify_package(
+            &parsed.manifest, &crate::skills::trust::TrustStore::empty());
+        let outcome = install_package(
+            &parsed, &trust, "admin-1", &HashMap::new(), &pkgs_dir, &mcp_store, &pkg_store,
+        ).unwrap();
+
+        assert_eq!(outcome.skill_ids, vec!["local.jot".to_string()]);
+        // Activated into the GLOBAL skills dir under its manifest id.
+        let skill_dir = dir.path().join("skills").join("local.jot");
+        assert!(skill_dir.join("skill.toml").is_file());
+        assert!(skill_dir.join("prompts/main.md").is_file());
+        // And the loader can read it from there.
+        let ver = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let reg = crate::skills::load_dir(&dir.path().join("skills"), &ver);
+        assert!(reg.loaded.iter().any(|s| s.manifest.skill.id == "local.jot"));
+
+        // Uninstall removes the activated skill dir.
+        let channel_store = ChannelAccountStore::open(&db).unwrap();
+        let secrets = SecretsStore::open(
+            &dir.path().join("skill_secrets.db"), &dir.path().join("master.key")).unwrap();
+        uninstall_package("com.example.jotpkg", &mcp_store, &channel_store, &secrets, &pkg_store).unwrap();
+        assert!(!skill_dir.exists(), "activated skill dir must be removed on uninstall");
+        assert!(pkg_store.get("com.example.jotpkg").unwrap().is_none());
     }
 
     // Apps-framework slice 1: install the demo `app` package end-to-end, then

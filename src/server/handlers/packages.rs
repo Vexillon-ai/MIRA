@@ -167,19 +167,25 @@ pub async fn preview_package(
         Ok(b) => b,
         Err(e) => return (StatusCode::BAD_REQUEST, err(e)).into_response(),
     };
-    let parsed = match packages::parse_bundle(&bytes) {
+    preview_from_bytes(&bytes, &data_dir.0)
+}
+
+// Side-effect-free preview from already-obtained bundle bytes. Shared by the
+// multipart upload path and the install-from-URL path.
+fn preview_from_bytes(bytes: &[u8], data_dir: &std::path::Path) -> Response {
+    let parsed = match packages::parse_bundle(bytes) {
         Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, err(e)).into_response(),
     };
 
     // Reuse the skills trust store so publisher trust lives in one place.
-    let trust_path = TrustStore::default_path(&skills::default_skills_dir(&data_dir.0));
+    let trust_path = TrustStore::default_path(&skills::default_skills_dir(data_dir));
     let store = TrustStore::load(&trust_path).unwrap_or_else(|_| TrustStore::empty());
     let trust = packages::verify_package(&parsed.manifest, &store);
 
     // If this id is already installed, surface whether it's an update + the diff.
     let (mut installed_version, mut update, mut update_blocked) = (None, None, None);
-    if let Ok(pkg_store) = PackageStore::open(&data_dir.0.join("auth.db")) {
+    if let Ok(pkg_store) = PackageStore::open(&data_dir.join("auth.db")) {
         if let Ok(Some(installed)) = pkg_store.get(&parsed.manifest.id) {
             installed_version = Some(installed.version.clone());
             match packages::policy_check(&installed, &parsed.manifest, &trust, &mira_version()) {
@@ -256,11 +262,26 @@ pub async fn install_package(
         return bad("no `bundle` field in multipart upload");
     };
 
-    let parsed = match packages::parse_bundle(&bytes) {
+    install_from_bytes(&bytes, config, allow_untrusted, &data_dir.0, &registry, &admin.id).await
+}
+
+// Verify + trust-gate + install from already-obtained bundle bytes, then
+// hot-reload the registry. Shared by the multipart upload path and the
+// install-from-URL path — the URL is only a transport; the trust decision
+// is identical (sha256 + manifest signature + TrustStore).
+async fn install_from_bytes(
+    bytes:           &[u8],
+    config:          HashMap<String, String>,
+    allow_untrusted: bool,
+    data_dir:        &std::path::Path,
+    registry:        &McpServerRegistry,
+    admin_id:        &str,
+) -> Response {
+    let parsed = match packages::parse_bundle(bytes) {
         Ok(p) => p,
         Err(e) => return bad(e),
     };
-    let trust_path = TrustStore::default_path(&skills::default_skills_dir(&data_dir.0));
+    let trust_path = TrustStore::default_path(&skills::default_skills_dir(data_dir));
     let trust_store = TrustStore::load(&trust_path).unwrap_or_else(|_| TrustStore::empty());
     let trust = packages::verify_package(&parsed.manifest, &trust_store);
 
@@ -270,7 +291,7 @@ pub async fn install_package(
         return bad(e);
     }
 
-    let auth_db = data_dir.0.join("auth.db");
+    let auth_db = data_dir.join("auth.db");
     let mcp_store = match McpServerStore::open(&auth_db) {
         Ok(s) => s,
         Err(e) => return ise(e.to_string()),
@@ -280,15 +301,22 @@ pub async fn install_package(
         Err(e) => return ise(e.to_string()),
     };
 
-    let packages_dir = data_dir.0.join("packages");
-    let outcome = match do_install(&parsed, &trust, &admin.id, &config, &packages_dir, &mcp_store, &pkg_store) {
+    let packages_dir = data_dir.join("packages");
+    let outcome = match do_install(&parsed, &trust, admin_id, &config, &packages_dir, &mcp_store, &pkg_store) {
         Ok(o) => o,
         Err(e) => return bad(e),
     };
     // Hot-reload so the new server's tools come live without a restart.
     registry.reload().await;
     // Same for app tools (app__<id>__<tool>) — no restart.
-    reload_app_tools(&registry, &pkg_store);
+    reload_app_tools(registry, &pkg_store);
+    // D6 — a skill component activated into the global skills dir goes live on
+    // the next turn via the shared skill-reload path (no restart).
+    if !outcome.skill_ids.is_empty() {
+        if let Some(tool_reg) = registry.tool_registry() {
+            crate::skills::runtime::reload_skills(&tool_reg, data_dir);
+        }
+    }
 
     (
         StatusCode::OK,
@@ -300,10 +328,158 @@ pub async fn install_package(
             "trust":       trust,
             "mcp_servers": outcome.mcp_server_ids,
             "apps":        outcome.app_ids,
+            "skills":      outcome.skill_ids,
             "warnings":    outcome.warnings,
         })),
     )
         .into_response()
+}
+
+// ── Install-from-URL ──────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct PreviewUrlRequest {
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstallUrlRequest {
+    pub url: String,
+    #[serde(default)]
+    pub config: HashMap<String, String>,
+    #[serde(default)]
+    pub allow_untrusted: bool,
+}
+
+// Build a one-shot HTTP policy for an admin-initiated package fetch: the same
+// SSRF guard / denylist / allowlist / proxy the instance uses for all egress,
+// but with the body cap raised to the package size limit so a legitimate
+// bundle isn't truncated by the default (text-oriented) web-fetch cap.
+async fn package_fetch_policy(live: &Arc<LiveConfig>) -> crate::tools::http_policy::HttpPolicy {
+    let cfg = live.get().await;
+    let mut pcfg = crate::gateway::builder::build_http_policy_config(&cfg);
+    pcfg.max_body_bytes = packages::fetch::MAX_FETCH_BYTES;
+    crate::tools::http_policy::HttpPolicy::new(pcfg)
+}
+
+// `POST /api/admin/packages/preview-url` — admin only. Fetch a `.mirapkg` by URL
+// (SSRF-guarded, admin-initiated egress) and return the same preview as the
+// upload path. Side-effect-free.
+pub async fn preview_package_url(
+    AdminUser(admin): AdminUser,
+    Extension(data_dir): Extension<DataDir>,
+    Extension(live): Extension<Arc<LiveConfig>>,
+    Json(req): Json<PreviewUrlRequest>,
+) -> Response {
+    let policy = package_fetch_policy(&live).await;
+    match packages::fetch::fetch_bundle(&policy, &req.url, &admin.id).await {
+        Ok(bytes) => preview_from_bytes(&bytes, &data_dir.0),
+        Err(e) => bad(e),
+    }
+}
+
+// `POST /api/admin/packages/install-url` — admin only. Fetch a `.mirapkg` by URL
+// then run the identical verify → trust-gate → install path as the upload
+// endpoint.
+pub async fn install_package_url(
+    AdminUser(admin): AdminUser,
+    Extension(data_dir): Extension<DataDir>,
+    Extension(registry): Extension<Arc<McpServerRegistry>>,
+    Extension(live): Extension<Arc<LiveConfig>>,
+    Json(req): Json<InstallUrlRequest>,
+) -> Response {
+    let policy = package_fetch_policy(&live).await;
+    let bytes = match packages::fetch::fetch_bundle(&policy, &req.url, &admin.id).await {
+        Ok(b) => b,
+        Err(e) => return bad(e),
+    };
+    install_from_bytes(&bytes, req.config, req.allow_untrusted, &data_dir.0, &registry, &admin.id).await
+}
+
+// ── Source catalog: discover installable packages ──
+
+#[derive(Debug, Serialize)]
+pub struct CatalogResponse {
+    pub packages: Vec<packages::index::CatalogEntry>,
+    pub sources:  Vec<packages::index::SourceResult>,
+}
+
+// `GET /api/admin/packages/sources` — admin only. The configured discovery
+// sources (without fetching anything). The web UI reads this to manage sources.
+pub async fn list_package_sources(
+    AdminUser(_admin): AdminUser,
+    Extension(live): Extension<Arc<LiveConfig>>,
+) -> Response {
+    let cfg = live.get().await;
+    (StatusCode::OK, Json(cfg.packages.sources.clone())).into_response()
+}
+
+#[derive(Debug, Serialize)]
+pub struct AvailableUpdate {
+    pub id:                String,
+    pub name:              String,
+    pub installed_version: String,
+    pub latest_version:    String,
+    pub download_url:      String,
+    pub source:            String,
+}
+
+// `GET /api/admin/packages/updates` — admin only. Refresh the catalog, then for
+// each installed package report when a source offers a semver-newer version.
+// This only *flags* updates — applying one is the normal install-from-URL path
+// (preview shows the authoritative update plan + capability-reapproval gate,
+// then install), so no new update logic lives here (design D4).
+pub async fn package_updates(
+    AdminUser(admin): AdminUser,
+    Extension(data_dir): Extension<DataDir>,
+    Extension(live): Extension<Arc<LiveConfig>>,
+) -> Response {
+    let installed = match PackageStore::open(&data_dir.0.join("auth.db")).and_then(|s| s.list()) {
+        Ok(l) => l,
+        Err(e) => return ise(e.to_string()),
+    };
+    let cfg = live.get().await;
+    let policy = package_fetch_policy(&live).await;
+    let (catalog, _sources) =
+        packages::index::refresh_catalog(&policy, &cfg.packages.sources, &data_dir.0, &admin.id).await;
+
+    let mut updates: Vec<AvailableUpdate> = Vec::new();
+    for pkg in &installed {
+        let Some(entry) = catalog.iter().find(|e| e.package.id == pkg.id) else { continue };
+        // semver-compare; skip entries whose versions don't parse cleanly.
+        let (Ok(have), Ok(avail)) = (
+            semver::Version::parse(&pkg.version),
+            semver::Version::parse(&entry.package.latest),
+        ) else { continue };
+        if avail <= have { continue; }
+        let Some(v) = entry.package.versions.iter().find(|v| v.version == entry.package.latest) else { continue };
+        updates.push(AvailableUpdate {
+            id:                pkg.id.clone(),
+            name:              pkg.name.clone(),
+            installed_version: pkg.version.clone(),
+            latest_version:    entry.package.latest.clone(),
+            download_url:      v.download_url.clone(),
+            source:            entry.source.clone(),
+        });
+    }
+    (StatusCode::OK, Json(updates)).into_response()
+}
+
+// `GET /api/admin/packages/catalog` — admin only. Refresh every enabled source
+// (SSRF-guarded, admin-initiated egress; signature-verified against each
+// source's pinned key; cached for offline fallback) and return the merged
+// browse list + per-source results. Discovery only — installing is still a
+// separate, per-artifact-verified action (preview/install[-url]).
+pub async fn package_catalog(
+    AdminUser(admin): AdminUser,
+    Extension(data_dir): Extension<DataDir>,
+    Extension(live): Extension<Arc<LiveConfig>>,
+) -> Response {
+    let cfg = live.get().await;
+    let policy = package_fetch_policy(&live).await;
+    let (packages_list, sources) =
+        packages::index::refresh_catalog(&policy, &cfg.packages.sources, &data_dir.0, &admin.id).await;
+    (StatusCode::OK, Json(CatalogResponse { packages: packages_list, sources })).into_response()
 }
 
 // `GET /api/admin/packages` — admin only. List installed packages.
@@ -353,6 +529,12 @@ pub async fn uninstall_package(
             let _ = secrets.purge_skill(&id);
             registry.reload().await;
             reload_app_tools(&registry, &pkg_store);
+            // D6 — if the package had activated a skill into the global skills
+            // dir, the ledger reversal removed it; hot-reload so it's gone from
+            // the live tool set too (idempotent + cheap, so unconditional).
+            if let Some(tool_reg) = registry.tool_registry() {
+                crate::skills::runtime::reload_skills(&tool_reg, &data_dir.0);
+            }
             (
                 StatusCode::OK,
                 Json(serde_json::json!({ "uninstalled": true, "id": id, "removed_mcp_servers": removed })),

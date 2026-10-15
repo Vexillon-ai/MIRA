@@ -734,3 +734,9 @@ _Restricted Mode — a fail-closed capability-restriction profile for safely exp
 - **`restricted_mode.guest.max_active`** (integer) — Maximum simultaneously-active guest sessions across the instance. Excess mint requests get a graceful 'busy' response. 0 = unlimited (not recommended for a public endpoint).
 - **`restricted_mode.guest.global_reset_secs`** (integer) — Periodic global-reset backstop: every N seconds tear down ALL guest sessions regardless of age, as a belt-and-braces guard against leaks. 0 = off.
 - **`restricted_mode.guest.seed_wiki_dir`** (string) — Optional baseline wiki directory copied into each new guest's wiki so guests start with seeded context (persona, household, etc.). Relative to the data dir, or absolute. Unset = start with an empty wiki.
+
+## packages
+
+_Package distribution sources — admin-managed 'apt sources' for discovering and installing .mirapkg / .miraskill packages. Each source yields a signed index.json that MIRA fetches, verifies against the source's pinned key, and merges into the Plugins browse list._
+
+- **`packages.sources`** (array) — Discovery sources consulted on refresh. The first-party Vexillon source ships disabled until its package repo and signing key exist.

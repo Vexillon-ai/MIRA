@@ -110,6 +110,63 @@ export interface PreviewResponse {
   update_blocked?: string
 }
 
+// ── Source catalog (D2/D3) ──────────────────────────────────────────────────
+
+export interface CatalogVersion {
+  version: string
+  min_mira_version?: string
+  download_url: string
+  sha256: string
+  size?: number
+  publisher?: string
+  key_fingerprint?: string
+  summary?: string
+  homepage?: string
+  license?: string
+}
+
+export interface CatalogEntry {
+  id: string
+  name: string
+  kind: string
+  latest: string
+  versions: CatalogVersion[]
+  /** Which configured source this came from. */
+  source: string
+  /** The source's index signature verified against its pinned key. */
+  source_verified: boolean
+}
+
+export interface SourceResult {
+  name: string
+  enabled: boolean
+  verified: boolean
+  from_cache: boolean
+  error?: string
+  package_count: number
+}
+
+export interface CatalogResponse {
+  packages: CatalogEntry[]
+  sources: SourceResult[]
+}
+
+export interface PackageSource {
+  name: string
+  index_url: string
+  enabled: boolean
+  pinned_key: string
+}
+
+export interface AvailableUpdate {
+  id: string
+  name: string
+  installed_version: string
+  latest_version: string
+  download_url: string
+  source: string
+}
+
 export interface InstalledPackage {
   id: string
   version: string
@@ -143,8 +200,40 @@ export const packagesApi = {
     return data
   },
 
+  /** Preview a .mirapkg fetched by URL. Same shape as `preview`. */
+  async previewUrl(url: string): Promise<PreviewResponse> {
+    const { data } = await api.post<PreviewResponse>('/api/admin/packages/preview-url', { url })
+    return data
+  },
+
+  /** Install a .mirapkg fetched by URL. Same result as `install`. */
+  async installUrl(url: string, config: Record<string, string> = {}, allowUntrusted = false): Promise<any> {
+    const { data } = await api.post('/api/admin/packages/install-url', {
+      url, config, allow_untrusted: allowUntrusted,
+    })
+    return data
+  },
+
   async list(): Promise<InstalledPackage[]> {
     const { data } = await api.get<InstalledPackage[]>('/api/admin/packages')
+    return data
+  },
+
+  /** Refresh enabled sources and return the merged browse catalog (D2/D3). */
+  async catalog(): Promise<CatalogResponse> {
+    const { data } = await api.get<CatalogResponse>('/api/admin/packages/catalog')
+    return data
+  },
+
+  /** The configured discovery sources (no fetch). */
+  async sources(): Promise<PackageSource[]> {
+    const { data } = await api.get<PackageSource[]>('/api/admin/packages/sources')
+    return data
+  },
+
+  /** Installed packages that have a semver-newer version in a source. */
+  async updates(): Promise<AvailableUpdate[]> {
+    const { data } = await api.get<AvailableUpdate[]>('/api/admin/packages/updates')
     return data
   },
 
