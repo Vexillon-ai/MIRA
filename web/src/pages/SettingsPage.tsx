@@ -3,7 +3,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload, Trash2, Wrench, RotateCcw, Loader2, Calendar as CalendarIcon, RefreshCw, Shield, ShieldAlert, Volume2, ChevronDown, Image as ImageIcon, BookText, Lock } from 'lucide-react'
+import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload, Trash2, Wrench, RotateCcw, Loader2, Calendar as CalendarIcon, RefreshCw, Shield, ShieldAlert, Volume2, ChevronDown, Image as ImageIcon, BookText, Lock, Boxes } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { api } from '@/api/client'
 import UpdatesCard from '@/components/UpdatesCard'
@@ -341,12 +341,13 @@ function setPath(obj: Config, path: string, value: unknown): Config {
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
-type TabId = 'appearance' | 'providers' | 'agent' | 'tools' | 'sandbox' | 'channels' | 'memory' | 'wiki' | 'calendar' | 'voice' | 'image' | 'guardian' | 'restricted' | 'server' | 'advanced'
+type TabId = 'appearance' | 'providers' | 'agent' | 'skills' | 'tools' | 'sandbox' | 'channels' | 'memory' | 'wiki' | 'calendar' | 'voice' | 'image' | 'guardian' | 'restricted' | 'server' | 'advanced'
 
 const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: 'appearance', label: 'Terminal (TUI)', icon: <Palette size={14} /> },
   { id: 'providers',  label: 'Providers',  icon: <Cpu size={14} />     },
   { id: 'agent',      label: 'Agent',      icon: <Bot size={14} />     },
+  { id: 'skills',     label: 'Skills',     icon: <Boxes size={14} />   },
   { id: 'tools',      label: 'Tools',      icon: <Wrench size={14} />  },
   { id: 'sandbox',    label: 'Sandbox',    icon: <Shield size={14} />  },
   { id: 'channels',   label: 'Channels',   icon: <Radio size={14} />   },
@@ -787,7 +788,7 @@ export default function SettingsPage() {
   const initialTab = (() => {
     if (typeof window === 'undefined') return 'appearance'
     const p = new URLSearchParams(window.location.search).get('tab')
-    const allowed: TabId[] = ['appearance','providers','agent','tools','sandbox','channels','memory','calendar','voice','image','guardian','restricted','server','advanced']
+    const allowed: TabId[] = ['appearance','providers','agent','skills','tools','sandbox','channels','memory','calendar','voice','image','guardian','restricted','server','advanced']
     return (allowed as string[]).includes(p ?? '') ? (p as TabId) : 'appearance'
   })()
   const [tab, setTab] = useState<TabId>(initialTab)
@@ -1043,6 +1044,9 @@ export default function SettingsPage() {
         )}
         {tab === 'agent' && (
           <AgentTab set={set} str={str} num={num} bool={bool} isAdmin={isAdmin} />
+        )}
+        {tab === 'skills' && (
+          <SkillsTab set={set} str={str} bool={bool} isAdmin={isAdmin} />
         )}
         {tab === 'tools' && (
           <ToolsTab set={set} str={str} num={num} bool={bool} draft={draft} />
@@ -1795,6 +1799,82 @@ function WikiTab({
               { value: 'review', label: 'Review (recommended)' },
               { value: 'auto',   label: 'Auto-apply' },
               { value: 'off',    label: 'Off (read-only)' },
+            ]}
+          />
+        </Field>
+      </Section>
+    </div>
+  )
+}
+
+// Skill self-authoring instance settings (`agent.skill_authoring.*`). These are
+// the instance-wide switches; per-user/group permission to author lives in the
+// Capabilities editor (Admin → Users/Groups), and individual skills are managed
+// on the Skills page. Admin-only — a non-admin sees a read-only notice.
+function SkillsTab({
+  set, str, bool, isAdmin,
+}: {
+  set: (p: string, v: unknown) => void
+  str: (p: string, fb?: string) => string
+  bool: (p: string, fb?: boolean) => boolean
+  isAdmin: boolean
+}) {
+  if (!isAdmin) {
+    return (
+      <div className={styles.tabBody}>
+        <Section title="Skill self-authoring">
+          <p className={styles.sectionDesc}>
+            These are instance-wide settings an administrator manages. You can view and manage
+            your own skills on the <strong>Skills</strong> page.
+          </p>
+        </Section>
+      </div>
+    )
+  }
+  const enabled = bool('agent.skill_authoring.enabled', true)
+  return (
+    <div className={styles.tabBody}>
+      <Section title="Skill self-authoring">
+        <p className={styles.sectionDesc}>
+          MIRA can save reusable <strong>Tier-0 guidance skills</strong> it writes for a user
+          (prompt text only — no tools or side effects). Who may author is set per user/group in
+          the <strong>Capabilities</strong> editor; individual skills are reviewed and managed on
+          the <strong>Skills</strong> page.
+        </p>
+        <Field
+          label="Enable skill authoring"
+          desc="Master switch for the whole feature. Off = MIRA never offers or saves self-authored skills, and the propose_skill tool is withdrawn, regardless of per-user permissions."
+        >
+          <Toggle value={enabled} onChange={(v) => set('agent.skill_authoring.enabled', v)} />
+        </Field>
+        <Field
+          label="Auto-approve guidance skills"
+          desc="Tier-0 skills carry no capabilities, so this saves them live immediately (announced + one-tap undo on the Skills page). Turn off to review every proposal before it goes live (always-ask)."
+        >
+          <Toggle
+            value={bool('agent.skill_authoring.auto_approve_tier0', true)}
+            onChange={(v) => set('agent.skill_authoring.auto_approve_tier0', v)}
+          />
+        </Field>
+        <Field
+          label="Offer after a completed task"
+          desc="Proactive trigger: after MIRA finishes a genuinely multi-step task it may offer once to save it as a skill (never nagging). Turn off to make authoring opt-in — MIRA then only writes a skill when the user explicitly asks (“make that a skill”)."
+        >
+          <Toggle
+            value={bool('agent.skill_authoring.propose_on_task_completion', true)}
+            onChange={(v) => set('agent.skill_authoring.propose_on_task_completion', v)}
+          />
+        </Field>
+        <Field
+          label="Default scope"
+          desc="Where a newly-authored skill lives. 'User' keeps it private to its author (recommended — contains a bad skill's blast radius). 'Global' makes it instance-wide; an admin can still promote a user skill later from the Skills page."
+        >
+          <SelectInput
+            value={str('agent.skill_authoring.default_scope', 'user')}
+            onChange={(v) => set('agent.skill_authoring.default_scope', v)}
+            options={[
+              { value: 'user',   label: 'User (private to author — recommended)' },
+              { value: 'global', label: 'Global (instance-wide)' },
             ]}
           />
         </Field>
