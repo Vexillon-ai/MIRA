@@ -218,7 +218,11 @@ pub fn install_package(
                         }
                     }
                 }
-                match mcp_store.create(admin_id, new) {
+                // create_or_replace (not create): a package install is a
+                // reinstall when a prior install left this admin's (user,name)
+                // mcp_server row behind, so reuse it instead of failing on the
+                // UNIQUE(user_id, name) constraint.
+                match mcp_store.create_or_replace(admin_id, new) {
                     Ok(row) => {
                         ledger.push(LedgerEntry::McpServer { id: row.id.clone() });
                         mcp_ids.push(row.id);
@@ -969,6 +973,52 @@ mod tests {
         assert!(mcp_store.list_for_user("admin-1").unwrap().is_empty());
         assert!(pkg_store.get("com.example.nextcloud-mcp").unwrap().is_none());
         assert!(!install_dir.exists(), "extracted dir must be removed");
+    }
+
+    // Regression: installing an mcp_server package twice (e.g. an earlier
+    // install's per-admin mcp_servers row was left behind) must reuse the row,
+    // not fail on UNIQUE(user_id, name).
+    #[test]
+    fn reinstall_mcp_package_reuses_row_no_unique_conflict() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use rusqlite::Connection;
+
+        let manifest = r#"{
+          "format":"1","id":"com.example.nc-mcp","name":"NC MCP","version":"1.0.0","publisher":"Example",
+          "components":[{"type":"mcp_server","capabilities":{},
+            "spec":{"name":"nextcloud","transport":"stdio","command":"python3","args":["server.py"]}}]
+        }"#;
+        let mut tar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
+        for (path, data) in [
+            ("com.example.nc-mcp/package.json", manifest.as_bytes()),
+            ("com.example.nc-mcp/server.py", b"print('hi')\n" as &[u8]),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64); h.set_mode(0o644); h.set_cksum();
+            tar.append_data(&mut h, path, data).unwrap();
+        }
+        let bundle = tar.into_inner().unwrap().finish().unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("auth.db");
+        Connection::open(&db).unwrap().execute_batch(
+            "CREATE TABLE users(id TEXT PRIMARY KEY); INSERT INTO users(id) VALUES('admin-1');").unwrap();
+        let mcp_store = McpServerStore::open(&db).unwrap();
+        let pkg_store = PackageStore::open(&db).unwrap();
+        let pkgs_dir = dir.path().join("packages");
+        let parsed = crate::packages::parse_bundle(&bundle).unwrap();
+        let trust = crate::packages::verify_package(&parsed.manifest, &crate::skills::trust::TrustStore::empty());
+
+        // First install.
+        install_package(&parsed, &trust, "admin-1", &HashMap::new(), &pkgs_dir, &mcp_store, &pkg_store).unwrap();
+        // Second install WITHOUT uninstalling (the orphan scenario) — must succeed.
+        let again = install_package(&parsed, &trust, "admin-1", &HashMap::new(), &pkgs_dir, &mcp_store, &pkg_store);
+        assert!(again.is_ok(), "reinstall must not UNIQUE-conflict: {:?}", again.err());
+        // Exactly one mcp_servers row for (admin-1, nextcloud) — reused, not duplicated.
+        let rows: Vec<_> = mcp_store.list_for_user("admin-1").unwrap()
+            .into_iter().filter(|r| r.name == "nextcloud").collect();
+        assert_eq!(rows.len(), 1, "reinstall reuses the row");
     }
 
     // D6 — install a `skill` component end-to-end: the skill dir is copied into

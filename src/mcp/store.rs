@@ -198,6 +198,68 @@ impl McpServerStore {
         })
     }
 
+    /// Like [`create`], but if a row already exists for this `(user_id, name)`
+    /// it is updated in place (same id) instead of violating the
+    /// `UNIQUE(user_id, name)` constraint. Used by the package installer so a
+    /// re-install whose `mcp_server` row was left behind — e.g. an earlier
+    /// install by this admin that a later uninstall didn't fully reverse
+    /// (`installed_packages` is one global row per package, but each install
+    /// creates a per-installer `mcp_servers` row) — succeeds as a reinstall
+    /// rather than failing with a UNIQUE conflict.
+    pub fn create_or_replace(&self, user_id: &str, new: NewMcpServer) -> Result<McpServerRow, MiraError> {
+        let now = Self::now_ms();
+        let cfg = McpServerConfig {
+            name:      new.name.clone(),
+            transport: new.transport.clone(),
+            command:   new.command.clone(),
+            args:      new.args.clone(),
+            env:       new.env.clone(),
+            url:       new.url.clone(),
+            enabled:   new.enabled,
+            sampling_enabled: new.sampling_enabled,
+        };
+        let config_json = serde_json::to_string(&cfg).map_err(|e| MiraError::ConfigError(
+            format!("serialize McpServerConfig: {e}")
+        ))?;
+        let en = new.enabled as i64;
+
+        let conn = self.conn.lock().unwrap();
+        let existing: Result<String, _> = conn.query_row(
+            "SELECT id FROM mcp_servers WHERE user_id = ?1 AND name = ?2",
+            params![user_id, new.name],
+            |r| r.get(0),
+        );
+        match existing {
+            Ok(id) => {
+                conn.execute(
+                    "UPDATE mcp_servers SET transport = ?1, enabled = ?2, config_json = ?3, updated_at = ?4
+                     WHERE id = ?5",
+                    params![new.transport, en, config_json, now, id],
+                )
+                .map_err(|e| MiraError::DatabaseError(format!("update mcp_server: {e}")))?;
+                Ok(McpServerRow {
+                    id, user_id: user_id.to_owned(), name: new.name, transport: new.transport,
+                    enabled: new.enabled, config_json, created_at: now, updated_at: now,
+                })
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                let id = Uuid::new_v4().to_string();
+                conn.execute(
+                    "INSERT INTO mcp_servers
+                       (id, user_id, name, transport, enabled, config_json, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                    params![id, user_id, new.name, new.transport, en, config_json, now],
+                )
+                .map_err(|e| MiraError::DatabaseError(format!("create mcp_server: {e}")))?;
+                Ok(McpServerRow {
+                    id, user_id: user_id.to_owned(), name: new.name, transport: new.transport,
+                    enabled: new.enabled, config_json, created_at: now, updated_at: now,
+                })
+            }
+            Err(e) => Err(MiraError::DatabaseError(e.to_string())),
+        }
+    }
+
     // ── Read ──────────────────────────────────────────────────────────────────
 
     pub fn get(&self, id: &str) -> Result<Option<McpServerRow>, MiraError> {
