@@ -3796,10 +3796,12 @@ fn default_package_sources() -> Vec<PackageSource> {
     vec![PackageSource {
         name:       "Vexillon".to_string(),
         index_url:  "https://raw.githubusercontent.com/Vexillon-ai/mira-packages/main/index.json".to_string(),
-        // Disabled until the Vexillon-ai/mira-packages repo + signing key exist
-        // an admin enables it + pins the key then.
-        enabled:    false,
-        pinned_key: String::new(),
+        // First-party source, live by default: its index signature verifies
+        // against the pinned Vexillon key, and official packages read Verified
+        // (the same key is auto-pinned in the trust store — see
+        // `skills::trust::ensure_default_publishers`). Admins can disable it.
+        enabled:    true,
+        pinned_key: crate::skills::trust::VEXILLON_PUBLISHER_KEY_B64.to_string(),
     }]
 }
 
@@ -5317,6 +5319,18 @@ pub type Config = MiraConfig;
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn default_vexillon_source_is_live_and_pinned() {
+        let sources = default_package_sources();
+        assert_eq!(sources.len(), 1);
+        let v = &sources[0];
+        assert_eq!(v.name, "Vexillon");
+        assert!(v.enabled, "first-party source ships enabled");
+        // Pinned to the bundled publisher key so the index verifies.
+        assert_eq!(v.pinned_key, crate::skills::trust::VEXILLON_PUBLISHER_KEY_B64);
+        assert!(!v.pinned_key.is_empty());
+    }
 
     fn write_minimal(dir: &TempDir) -> PathBuf {
         let p = dir.path().join("mira_config.json");

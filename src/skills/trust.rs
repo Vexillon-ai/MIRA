@@ -187,6 +187,39 @@ impl TrustStore {
 
 // ── helpers ───────────────────────────────────────────────────────────
 
+// ── Built-in first-party publisher ────
+
+/// Label the bundled first-party publisher key is pinned under.
+pub const VEXILLON_PUBLISHER_LABEL: &str = "Vexillon";
+/// The Vexillon publisher's ed25519 **public** key (base64). Signs official
+/// `.mirapkg`/`.miraskill` packages + the first-party source index, so they
+/// install as **Verified** out of the box. Public by design — the secret half
+/// never leaves the owner.
+pub const VEXILLON_PUBLISHER_KEY_B64: &str = "3ySLo2jC8Y0MxcHmofHBtd6i8iAYbu/dCHWvQbf6Jag=";
+
+/// Pin the bundled first-party publisher key(s) in the trust store at
+/// `skills_dir` if not already present, so official packages read Verified with
+/// no admin setup. Idempotent + fail-soft (a bad bundled key is logged, never a
+/// boot blocker). To *distrust* Vexillon, disable its package source — this
+/// re-pins the key on boot by design (it's a shipped default, like a CA bundle).
+pub fn ensure_default_publishers(skills_dir: &Path) -> Result<(), MiraError> {
+    let path = TrustStore::default_path(skills_dir);
+    let mut store = TrustStore::load(&path)?;
+    let pk = parse_public_key_b64(VEXILLON_PUBLISHER_KEY_B64)
+        .map_err(|e| MiraError::DatabaseError(format!("bundled Vexillon key invalid: {e}")))?;
+    let fp = fingerprint_of(&pk);
+    if store.lookup(&fp).is_some() {
+        return Ok(());
+    }
+    store.add(VEXILLON_PUBLISHER_LABEL, VEXILLON_PUBLISHER_KEY_B64)?;
+    store.save_self()?;
+    tracing::info!(
+        "pinned built-in publisher {:?} ({fp}) in trust store {:?}",
+        VEXILLON_PUBLISHER_LABEL, path,
+    );
+    Ok(())
+}
+
 /// Decode a base64 (standard, no-pad-tolerant) string into a
 /// `VerifyingKey`. Errors carry context useful in API responses.
 pub fn parse_public_key_b64(s: &str) -> Result<VerifyingKey, String> {
@@ -222,6 +255,25 @@ mod tests {
         let sk = SigningKey::generate(&mut OsRng);
         let pk = sk.verifying_key();
         (sk, pk)
+    }
+
+    #[test]
+    fn bundled_vexillon_key_is_valid_and_pins_idempotently() {
+        // The compiled-in public key must parse (a typo would brick the boot pin).
+        let pk = parse_public_key_b64(VEXILLON_PUBLISHER_KEY_B64).expect("bundled key parses");
+        let fp = fingerprint_of(&pk);
+        assert_eq!(fp, "df0745f76797aa5dda701644b429533d79905fe3afe69f70372a4adaabee3673");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skills_dir = tmp.path().join("skills");
+        ensure_default_publishers(&skills_dir).unwrap();
+        let store = TrustStore::load(&TrustStore::default_path(&skills_dir)).unwrap();
+        let (label, _) = store.lookup(&fp).expect("Vexillon pinned");
+        assert_eq!(label, VEXILLON_PUBLISHER_LABEL);
+        // Idempotent — a second call doesn't duplicate.
+        ensure_default_publishers(&skills_dir).unwrap();
+        let store2 = TrustStore::load(&TrustStore::default_path(&skills_dir)).unwrap();
+        assert_eq!(store2.len(), 1);
     }
 
     #[test]

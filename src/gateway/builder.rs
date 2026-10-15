@@ -3081,6 +3081,11 @@ fn build_tool_registry(
         if let Err(e) = crate::skills::instance_key::ensure(data_dir) {
             warn!("instance signing key setup failed (self-authored skills will be unsigned): {e}");
         }
+        // Pin the bundled first-party (Vexillon) publisher key so official
+        // packages verify as Verified out of the box.
+        if let Err(e) = crate::skills::trust::ensure_default_publishers(&skills_dir) {
+            warn!("default publisher pin failed (official packages may read Untrusted): {e}");
+        }
 
         // Load + register all skills (global + per-user, user-scoped) onto the
         // registry's hot-swap surface via the SAME path used for live reload —
