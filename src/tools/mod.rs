@@ -39,6 +39,7 @@ pub mod guardian_decide;
 pub mod guardian_propose;
 pub mod settings;
 pub mod schema_lint;
+pub mod propose_skill;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -172,6 +173,14 @@ pub trait Tool: Send + Sync {
     // `PerAppRule` can allow/deny it. See [`crate::packages::apps::AppTool`].
     fn app_id(&self) -> Option<&str> { None }
 
+    // The owning user id, for a USER-SCOPED skill.
+    // Default `None` = global (built-ins, MCP, app tools, bundled/global skills,
+    // visible to everyone subject to RBAC). `Some(user_id)` = a private,
+    // user-authored skill that must only be offered to AND executable by its
+    // owner; the registry filters it out of other users' tool sets and the
+    // SkillTool refuses a non-owner caller as a hard backstop.
+    fn skill_owner(&self) -> Option<&str> { None }
+
     // Whether the tool is currently operable. A tool may ship in the binary
     // but be effectively off (missing allowlist, missing backend, etc.); the
     // registry uses this to mark it in the UI without unregistering it.
@@ -200,6 +209,13 @@ pub struct ToolRegistry {
     // `app__<id>__<tool>`, so they never collide with built-ins or `mcp__*`;
     // lookups check `tools`, then `mcp`, then this map.
     app: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    // Skill router tools, hot-swappable exactly like `mcp`/`app`. Each loaded
+    // Skill is one router tool here; the surface is replaced via
+    // [`Self::set_skill_tools`] on startup AND whenever a skill is authored /
+    // approved / edited / deleted — so skill changes take effect on the next
+    // turn with NO restart. Kept separate from the
+    // static built-ins so the agent's shared `Arc<ToolRegistry>` can swap it.
+    skills: RwLock<HashMap<String, Arc<dyn Tool>>>,
     audit: Option<Arc<ToolAuditStore>>,
     // when set, every `execute()` call emits a
     // `ToolInvocation` event to this engine before running the tool.
@@ -239,6 +255,7 @@ impl ToolRegistry {
             tools: HashMap::new(),
             mcp:   RwLock::new(HashMap::new()),
             app:   RwLock::new(HashMap::new()),
+            skills: RwLock::new(HashMap::new()),
             audit: None,
             policy_engine: None,
             app_http:    None,
@@ -350,6 +367,32 @@ impl ToolRegistry {
             .unwrap_or_default()
     }
 
+    // Replace the entire SKILL router-tool surface in one shot — the
+    // skill analog of [`Self::set_mcp_tools`]. Called at startup and after any
+    // skill is authored/approved/edited/deleted (hot-reload) via the shared
+    // `Arc<ToolRegistry>`, so a new skill is callable on the next turn with no
+    // restart. Skill router names are the skill ids (reverse-DNS), which never
+    // collide with built-ins / `mcp__*` / `app__*`; lookups check `tools`,
+    // then `mcp`, then `app`, then this map.
+    pub fn set_skill_tools(&self, tools: Vec<Arc<dyn Tool>>) {
+        let mut g = match self.skills.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(), // poisoned: recover, we fully replace anyway
+        };
+        g.clear();
+        for t in tools {
+            g.insert(t.name().to_string(), t);
+        }
+        debug!("ToolRegistry: skill surface reloaded ({} tools)", g.len());
+    }
+
+    // Snapshot of the current skill router-tool pairs, mirroring `mcp_snapshot`.
+    fn skill_snapshot(&self) -> Vec<Arc<dyn Tool>> {
+        self.skills.read()
+            .map(|g| g.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
     // Attach an audit store. Every subsequent `execute` call writes one
     // row; registries without a store skip auditing (useful for tests).
     pub fn with_audit(mut self, store: Arc<ToolAuditStore>) -> Self {
@@ -415,7 +458,10 @@ impl ToolRegistry {
         if let Some(t) = self.mcp.read().ok().and_then(|g| g.get(name).cloned()) {
             return Some(t);
         }
-        self.app.read().ok().and_then(|g| g.get(name).cloned())
+        if let Some(t) = self.app.read().ok().and_then(|g| g.get(name).cloned()) {
+            return Some(t);
+        }
+        self.skills.read().ok().and_then(|g| g.get(name).cloned())
     }
 
     // Iterate over `(name, Arc<dyn Tool>)` pairs. Used by the Skills
@@ -553,6 +599,7 @@ impl ToolRegistry {
         let mut names: Vec<String> = self.tools.keys().cloned().collect();
         names.extend(self.mcp_snapshot().iter().map(|t| t.name().to_owned()));
         names.extend(self.app_snapshot().iter().map(|t| t.name().to_owned()));
+        names.extend(self.skill_snapshot().iter().map(|t| t.name().to_owned()));
         names
     }
 
@@ -562,6 +609,7 @@ impl ToolRegistry {
         self.tools.values()
             .chain(self.mcp_snapshot().iter())
             .chain(self.app_snapshot().iter())
+            .chain(self.skill_snapshot().iter())
             .filter(|t| !matches!(t.visibility(), ToolVisibility::System { .. }))
             .map(|t| t.name().to_owned())
             .collect()
@@ -577,6 +625,7 @@ impl ToolRegistry {
         self.tools.values()
             .chain(self.mcp_snapshot().iter())
             .chain(self.app_snapshot().iter())
+            .chain(self.skill_snapshot().iter())
             .filter(|t| match t.visibility() {
                 ToolVisibility::User | ToolVisibility::Admin => flow == "chat",
                 ToolVisibility::System { flow: f }           => f == flow,
@@ -755,6 +804,37 @@ mod tests {
         reg.set_mcp_tools(vec![]);
         assert!(reg.get("mcp__test__echo").is_none(), "tool removed after reload");
         assert!(!reg.list_tools().contains(&"mcp__test__echo".to_string()));
+    }
+
+    struct SkillEcho;
+    #[async_trait]
+    impl Tool for SkillEcho {
+        fn name(&self) -> &str { "com.example.testskill" }
+        fn description(&self) -> &str { "skill echo" }
+        fn args_schema(&self) -> serde_json::Value { json!({}) }
+        async fn execute(&self, _a: ToolArgs) -> Result<ToolResult, MiraError> {
+            Ok(ToolResult::success("ok"))
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_tools_hot_swap_via_set_skill_tools() {
+        // The skill self-authoring payoff: a skill becomes callable on the next
+        // turn with NO restart, through the shared `Arc<ToolRegistry>`.
+        let reg = ToolRegistry::new();
+        assert!(reg.get("com.example.testskill").is_none());
+
+        reg.set_skill_tools(vec![std::sync::Arc::new(SkillEcho)]);
+        assert!(reg.get("com.example.testskill").is_some(), "get sees the hot-added skill");
+        assert!(reg.list_tools().contains(&"com.example.testskill".to_string()));
+        assert!(reg.list_for_flow("chat").contains(&"com.example.testskill".to_string()),
+            "hot-added skill is exposed to the chat flow");
+        assert!(reg.execute("com.example.testskill", json!({})).await.unwrap().success);
+
+        // Hot-remove (uninstall/delete): empty set drops it immediately.
+        reg.set_skill_tools(vec![]);
+        assert!(reg.get("com.example.testskill").is_none(), "skill removed after reload");
+        assert!(!reg.list_tools().contains(&"com.example.testskill".to_string()));
     }
 
     #[tokio::test]

@@ -116,6 +116,12 @@ pub fn load_dir_with_trust(
         if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('.')) {
             continue;
         }
+        // `users/` is the reserved root for per-user, user-scoped skills
+        // (`<skills_dir>/users/<uid>/<id>/`), loaded separately by
+        // [`load_user_scoped`] with an owner tag — not a skill dir itself.
+        if path.file_name().and_then(|n| n.to_str()) == Some("users") {
+            continue;
+        }
         match load_one(&path, mira_version, trust_store) {
             Ok(skill) => registry.loaded.push(skill),
             Err(e) => registry.errors.push(LoadError {
@@ -130,6 +136,35 @@ pub fn load_dir_with_trust(
     registry.errors.sort_by(|a, b| a.path.cmp(&b.path));
 
     registry
+}
+
+/// Load every user's **user-scoped** skills from `<skills_dir>/users/<uid>/`,
+/// returning `(owner_user_id, SkillRegistry)` pairs. Each `<uid>` subdir is
+/// scanned exactly like the global dir; the caller tags the built router tools
+/// with the owner so they're private to that user.
+pub fn load_user_scoped(
+    skills_dir: &Path,
+    mira_version: &Version,
+    trust_store: Option<&TrustStore>,
+) -> Vec<(String, SkillRegistry)> {
+    let users_root = skills_dir.join("users");
+    let entries = match fs::read_dir(&users_root) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(), // no users dir yet → nothing user-scoped
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() { continue; }
+        let Some(uid) = path.file_name().and_then(|n| n.to_str()) else { continue; };
+        if uid.starts_with('.') { continue; }
+        let reg = load_dir_with_trust(&path, mira_version, trust_store);
+        if !reg.loaded.is_empty() || !reg.errors.is_empty() {
+            out.push((uid.to_string(), reg));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 /// Load one Skill directory. Errors are stringified because callers want

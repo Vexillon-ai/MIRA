@@ -36,6 +36,7 @@ use tempfile::TempDir;
 use tracing::{info, warn};
 
 use crate::auth::middleware::{AdminUser, AuthUser};
+use crate::auth::{LocalAuthService, Role};
 use crate::server::handlers::onboarding::DataDir;
 use crate::skills::{
     self,
@@ -128,6 +129,13 @@ pub struct SkillSummary {
     /// not uninstalled (the UI hides the remove control). See
     /// [`SkillMeta::system`].
     pub system:       bool,
+
+    /// `"global"` (installed/bundled/promoted, visible to all, RBAC-gated) or
+    /// `"user"` (this caller's own self-authored, private) — skill scope.
+    pub scope:        &'static str,
+    /// True when this is the caller's own user-scoped skill. The UI shows the
+    /// "share with everyone" (promote) affordance only for these.
+    pub own:          bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -205,11 +213,94 @@ pub async fn list_skills(
     let trust = load_trust_store(&data_dir.0);
 
     let registry = skills::load_dir_with_trust(&skills_dir, &mira_version, Some(&trust));
+    // The caller's OWN user-scoped (self-authored) skills — private to them,
+    // not in the global dir. Surfacing them here lets the Skills page show a
+    // user their self-authored skills and offer "share with everyone".
+    let own_dir = skills_dir.join(skills::authoring::USERS_DIR).join(&user.id);
+    let own_scoped = skills::load_dir_with_trust(&own_dir, &mira_version, Some(&trust));
     let disabled = prefs.as_ref()
         .map(|p| p.disabled_for_user(&user.id))
         .unwrap_or_default();
 
-    Json(build_response(&skills_dir, &registry, &disabled))
+    Json(build_response(&skills_dir, &registry, &own_scoped, &disabled))
+}
+
+// ── Skill self-authoring: proposal review ──────────
+
+/// GET /api/skills/proposals — the caller's staged (not-yet-active) proposals.
+pub async fn list_skill_proposals(
+    AuthUser(user):      AuthUser,
+    Extension(data_dir): Extension<DataDir>,
+) -> impl IntoResponse {
+    let skills_dir = skills::default_skills_dir(&data_dir.0);
+    let proposals = skills::authoring::list(&skills_dir, &user.id);
+    Json(serde_json::json!({ "proposals": proposals }))
+}
+
+/// POST /api/skills/proposals/{id}/approve — approve the caller's OWN proposal:
+/// move it to the live user tree + hot-reload (no restart). Scoped to the
+/// caller's own staging dir, so a user can never approve another's proposal.
+pub async fn approve_skill_proposal(
+    AuthUser(user):      AuthUser,
+    Extension(data_dir): Extension<DataDir>,
+    Extension(mcp):      Extension<Arc<crate::mcp::McpServerRegistry>>,
+    Path(id):            Path<String>,
+) -> impl IntoResponse {
+    match mcp.tool_registry() {
+        Some(reg) => match skills::runtime::approve_proposal(&reg, &data_dir.0, &user.id, &id) {
+            Ok(())  => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "id": id, "status": "active" }))),
+            Err(e)  => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": e.to_string() }))),
+        },
+        None => (StatusCode::SERVICE_UNAVAILABLE,
+                 Json(serde_json::json!({ "error": "tool registry unavailable" }))),
+    }
+}
+
+/// POST /api/skills/proposals/{id}/reject — discard the caller's OWN proposal.
+pub async fn reject_skill_proposal(
+    AuthUser(user):      AuthUser,
+    Extension(data_dir): Extension<DataDir>,
+    Path(id):            Path<String>,
+) -> impl IntoResponse {
+    let skills_dir = skills::default_skills_dir(&data_dir.0);
+    match skills::authoring::reject(&skills_dir, &user.id, &id) {
+        Ok(())  => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "id": id, "status": "rejected" }))),
+        Err(e)  => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))),
+    }
+}
+
+/// POST /api/skills/{id}/promote — promote the caller's OWN user-scoped skill
+/// to global (visible to everyone), re-signed as "this MIRA". Allowed for
+/// admins, or non-admins whose RBAC grants `skill_authoring.allow_global_propose`
+/// (default-denied). Scoped to the caller's own skills — a user can never
+/// promote another user's skill through this endpoint.
+pub async fn promote_skill(
+    AuthUser(user):      AuthUser,
+    Extension(data_dir): Extension<DataDir>,
+    Extension(mcp):      Extension<Arc<crate::mcp::McpServerRegistry>>,
+    Extension(auth):     Extension<Arc<LocalAuthService>>,
+    Path(id):            Path<String>,
+) -> impl IntoResponse {
+    // Authorize: admins always; others only with the global-propose grant.
+    let is_admin = matches!(user.role, Role::Admin);
+    if !is_admin {
+        let caps = auth.effective_capabilities(&user.id, &user.role).unwrap_or_default();
+        if !caps.may_propose_global() {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+                "error": "not permitted to share skills with everyone (needs admin or the global-propose grant)"
+            })));
+        }
+    }
+    match mcp.tool_registry() {
+        Some(reg) => match skills::runtime::promote_skill(&reg, &data_dir.0, &user.id, &id) {
+            Ok(new_id) => (StatusCode::OK, Json(serde_json::json!({
+                "ok": true, "id": id, "new_id": new_id, "scope": "global"
+            }))),
+            Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
+        },
+        None => (StatusCode::SERVICE_UNAVAILABLE,
+                 Json(serde_json::json!({ "error": "tool registry unavailable" }))),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,18 +350,30 @@ pub async fn set_skill_enabled(
 
 fn build_response(
     skills_dir: &PathBuf,
-    registry: &SkillRegistry,
+    global: &SkillRegistry,
+    own_scoped: &SkillRegistry,
     disabled_for_user: &std::collections::HashSet<String>,
 ) -> SkillsResponse {
-    SkillsResponse {
-        skills_dir: skills_dir.display().to_string(),
-        loaded:     registry.loaded.iter()
-            .map(|s| skill_summary_from_loaded(
-                s, !disabled_for_user.contains(&s.manifest.skill.id),
-            ))
-            .collect(),
-        errors:     registry.errors.iter().map(|e| load_error_dto(e)).collect(),
+    let mut loaded: Vec<SkillSummary> = Vec::new();
+    for s in &global.loaded {
+        let mut sum = skill_summary_from_loaded(s, !disabled_for_user.contains(&s.manifest.skill.id));
+        sum.scope = "global";
+        sum.own   = false;
+        loaded.push(sum);
     }
+    for s in &own_scoped.loaded {
+        let mut sum = skill_summary_from_loaded(s, !disabled_for_user.contains(&s.manifest.skill.id));
+        sum.scope = "user";
+        sum.own   = true;
+        loaded.push(sum);
+    }
+    // Surface load errors from both trees (a user's own authored skill failing
+    // to load is exactly what they need to see).
+    let errors = global.errors.iter()
+        .chain(own_scoped.errors.iter())
+        .map(load_error_dto)
+        .collect();
+    SkillsResponse { skills_dir: skills_dir.display().to_string(), loaded, errors }
 }
 
 /// Project a `LoadedSkill` (carries verification fields) onto the API
@@ -314,6 +417,8 @@ fn skill_summary(
         root_dir:     root_dir.display().to_string(),
         enabled,
         system:       manifest.skill.system,
+        scope:        "global", // caller tags user-scoped ones in build_response
+        own:          false,
     }
 }
 

@@ -14,6 +14,15 @@ export interface CapabilityProfile {
   channels?:            string[] | null
   max_task_budget_usd?: number | null
   session_budget_usd?:  number | null
+  /** Skill-authoring rights (null/undefined = default: allowed, Tier-0). */
+  skill_authoring?: SkillAuthoring | null
+}
+
+/** Per-profile skill-authoring rights (mirrors `auth::capabilities::SkillAuthoring`). */
+export interface SkillAuthoring {
+  enabled:              boolean
+  max_tier:             number
+  allow_global_propose: boolean
 }
 
 export const capabilitiesApi = {

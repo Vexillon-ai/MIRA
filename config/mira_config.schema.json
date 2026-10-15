@@ -1407,6 +1407,33 @@
             }
           }
         },
+        "skill_authoring": {
+          "description": "Skill self-authoring: MIRA can save a reusable Tier-0 guidance skill (instructions only — no new tools, network, files, or secrets) from a non-trivial task it just completed, so it's available next time. Per-user authoring rights (and higher tiers) are governed by the Capability RBAC skill_authoring profile; these are the instance-wide behaviour switches.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Master switch for skill self-authoring. Default true.",
+              "type": "boolean"
+            },
+            "auto_approve_tier0": {
+              "description": "Auto-approve newly proposed Tier-0 (guidance-only) skills so they go live immediately (still surfaced, one-tap disable) instead of waiting for review. Tier-0 grants no capability, so there is no capability risk. Default true; set false for always-ask.",
+              "type": "boolean"
+            },
+            "propose_on_task_completion": {
+              "description": "Let MIRA offer to save a skill once, inline, after completing a non-trivial reusable task. Off = authoring only when the user explicitly asks. Default true.",
+              "type": "boolean"
+            },
+            "default_scope": {
+              "description": "Default scope for a newly authored skill: 'user' (private to the author) or 'global' (all users; still requires admin promotion to publish). Default 'user'.",
+              "type": "string",
+              "enum": [
+                "user",
+                "global"
+              ]
+            }
+          }
+        },
         "avatar": {
           "description": "Assistant avatar. Encoded as 'preset:<key>' for bundled icons, or 'upload:<ext>' when a file exists at {data_dir}/avatars/agent.{ext}. Null = built-in MIRA logo.",
           "type": [

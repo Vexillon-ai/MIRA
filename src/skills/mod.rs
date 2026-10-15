@@ -10,8 +10,10 @@
 //! - `manifest` — TOML types and validation rules.
 //! - `loader`   — directory scan that produces a `SkillRegistry`.
 
+pub mod authoring;
 pub mod bundled;
 pub mod cli;
+pub mod instance_key;
 pub mod manifest;
 pub mod loader;
 pub mod permissions;
@@ -32,7 +34,8 @@ pub use permissions::{
 pub use prefs::SkillPrefsStore;
 pub use secrets::{Scope as SecretScope, SecretEntry, SecretsError, SecretsStore};
 pub use runtime::{SkillTool, BuiltinDispatcher};
-pub use signing::{verify_manifest, sign_manifest, apply_signature, VerificationOutcome};
+pub use signing::{verify_manifest, sign_manifest, apply_signature, sign_skill_file, VerificationOutcome};
+pub use instance_key::INSTANCE_KEY_LABEL;
 pub use trust::{TrustStore, TrustEntry, fingerprint_of, parse_public_key_b64};
 
 use std::path::{Path, PathBuf};

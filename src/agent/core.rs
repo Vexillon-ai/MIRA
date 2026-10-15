@@ -402,7 +402,7 @@ impl AgentCore {
     // Run a single **MIRA-Guardian** turn (built-in watchdog persona + Ring-0
     // read-only tools, on the local guardian model) and return its text.
  // Fail-closed: errors if the Guardian is `off` or its model isn't
-    // local. Used by the proactive watch loop (P3) and any internal Guardian
+    // local. Used by the proactive watch loop and any internal Guardian
     // invocation. Memory/wiki hooks are skipped — Guardian turns aren't the
     // user's conversation.
     pub async fn run_guardian_turn(
@@ -1046,6 +1046,27 @@ impl AgentCore {
             format!("{effective_system}{identity_hint}")
         };
 
+        // Skill self-authoring: when enabled, tell MIRA it can save a
+        // reusable Tier-0 guidance skill via `propose_skill` — on request, and
+        // (optionally) once after a non-trivial task it just completed. The tool
+        // is only in scope when the caller may author, so this is a no-op offer
+        // for gated users. Skipped for flows that supply their own context.
+        let sa = &self.config.agent.skill_authoring;
+        let effective_system = if sa.enabled && context.system_prompt_override.is_none() {
+            let offer = if sa.propose_on_task_completion {
+                " You may also offer once, briefly, right after completing a \
+                 non-trivial, reusable task — never repeatedly."
+            } else { "" };
+            format!(
+                "{effective_system}\n\nWhen the user asks you to remember or save how to do \
+                 something as a reusable skill, use the `propose_skill` tool to save a short \
+                 guidance skill (a name, a one-line when-to-use, and the instructions).{offer} \
+                 These are guidance only — they add no new tools, network, files, or permissions.",
+            )
+        } else {
+            effective_system
+        };
+
         // Reasoning suppression: per-turn override (web chat toggle) wins, else
         // the global `agent.disable_reasoning`. When on, append the `/no_think`
         // directive so reasoning models (qwen3 family, etc.) skip chain-of-
@@ -1290,7 +1311,17 @@ impl AgentCore {
         // may later pull more tools, but only from this same pool.
         let ts_cfg = self.tool_selection_config().await;
         let pool: Vec<String> = context.allowed_tool_names.clone()
-            .unwrap_or_else(|| self.tools.list_tools());
+            .unwrap_or_else(|| self.tools.list_tools())
+            .into_iter()
+            // S2 (skill self-authoring): never OFFER another user's private
+            // (user-scoped) skill. `skill_owner()` is None for global tools/
+            // skills (keep), Some(caller) for the caller's own (keep), Some(other)
+            // for a different user's private skill (drop). The SkillTool execution
+            // backstop refuses a non-owner regardless — this is the UX/token half.
+            .filter(|name| self.tools.get(name)
+                .and_then(|t| t.skill_owner().map(|o| o == user_id))
+                .unwrap_or(true))
+            .collect();
         // Prompt caching vs adaptive tool selection: the cached prefix includes
         // the tool schemas (for Anthropic the order is tools → system), so a
         // tool set that changes per turn breaks the stable prefix and forces a

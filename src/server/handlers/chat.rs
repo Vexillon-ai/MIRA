@@ -326,6 +326,18 @@ pub async fn chat_handler(
         turn_ctx.allowed_tool_names = caps.filter_tools(&base);
     }
 
+    // Skill-authoring gate: don't offer `propose_skill` when the instance
+    // master switch is off OR the caller's RBAC profile denies authoring. A
+    // dedicated control on top of the tools axis.
+    if !config.agent.skill_authoring.enabled || !caps.may_author_skills() {
+        let base = turn_ctx
+            .allowed_tool_names
+            .take()
+            .unwrap_or_else(|| agent.tools.list_tools());
+        turn_ctx.allowed_tool_names =
+            Some(base.into_iter().filter(|t| t != "propose_skill").collect());
+    }
+
     // Snapshot the onboarded state *before* the turn runs. The primary model
     // can call `complete_onboarding` inside its own stream; by the time the
     // post-turn extractor reads the profile, `onboarded_at` is already
@@ -339,6 +351,10 @@ pub async fn chat_handler(
         .is_some();
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
+
+    // Skill self-authoring: captured for the post-turn auto-approve hook.
+    let skill_authoring_cfg = config.agent.skill_authoring.clone();
+    let data_dir_sa = data_dir.0.clone();
 
     // Emit `message.received` (/). Best-effort — when the
     // event bus isn't installed (unit tests) this is a silent no-op.
@@ -674,6 +690,29 @@ pub async fn chat_handler(
                 });
 
                 info!("Chat turn complete — conv={} user={}", conv_id_c, user_id);
+
+                // Skill self-authoring: if MIRA proposed a Tier-0 guidance
+                // skill this turn and auto-approve is on, activate it now so it's
+                // live for the next turn — no restart. Guests can't author.
+                if skill_authoring_cfg.enabled
+                    && skill_authoring_cfg.auto_approve_tier0
+                    && !user_id.starts_with("guest_")
+                {
+                    let activated = crate::skills::runtime::auto_approve_pending(
+                        &agent.tools, data_dir_sa.as_path(), &user_id,
+                    );
+                    for id in activated {
+                        info!("skill self-authoring: auto-approved {id:?} for {user_id}");
+                        notifs.send(Notification {
+                            kind:            NotificationKind::ConversationUpdated,
+                            conversation_id: Some(conv_id_c.clone()),
+                            channel:         Some("web".to_owned()),
+                            user_id:         Some(user_id.clone()),
+                            message:         Some(format!("Saved a new skill: {id}")),
+                            category:        None,
+                        });
+                    }
+                }
             }
         }
     });

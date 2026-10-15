@@ -42,6 +42,29 @@ use crate::MiraError;
 
 // ── Type ───────────────────────────────────────────────────────────────────────
 
+/// Skill-authoring rights. Governs whether a user may
+/// CREATE skills and up to which tier. Absent on a profile = the default
+/// (authoring allowed, Tier-0). A present block fully specifies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillAuthoring {
+    /// May the user author skills at all. Default true. Set false to deny.
+    #[serde(default = "sa_default_true")]
+    pub enabled: bool,
+    /// Highest tier the user may create: 0 guidance (default) .. 3 procedure.
+    /// MIRA only self-authors Tier-0; higher tiers come via admin/CLI.
+    #[serde(default)]
+    pub max_tier: u8,
+    /// May the user request GLOBAL scope (vs user-private). Default false —
+    /// publishing to all users still also requires admin promotion.
+    #[serde(default)]
+    pub allow_global_propose: bool,
+}
+
+impl Default for SkillAuthoring {
+    fn default() -> Self { Self { enabled: true, max_tier: 0, allow_global_propose: false } }
+}
+fn sa_default_true() -> bool { true }
+
 /// One capability profile. Stored as JSON on a group or a user; also the shape
 /// returned by the merge as a user's *effective* capabilities.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -66,6 +89,9 @@ pub struct CapabilityProfile {
     /// Per-session budget cap (USD). `None` = no cap from this profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_budget_usd: Option<f64>,
+    /// Skill-authoring rights. `None` = default (authoring allowed, Tier-0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_authoring: Option<SkillAuthoring>,
 }
 
 impl CapabilityProfile {
@@ -83,6 +109,22 @@ impl CapabilityProfile {
             && self.channels.is_none()
             && self.max_task_budget_usd.is_none()
             && self.session_budget_usd.is_none()
+            && self.skill_authoring.is_none()
+    }
+
+    /// May this user author (create) skills at all? Default (unset) = yes.
+    pub fn may_author_skills(&self) -> bool {
+        self.skill_authoring.as_ref().map_or(true, |s| s.enabled)
+    }
+
+    /// Highest skill tier this user may create. Default (unset) = 0 (guidance).
+    pub fn max_author_tier(&self) -> u8 {
+        self.skill_authoring.as_ref().map_or(0, |s| s.max_tier)
+    }
+
+    /// May this user request global (vs user-private) scope? Default = no.
+    pub fn may_propose_global(&self) -> bool {
+        self.skill_authoring.as_ref().map_or(false, |s| s.allow_global_propose)
     }
 
     fn axis_allows(axis: &Option<Vec<String>>, value: &str) -> bool {
@@ -168,6 +210,28 @@ impl CapabilityProfile {
                 .fold(None, |acc, v| Some(acc.map_or(v, |a: f64| a.min(v))))
         }
 
+        // Skill-authoring: most-permissive across profiles (grants are
+        // additive, like the allow-lists). A profile with no block contributes
+        // the default (enabled, Tier-0). Result is `None` only when NO profile
+        // mentions it at all. So to DENY authoring, every membership must set
+        // enabled=false (consistent with additive grants; admins bypass).
+        let skill_authoring = if profiles.iter().any(|p| p.skill_authoring.is_some()) {
+            let mut eff = SkillAuthoring { enabled: false, max_tier: 0, allow_global_propose: false };
+            for p in profiles {
+                match &p.skill_authoring {
+                    Some(sa) => {
+                        eff.enabled |= sa.enabled;
+                        eff.max_tier = eff.max_tier.max(sa.max_tier);
+                        eff.allow_global_propose |= sa.allow_global_propose;
+                    }
+                    None => { eff.enabled = true; } // unrestricted profile → default-allowed
+                }
+            }
+            Some(eff)
+        } else {
+            None
+        };
+
         CapabilityProfile {
             providers: union_axis(profiles, |p| &p.providers),
             models: union_axis(profiles, |p| &p.models),
@@ -175,6 +239,7 @@ impl CapabilityProfile {
             channels: union_axis(profiles, |p| &p.channels),
             max_task_budget_usd: min_budget(profiles, |p| p.max_task_budget_usd),
             session_budget_usd: min_budget(profiles, |p| p.session_budget_usd),
+            skill_authoring,
         }
     }
 }
@@ -342,6 +407,40 @@ mod tests {
             max_task_budget_usd: budget,
             ..Default::default()
         }
+    }
+
+    fn authoring(enabled: bool, max_tier: u8, global: bool) -> CapabilityProfile {
+        CapabilityProfile {
+            skill_authoring: Some(SkillAuthoring { enabled, max_tier, allow_global_propose: global }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn skill_authoring_defaults_and_merge() {
+        // Unset default → authoring allowed, Tier-0, no global.
+        let def = CapabilityProfile::default();
+        assert!(def.may_author_skills());
+        assert_eq!(def.max_author_tier(), 0);
+        assert!(!def.may_propose_global());
+        assert!(def.is_unrestricted());
+
+        // A lone deny.
+        assert!(!authoring(false, 0, false).may_author_skills());
+
+        // Additive: a deny + an unrestricted profile → allowed (grant wins).
+        let m = CapabilityProfile::merge(&[authoring(false, 0, false), CapabilityProfile::default()]);
+        assert!(m.may_author_skills(), "an unrestricted membership grants default Tier-0");
+
+        // max_tier = max across grants; global = any.
+        let m2 = CapabilityProfile::merge(&[authoring(false, 0, false), authoring(true, 2, true)]);
+        assert!(m2.may_author_skills());
+        assert_eq!(m2.max_author_tier(), 2);
+        assert!(m2.may_propose_global());
+
+        // DENY requires every membership to deny.
+        let both = CapabilityProfile::merge(&[authoring(false, 0, false), authoring(false, 1, false)]);
+        assert!(!both.may_author_skills());
     }
 
     #[test]

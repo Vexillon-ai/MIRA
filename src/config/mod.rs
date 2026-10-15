@@ -2190,6 +2190,13 @@ pub struct AgentConfig {
     #[serde(default)]
     pub empty_response_retry: EmptyResponseRetryConfig,
 
+    // Skill self-authoring (`agent.skill_authoring`). Lets MIRA / users save
+    // reusable Tier-0 guidance skills from what was just done. Per-user
+    // authoring RIGHTS live in the Capability RBAC profile (`skill_authoring`
+    // there); these are instance-wide behaviour switches.
+    #[serde(default)]
+    pub skill_authoring: SkillAuthoringConfig,
+
     #[serde(default)]
     pub tools: ToolsConfig,
 
@@ -2345,6 +2352,7 @@ impl Default for AgentConfig {
             compaction: CompactionConfig::default(),
             degeneracy_guard: DegeneracyGuardConfig::default(),
             empty_response_retry: EmptyResponseRetryConfig::default(),
+            skill_authoring: SkillAuthoringConfig::default(),
             tools:             ToolsConfig::default(),
             tool_selection:    ToolSelectionConfig::default(),
             reasoning:         ReasoningConfig::default(),
@@ -3945,6 +3953,50 @@ impl Default for EmptyResponseRetryConfig {
     }
 }
 fn default_empty_retry_max_retries() -> u32 { 2 }
+
+/// Skill self-authoring settings (`agent.skill_authoring`). MIRA can save a
+/// reusable **Tier-0 guidance skill** (instructions only — no new tools,
+/// network, files, or secrets) from a non-trivial task it just completed, so
+/// it's available next time. Per-user authoring rights (and higher tiers) are
+/// governed by the Capability RBAC `skill_authoring` profile; these are the
+/// instance-wide behaviour switches.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillAuthoringConfig {
+    /// Master switch for the whole feature. Default true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Auto-approve newly proposed Tier-0 (guidance-only) skills: they go live
+    /// immediately (still surfaced + one-tap disable) instead of waiting in a
+    /// review queue. Tier-0 grants no capability, so this carries no capability
+    /// risk. Default true; set false for always-ask.
+    #[serde(default = "default_true")]
+    pub auto_approve_tier0: bool,
+
+    /// Let MIRA offer to save a skill once, inline, right after it completes a
+    /// non-trivial reusable task. Off → authoring only happens when the user
+    /// explicitly asks ("make that a skill"). Default true.
+    #[serde(default = "default_true")]
+    pub propose_on_task_completion: bool,
+
+    /// Default scope for a newly authored skill: "user" (private to the author)
+    /// or "global" (all users — still requires admin promotion to publish).
+    /// Default "user".
+    #[serde(default = "default_skill_scope")]
+    pub default_scope: String,
+}
+
+impl Default for SkillAuthoringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_approve_tier0: true,
+            propose_on_task_completion: true,
+            default_scope: default_skill_scope(),
+        }
+    }
+}
+fn default_skill_scope() -> String { "user".to_string() }
 
 fn default_max_tool_round_tokens() -> u32   { 2048 }
 fn default_max_response_tokens()   -> u32   { 16384 }

@@ -80,6 +80,8 @@ function EditorForm({
   })
   const [taskBudget, setTaskBudget]       = useState(initial.max_task_budget_usd?.toString() ?? '')
   const [sessionBudget, setSessionBudget] = useState(initial.session_budget_usd?.toString() ?? '')
+  // Skill self-authoring: default allowed (Tier-0) unless explicitly denied.
+  const [allowAuthoring, setAllowAuthoring] = useState(initial.skill_authoring?.enabled ?? true)
   const [error, setError] = useState('')
 
   const saveMut = useMutation({
@@ -101,11 +103,17 @@ function EditorForm({
     if (!Number.isNaN(tb)) p.max_task_budget_usd = tb
     const sb = parseFloat(sessionBudget)
     if (!Number.isNaN(sb)) p.session_budget_usd = sb
+    // Only persist a skill_authoring block when DENYING (unchecked); leaving it
+    // unset keeps the default (authoring allowed, Tier-0).
+    if (!allowAuthoring) {
+      p.skill_authoring = { enabled: false, max_tier: 0, allow_global_propose: false }
+    }
     return p
   }
 
   const unrestricted =
-    !Object.values(restrict).some(Boolean) && !taskBudget.trim() && !sessionBudget.trim()
+    !Object.values(restrict).some(Boolean) && !taskBudget.trim()
+    && !sessionBudget.trim() && allowAuthoring
 
   return (
     <div className={styles.body}>
@@ -157,6 +165,22 @@ function EditorForm({
             onChange={(e) => setSessionBudget(e.target.value)}
           />
         </label>
+      </div>
+
+      <div className={styles.axis}>
+        <label className={styles.axisHead}>
+          <input
+            type="checkbox"
+            checked={allowAuthoring}
+            onChange={(e) => setAllowAuthoring(e.target.checked)}
+          />
+          <span>Allow skill authoring (Tier-0 guidance skills)</span>
+        </label>
+        {!allowAuthoring && (
+          <p className={styles.note}>
+            This user/group won’t be offered <code>propose_skill</code> and can’t save skills.
+          </p>
+        )}
       </div>
 
       {error && <p className={styles.error}>{error}</p>}

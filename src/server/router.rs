@@ -190,10 +190,10 @@ pub fn build_router(
     chatterbox_supervisor: Option<Arc<crate::tts::chatterbox::ChatterboxSupervisor>>,
     // Live subsystem-fallback tracker — powers GET /api/health/degradations.
     degradations: Option<Arc<crate::health::degradation::DegradationTracker>>,
-    // MIRA-Guardian pending action proposals — powers /api/guardian/actions (P4).
+    // MIRA-Guardian pending action proposals — powers /api/guardian/actions.
     guardian_actions: Option<Arc<crate::agent::guardian_actions::GuardianActionStore>>,
     // HMAC-chained agent audit log — the guardian approve/decline handlers
-    // record tamper-evident decision events (P4).
+    // record tamper-evident decision events.
     audit_store:      Option<Arc<crate::agent::AuditStore>>,
 ) -> Router {
     // Held aside so the AuthLayer (built after `auth_service` is moved
@@ -919,7 +919,7 @@ pub fn build_router(
                    get(crate::server::handlers::agents::agent_activity_stream))
             .route("/api/agents/{id}/stdout/stream",
                    get(crate::server::handlers::agents::agent_stdout_stream))
-            // Policy — admin-defined rules (D3). All endpoints
+            // Policy — admin-defined rules. All endpoints
             // are admin-only via the AdminUser extractor.
             .route("/api/policy/rules",
                    get(crate::server::handlers::policy::list_rules)
@@ -945,10 +945,22 @@ pub fn build_router(
                    .post(crate::server::handlers::skills::add_trust_entry))
             .route("/api/skills/trust-store/{fingerprint}",
                    delete(crate::server::handlers::skills::remove_trust_entry))
+            // Skill self-authoring: proposal review (before `{id}` so the
+            // static `proposals` segment isn't captured as a skill id).
+            .route("/api/skills/proposals",
+                   get(crate::server::handlers::skills::list_skill_proposals))
+            .route("/api/skills/proposals/{id}/approve",
+                   post(crate::server::handlers::skills::approve_skill_proposal))
+            .route("/api/skills/proposals/{id}/reject",
+                   post(crate::server::handlers::skills::reject_skill_proposal))
             .route("/api/skills/{id}",
                    delete(crate::server::handlers::skills::uninstall_skill))
             .route("/api/skills/{id}/preferences",
                    put(crate::server::handlers::skills::set_skill_enabled))
+            // S6: promote the caller's own user-scoped skill to global
+            // (admin / RBAC global-propose; caller-scoped).
+            .route("/api/skills/{id}/promote",
+                   post(crate::server::handlers::skills::promote_skill))
             // Plugin packages: preview/verify, install, list, uninstall.
             // Admin-gated in-handler; reuses the skills trust store + MCP host.
             .route("/api/admin/packages/preview",
@@ -1440,7 +1452,7 @@ pub fn build_router(
             api_routes
         };
 
-        // Admin policy rules (D3) — layered when the store is present.
+        // Admin policy rules — layered when the store is present.
         // /api/policy/rules handlers reach for this; without it they
         // 500 (rather than silently allowing every rule to look empty).
         let api_routes = if let Some(ref store) = admin_policy_rules {

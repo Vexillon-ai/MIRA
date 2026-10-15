@@ -133,6 +133,39 @@ pub fn apply_signature(manifest: &mut SkillManifest, signing_key: &SigningKey) -
     signing_key.verifying_key()
 }
 
+/// Sign the `skill.toml` at `manifest_path` **in place** with `signing_key`,
+/// preserving any user comments (via `toml_edit`) and replacing any existing
+/// `[verification]` block. Returns the `Verification` that was written.
+///
+/// Shared by the `mira skill sign` CLI path and the per-instance self-signing
+/// path so the on-disk rewrite is identical, not two
+/// parallel implementations that could drift in canonicalisation.
+pub fn sign_skill_file(
+    manifest_path: &std::path::Path,
+    signing_key:   &SigningKey,
+) -> Result<Verification, String> {
+    let original = std::fs::read_to_string(manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let mut manifest = SkillManifest::parse(&original)
+        .map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
+    // Sign a clean canonical form — a signature never covers itself.
+    manifest.verification = None;
+    let verification = sign_manifest(&manifest, signing_key);
+
+    // Rewrite via toml_edit so comments/formatting survive; only the
+    // [verification] table is replaced.
+    let mut doc: toml_edit::DocumentMut = original.parse()
+        .map_err(|e| format!("toml re-parse {}: {e}", manifest_path.display()))?;
+    let mut tbl = toml_edit::Table::new();
+    tbl["signature"]     = toml_edit::value(verification.signature.clone());
+    tbl["publisher_key"] = toml_edit::value(verification.publisher_key.clone());
+    tbl["signed_at"]     = toml_edit::value(verification.signed_at.clone());
+    doc["verification"]  = toml_edit::Item::Table(tbl);
+    std::fs::write(manifest_path, doc.to_string())
+        .map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
+    Ok(verification)
+}
+
 // ── canonicalisation ──────────────────────────────────────────────────
 
 /// Canonical JSON bytes the signature is computed over.

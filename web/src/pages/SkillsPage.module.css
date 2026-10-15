@@ -375,3 +375,31 @@
   font-family: var(--font-mono, monospace);
   word-break: break-all;
 }
+
+/* Skill self-authoring — proposed-skills review section. */
+.proposals {
+  margin-bottom: 20px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md, 8px);
+  background: var(--bg-overlay);
+}
+.proposalsHead {
+  margin: 0 0 2px;
+  font-size: 14px;
+}
+.proposalsSub {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.proposalActions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.proposalDesc {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}

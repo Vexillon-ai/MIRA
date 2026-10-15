@@ -416,7 +416,7 @@ impl GatewayBuilder {
         // Constructed BEFORE the tool registry so HttpPolicy can be attached
         // to it (network egress consults the engine). Same engine
         // instance is then handed to the Supervisor below for spawn-child
-        // policy gating (D1) — keeps admin rules consistent across both
+        // policy gating — keeps admin rules consistent across both
         // surfaces.
         let admin_policy_rules: Option<Arc<crate::policy::AdminRulesStore>> =
             match crate::policy::AdminRulesStore::open(&data_dir.join("admin_policy_rules.db")) {
@@ -712,7 +712,7 @@ impl GatewayBuilder {
         // MiraServer::new is given the same Arc below.
         let restart_notify = Arc::new(tokio::sync::Notify::new());
 
-        // MIRA-Guardian action proposals (P4). Durable store of pending/decided
+        // MIRA-Guardian action proposals. Durable store of pending/decided
         // remediation proposals. The propose tool writes here (active mode only);
         // the approval endpoints (P4a-2) read + execute. Non-fatal if it fails to
         // open — the Guardian just can't propose.
@@ -1330,7 +1330,7 @@ impl GatewayBuilder {
             data_dir.to_path_buf(),
         );
 
-        // MIRA-Guardian (P3) — proactive watch loop. Self-contained 15-min (cfg)
+        // MIRA-Guardian — proactive watch loop. Self-contained 15-min (cfg)
         // background task: on a *new* non-green health snapshot it runs a Guardian
         // turn and alerts via the NotificationBus (web/push) + the watchdog.alert
         // event rail. No-op while guardian.mode=off. Recipient reuses the
@@ -2434,15 +2434,15 @@ fn build_tool_registry(
     // then trigger the same graceful shutdown the /api/admin/restart
     // handler does. Same Arc is also threaded into MiraServer.
     restart_notify:       Arc<tokio::sync::Notify>,
-    // MIRA-Guardian read-only inspection (P1): the health snapshot store +
+    // MIRA-Guardian read-only inspection: the health snapshot store +
     // subsystem degradation tracker, surfaced through `guardian_inspect`.
     health_store:         Option<Arc<crate::health::store::HealthStore>>,
     degradation_tracker:  Arc<crate::health::degradation::DegradationTracker>,
-    // MIRA-Guardian action proposals (P4): the propose tool writes pending
+    // MIRA-Guardian action proposals: the propose tool writes pending
     // proposals here, in `active` mode only.
     guardian_actions:     Option<Arc<crate::agent::guardian_actions::GuardianActionStore>>,
     // HMAC-chained agent audit log — the propose tool records the "proposed"
-    // event so the proposal→decision→execution chain is tamper-evident (P4).
+    // event so the proposal→decision→execution chain is tamper-evident.
     guardian_audit:       Option<Arc<crate::agent::AuditStore>>,
     // Deferred ChannelManager handle for guardian_decide's restart_bridge (the
     // manager is built after this registry; the gateway fills it later) (P4b).
@@ -2485,6 +2485,10 @@ fn build_tool_registry(
     // MIRA self-knowledge: answer questions about MIRA's own features,
     // settings, limitations, and how-tos from the bundled mira-docs/.
     registry.register(crate::tools::mira_help::MiraHelpTool);
+    // Skill self-authoring: lets the agent/user save a Tier-0 guidance
+    // skill from what was just done. Writes to staging only; auto-denied for
+    // guest/restricted sessions (not on any allow-list) and refuses guests.
+    registry.register(crate::tools::propose_skill::ProposeSkillTool::new(data_dir));
     // MIRA-Guardian's read-only window into health/degradations/logs. System-
     // visibility (hidden from the user palette); the Guardian reaches it via its
     // explicit allowlist. See `agent::guardian`.
@@ -2494,7 +2498,7 @@ fn build_tool_registry(
         Some(config.log_file_path()),
         Arc::clone(&guardian_channel_manager),
     ));
-    // MIRA-Guardian propose tool (P4) — records pending remediation proposals.
+    // MIRA-Guardian propose tool — records pending remediation proposals.
     // System-visibility; only reachable when the Guardian's allowlist includes
     // it (active mode). Registered when the store opened.
     if let Some(store) = guardian_actions {
@@ -3024,8 +3028,6 @@ fn build_tool_registry(
     // any tool work happens.
     {
         let skills_dir = crate::skills::default_skills_dir(data_dir);
-        let mira_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
-            .expect("CARGO_PKG_VERSION is always valid semver");
 
         // 0.93.0 rename: park the old `com.mira.coding/` skill dir so
         // the auto-refresher below sees a clean slate and writes the
@@ -3071,46 +3073,21 @@ fn build_tool_registry(
             ),
         }
 
-        // Trust store (slice A7) — empty store means "no Skills can be
-        // verified", which is OK for fresh installs. Admins add publisher
-        // keys via /api/skills/trust-store.
-        let trust = match crate::skills::TrustStore::load(
-            &crate::skills::TrustStore::default_path(&skills_dir),
-        ) {
-            Ok(s)  => Some(s),
-            Err(e) => { warn!("Skill trust store unavailable: {e}"); None }
-        };
-
-        let skills = crate::skills::load_dir_with_trust(
-            &skills_dir, &mira_version, trust.as_ref(),
-        );
-
-        for err in &skills.errors {
-            warn!("Skill load error at {}: {}", err.path.display(), err.error);
+        // Ensure the per-instance signing key exists and is pinned in the
+        // trust store BEFORE we load skills, so any already-self-signed skill
+        // verifies as "this MIRA" on this boot.
+        // Best-effort: a failure here just means self-authored skills stay
+        // unsigned until the key can be created — never a boot blocker.
+        if let Err(e) = crate::skills::instance_key::ensure(data_dir) {
+            warn!("instance signing key setup failed (self-authored skills will be unsigned): {e}");
         }
 
-        let prefs = match crate::skills::SkillPrefsStore::open(
-            &data_dir.join("skill_prefs.db"),
-        ) {
-            Ok(s)  => Some(Arc::new(s)),
-            Err(e) => {
-                warn!("Skill prefs store unavailable, per-user enable/disable disabled: {e}");
-                None
-            }
-        };
-
-        if !skills.loaded.is_empty() {
-            let dispatcher: Arc<dyn crate::skills::BuiltinDispatcher> = Arc::new(
-                crate::skills::runtime::BuiltinSnapshotDispatcher::from_registry(&registry),
-            );
-            let count = crate::skills::runtime::register_skills(
-                &mut registry, &skills, dispatcher, prefs,
-            );
-            info!(
-                "Skills registered: {count} (skills_dir={})",
-                skills_dir.display(),
-            );
-        } else if skills_dir.exists() {
+        // Load + register all skills (global + per-user, user-scoped) onto the
+        // registry's hot-swap surface via the SAME path used for live reload —
+        // so startup and hot-reload share one code path. `reload_skills` handles the trust store, prefs, both trees,
+        // and the acyclic builtin dispatcher snapshot.
+        let count = crate::skills::runtime::reload_skills(&registry, data_dir);
+        if count == 0 && skills_dir.exists() {
             info!("No Skills found at {}", skills_dir.display());
         }
     }

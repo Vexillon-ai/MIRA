@@ -68,6 +68,12 @@ export interface SkillSummary {
   enabled:      boolean
   /** Built-in capability — can be disabled but not uninstalled. */
   system:       boolean
+  /** "global" (installed/bundled/promoted, visible to all) or "user" (the
+   *  caller's own self-authored, private). S6. */
+  scope:        'global' | 'user'
+  /** True when this is the caller's own user-scoped skill — enables the
+   *  "share with everyone" (promote) action. */
+  own:          boolean
 }
 
 export interface TrustEntry {
@@ -112,9 +118,44 @@ export interface UninstallResponse {
   restart_required: boolean
 }
 
+/** A staged, not-yet-active self-authored skill proposal (mirrors
+ *  `skills::authoring::Proposal`). */
+export interface SkillProposal {
+  id:           string
+  owner:        string
+  display_name: string
+  description:  string
+  tier:         number
+}
+
 export const skillsApi = {
   async list(): Promise<SkillsResponse> {
     const { data } = await api.get<SkillsResponse>('/api/skills')
+    return data
+  },
+
+  /** The caller's own staged skill proposals awaiting review. */
+  async listProposals(): Promise<SkillProposal[]> {
+    const { data } = await api.get<{ proposals: SkillProposal[] }>('/api/skills/proposals')
+    return data.proposals
+  },
+
+  /** Approve (keep) one of the caller's proposals — goes live immediately. */
+  async approveProposal(id: string): Promise<void> {
+    await api.post(`/api/skills/proposals/${encodeURIComponent(id)}/approve`)
+  },
+
+  /** Discard one of the caller's proposals. */
+  async rejectProposal(id: string): Promise<void> {
+    await api.post(`/api/skills/proposals/${encodeURIComponent(id)}/reject`)
+  },
+
+  /** Promote the caller's own user-scoped skill to global (admin / global-propose).
+   *  Returns the new global id. The skill is re-signed as "this MIRA". */
+  async promote(id: string): Promise<{ new_id: string }> {
+    const { data } = await api.post<{ new_id: string }>(
+      `/api/skills/${encodeURIComponent(id)}/promote`,
+    )
     return data
   },
 

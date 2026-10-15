@@ -28,7 +28,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::MiraError;
 use crate::tools::{Tool, ToolArgs, ToolRegistry, ToolResult, ToolVisibility, Tier};
@@ -66,6 +66,11 @@ pub struct SkillTool {
     /// have to thread a store through every constructor — None is treated
     /// as "always enabled".
     prefs: Option<Arc<SkillPrefsStore>>,
+
+    /// Owning user id for a USER-SCOPED skill.
+    /// `None` = global (visible to all). `Some(uid)` = private: offered only to
+    /// `uid` and refused for any other caller as a hard execution backstop.
+    owner: Option<String>,
 }
 
 impl SkillTool {
@@ -73,13 +78,21 @@ impl SkillTool {
         let name = sanitise_tool_name(&skill.manifest.skill.id);
         let description = render_description(&skill);
         let args_schema = render_args_schema(&skill);
-        Self { name, description, args_schema, skill, dispatcher, prefs: None }
+        Self { name, description, args_schema, skill, dispatcher, prefs: None, owner: None }
     }
 
     /// Add a per-user prefs store. Calls from disabled users get refused
     /// before any tool work happens.
     pub fn with_prefs(mut self, prefs: Arc<SkillPrefsStore>) -> Self {
         self.prefs = Some(prefs);
+        self
+    }
+
+    /// Mark this skill as user-scoped (private to `owner`). A non-owner caller
+    /// is refused at execution and the skill is filtered out of other users'
+    /// tool sets. `None`/unset = global.
+    pub fn with_owner(mut self, owner: Option<String>) -> Self {
+        self.owner = owner;
         self
     }
 
@@ -104,6 +117,7 @@ impl Tool for SkillTool {
     fn description(&self) -> &str { &self.description }
     fn args_schema(&self) -> serde_json::Value { self.args_schema.clone() }
     fn visibility(&self) -> ToolVisibility { ToolVisibility::User }
+    fn skill_owner(&self) -> Option<&str> { self.owner.as_deref() }
     fn tier(&self) -> Tier {
         // Tier surfaces "what kind of resources does this touch" to the
         // /api/tools listing. A Skill can touch any tier depending on its
@@ -120,6 +134,23 @@ impl Tool for SkillTool {
     }
 
     async fn execute(&self, args: ToolArgs) -> Result<ToolResult, MiraError> {
+        // User-scope backstop: a private, user-authored skill is only
+        // executable by its owner. This is the HARD security guarantee —
+        // enforced here even if offering-filters are bypassed — so one tenant's
+        // self-authored skill can never run for another. Absent `_user_id`
+        // (tests, admin /api/tools/run) fails CLOSED for an owned skill, unlike
+        // the fail-open disable check below, because owner identity is a
+        // security boundary, not a convenience preference.
+        if let Some(owner) = self.owner.as_deref() {
+            let caller = args.get("_user_id").and_then(|v| v.as_str());
+            if caller != Some(owner) {
+                return Err(MiraError::ToolError(format!(
+                    "skill {:?}: this is a private skill belonging to another user",
+                    self.skill_id(),
+                )));
+            }
+        }
+
         // Per-user enable/disable check. The chat handler injects
         // `_user_id` into every tool call; absence (tests, direct
         // /api/tools/run by an admin) skips the check — same fail-open
@@ -330,29 +361,170 @@ impl BuiltinDispatcher for BuiltinSnapshotDispatcher {
 /// Returns the count of successfully-registered Skills. Loader-side
 /// errors (malformed manifests, missing files) are already in
 /// `skills.errors` and surface separately in the web UI.
-pub fn register_skills(
-    registry: &mut ToolRegistry,
+/// Build the `SkillTool` router tools for every loaded skill, as owned
+/// `Arc<dyn Tool>` — the shared half of startup registration and hot-reload.
+/// The dispatcher must snapshot ONLY builtins (never other SkillTools) so the
+/// ownership graph stays acyclic.
+pub fn build_skill_tools(
     skills: &SkillRegistry,
     dispatcher: Arc<dyn BuiltinDispatcher>,
     prefs: Option<Arc<SkillPrefsStore>>,
-) -> usize {
-    let mut count = 0;
+    owner: Option<&str>,
+) -> Vec<Arc<dyn Tool>> {
+    let mut out: Vec<Arc<dyn Tool>> = Vec::new();
     for skill in skills.iter() {
         let id = skill.manifest.skill.id.clone();
         let mut tool = SkillTool::new(skill.clone(), dispatcher.clone());
         if let Some(p) = prefs.as_ref() {
             tool = tool.with_prefs(p.clone());
         }
-        debug!("Registered Skill {id:?} as tool {:?}", tool.name());
-        registry.register(tool);
-        count += 1;
+        tool = tool.with_owner(owner.map(str::to_string));
+        debug!("Built Skill {id:?} as router tool {:?} (owner={owner:?})", tool.name());
+        out.push(Arc::new(tool));
     }
     if !skills.errors.is_empty() {
         warn!(
-            "Skills loader: {} successfully registered, {} skipped due to errors (see /api/skills for details)",
-            count, skills.errors.len(),
+            "Skills loader: {} built, {} skipped due to errors (see /api/skills for details)",
+            out.len(), skills.errors.len(),
         );
     }
+    out
+}
+
+/// Install the loaded skills onto the registry's hot-swappable skill surface
+/// (`set_skill_tools`). Works at startup (before the Arc wrap, via `&mut` deref)
+/// AND on hot-reload through the shared `Arc<ToolRegistry>` — so authoring /
+/// approving / deleting a skill takes effect on the next turn with no restart.
+pub fn register_skills(
+    registry: &ToolRegistry,
+    skills: &SkillRegistry,
+    dispatcher: Arc<dyn BuiltinDispatcher>,
+    prefs: Option<Arc<SkillPrefsStore>>,
+) -> usize {
+    // Global skills only (owner = None). User-scoped skills are applied by
+    // [`reload_skills`], which combines both trees in one `set_skill_tools`.
+    let tools = build_skill_tools(skills, dispatcher, prefs, None);
+    let count = tools.len();
+    registry.set_skill_tools(tools);
+    count
+}
+
+/// Approve ONE proposed skill: move it from staging to the live user tree and
+/// hot-reload so it's active immediately. Used by the
+/// approve endpoint.
+pub fn approve_proposal(
+    registry: &ToolRegistry,
+    data_dir: &std::path::Path,
+    owner: &str,
+    id: &str,
+) -> Result<(), crate::MiraError> {
+    let skills_dir = crate::skills::default_skills_dir(data_dir);
+    let live = crate::skills::authoring::activate(&skills_dir, owner, id)?;
+    sign_live_best_effort(data_dir, &live, id);
+    reload_skills(registry, data_dir);
+    Ok(())
+}
+
+/// Sign a freshly-activated/promoted skill with the per-instance key so it
+/// reads "Signed by this MIRA". Best-effort: a signing failure must never
+/// strand an otherwise-valid skill — it just stays unsigned-but-live. Logged.
+fn sign_live_best_effort(data_dir: &std::path::Path, live_dir: &std::path::Path, id: &str) {
+    if let Err(e) = crate::skills::instance_key::sign_skill(data_dir, live_dir) {
+        warn!("instance-sign skill {id:?} failed (left unsigned): {e}");
+    }
+}
+
+/// Promote ONE of a user's live user-scoped skills to global: rename it
+/// out of the `user.<uid>.` namespace into `local.<slug>`, re-sign the global
+/// copy with the instance key, and hot-reload so it's visible to everyone on
+/// the next turn. Returns the new global id. Authorization (admin / RBAC
+/// `allow_global_propose`) is enforced by the HTTP handler.
+pub fn promote_skill(
+    registry: &ToolRegistry,
+    data_dir: &std::path::Path,
+    owner: &str,
+    id: &str,
+) -> Result<String, crate::MiraError> {
+    let skills_dir = crate::skills::default_skills_dir(data_dir);
+    let new_id = crate::skills::authoring::promote(&skills_dir, owner, id)?;
+    sign_live_best_effort(data_dir, &skills_dir.join(&new_id), &new_id);
+    reload_skills(registry, data_dir);
+    Ok(new_id)
+}
+
+/// Auto-approve ALL of a user's pending proposals (activate + a single reload),
+/// returning the activated ids. Used by the chat handler's post-turn hook when
+/// `agent.skill_authoring.auto_approve_tier0` is on — Tier-0 grants no
+/// capability, so this is safe to do without a prompt.
+pub fn auto_approve_pending(
+    registry: &ToolRegistry,
+    data_dir: &std::path::Path,
+    owner: &str,
+) -> Vec<String> {
+    let skills_dir = crate::skills::default_skills_dir(data_dir);
+    let mut activated = Vec::new();
+    for p in crate::skills::authoring::list(&skills_dir, owner) {
+        match crate::skills::authoring::activate(&skills_dir, owner, &p.id) {
+            Ok(live) => {
+                sign_live_best_effort(data_dir, &live, &p.id);
+                activated.push(p.id);
+            }
+            Err(e) => warn!("auto-approve: activate {:?} for {owner:?} failed: {e}", p.id),
+        }
+    }
+    if !activated.is_empty() {
+        reload_skills(registry, data_dir);
+    }
+    activated
+}
+
+/// Hot-reload the skill surface from disk onto a live `Arc<ToolRegistry>` —
+/// with **no restart**. Re-scans `<data_dir>/skills/`, rebuilds every skill's
+/// router tool, and swaps the registry's skill surface via `set_skill_tools`.
+/// Called whenever the on-disk skills change: a skill authored/approved/edited/
+/// deleted, or a `.miraskill` installed/uninstalled.
+/// Does NOT re-extract bundled skills (a startup-only concern) — it reflects
+/// exactly what is on disk now. Returns how many skills are now active.
+pub fn reload_skills(registry: &ToolRegistry, data_dir: &std::path::Path) -> usize {
+    let skills_dir = crate::skills::default_skills_dir(data_dir);
+    let mira_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .expect("CARGO_PKG_VERSION is always valid semver");
+    let trust = crate::skills::TrustStore::load(
+        &crate::skills::TrustStore::default_path(&skills_dir),
+    ).ok();
+    // Global skills (owner = None, visible to all, subject to RBAC + disable).
+    let global = crate::skills::load_dir_with_trust(&skills_dir, &mira_version, trust.as_ref());
+    for err in &global.errors {
+        warn!("Skill reload error at {}: {}", err.path.display(), err.error);
+    }
+    // User-scoped skills (owner = <uid>, private to that user) — S2.
+    let user_scoped = crate::skills::loader::load_user_scoped(&skills_dir, &mira_version, trust.as_ref());
+
+    let prefs = crate::skills::SkillPrefsStore::open(&data_dir.join("skill_prefs.db"))
+        .ok()
+        .map(Arc::new);
+    // Dispatcher snapshots the CURRENT builtins (stable after startup) — never
+    // other skills, keeping the ownership graph acyclic.
+    let dispatcher: Arc<dyn BuiltinDispatcher> =
+        Arc::new(BuiltinSnapshotDispatcher::from_registry(registry));
+
+    let mut tools = build_skill_tools(&global, dispatcher.clone(), prefs.clone(), None);
+    let global_count = tools.len();
+    let mut user_count = 0;
+    for (uid, reg) in &user_scoped {
+        for err in &reg.errors {
+            warn!("User-scoped skill reload error ({uid}) at {}: {}", err.path.display(), err.error);
+        }
+        let mut t = build_skill_tools(reg, dispatcher.clone(), prefs.clone(), Some(uid));
+        user_count += t.len();
+        tools.append(&mut t);
+    }
+    let count = tools.len();
+    registry.set_skill_tools(tools);
+    info!(
+        "Skills hot-reloaded: {count} active ({global_count} global, {user_count} user-scoped; skills_dir={})",
+        skills_dir.display(),
+    );
     count
 }
 
@@ -500,6 +672,94 @@ mod tests {
         })).await.unwrap();
         assert!(result.success);
         assert_eq!(result.output, "Synthesise these sources: ...");
+    }
+
+    #[test]
+    fn auto_approve_activates_pending_and_reloads_live() {
+        // S4: a staged proposal is activated (moved to the live user tree) and
+        // hot-reloaded onto the registry — live for the next turn, no restart.
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path();
+        let skills_dir = crate::skills::default_skills_dir(data_dir);
+        let toml = "[skill]\nid = \"user.alice.notes\"\nversion = \"0.1.0\"\n\
+                    display_name = \"Notes\"\ndescription = \"when noting\"\n\n\
+                    [tools.guide]\nkind = \"prompt\"\ntemplate = \"prompts/main.md\"\n";
+        crate::skills::authoring::stage(&skills_dir, "alice", "user.alice.notes", toml, "jot it down").unwrap();
+
+        let reg = ToolRegistry::new();
+        let activated = auto_approve_pending(&reg, data_dir, "alice");
+        assert_eq!(activated, vec!["user.alice.notes".to_string()]);
+        // Gone from staging, present live on the registry's skill surface.
+        assert!(crate::skills::authoring::list(&skills_dir, "alice").is_empty());
+        assert!(reg.list_tools().iter().any(|n| n.contains("alice")),
+            "activated skill is live on the registry");
+    }
+
+    #[test]
+    fn promote_skill_renames_signs_and_goes_global_live() {
+        // S6: a user-scoped skill is promoted to global — renamed into the
+        // `local.` namespace, re-signed with the instance key (verifies as
+        // "this MIRA"), and hot-reloaded as a global (owner-less) tool.
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path();
+        let skills_dir = crate::skills::default_skills_dir(data_dir);
+        let toml = "[skill]\nid = \"user.alice.notes\"\nversion = \"0.1.0\"\n\
+                    display_name = \"Notes\"\ndescription = \"when noting\"\n\n\
+                    [tools.guide]\nkind = \"prompt\"\ntemplate = \"prompts/main.md\"\n";
+        crate::skills::authoring::stage(&skills_dir, "alice", "user.alice.notes", toml, "jot").unwrap();
+
+        let reg = ToolRegistry::new();
+        auto_approve_pending(&reg, data_dir, "alice");
+
+        let new_id = promote_skill(&reg, data_dir, "alice", "user.alice.notes").unwrap();
+        assert_eq!(new_id, "local.notes");
+
+        // On disk: global copy exists, signed; user-scoped copy gone.
+        let global = skills_dir.join("local.notes");
+        assert!(global.join("skill.toml").is_file());
+        assert!(!skills_dir.join("users").join("alice").join("user.alice.notes").exists());
+
+        // Verifies against the pinned instance key.
+        let trust = crate::skills::TrustStore::load(
+            &crate::skills::TrustStore::default_path(&skills_dir)).unwrap();
+        let ver = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let loaded = crate::skills::load_dir_with_trust(&skills_dir, &ver, Some(&trust));
+        let s = loaded.iter().find(|s| s.manifest.skill.id == "local.notes").expect("global loaded");
+        assert!(s.verified);
+        assert_eq!(s.publisher_label.as_deref(), Some(crate::skills::INSTANCE_KEY_LABEL));
+    }
+
+    #[tokio::test]
+    async fn user_scoped_skill_refuses_non_owner_and_absent_caller() {
+        // S2 security backstop: a private (user-scoped) skill runs ONLY for its
+        // owner; a different user is refused, and an absent caller fails CLOSED.
+        let dir = TempDir::new().unwrap();
+        let prompt_dir = dir.path().join("prompts");
+        std::fs::create_dir_all(&prompt_dir).unwrap();
+        std::fs::write(prompt_dir.join("s.md"), "secret guidance").unwrap();
+
+        let skill = make_skill(
+            "user.alice.notes",
+            vec![("do", ToolSpec::Prompt { template: "prompts/s.md".into() })],
+            dir.path().to_path_buf(),
+        );
+        let tool = SkillTool::new(skill, MockDispatcher::new(&[]))
+            .with_owner(Some("alice".to_string()));
+
+        // Owner → passes the backstop and reaches the prompt.
+        let ok = tool.execute(json!({ "_user_id": "alice", "tool": "do", "args": {} }))
+            .await.unwrap();
+        assert!(ok.success);
+        assert_eq!(ok.output, "secret guidance");
+
+        // Different user → refused before any tool work.
+        let err = tool.execute(json!({ "_user_id": "bob", "tool": "do", "args": {} }))
+            .await.unwrap_err();
+        assert!(err.to_string().contains("private skill belonging to another user"), "got: {err}");
+
+        // Absent caller → fails CLOSED (owner identity is a security boundary).
+        let err2 = tool.execute(json!({ "tool": "do", "args": {} })).await.unwrap_err();
+        assert!(err2.to_string().contains("private skill"), "got: {err2}");
     }
 
     #[tokio::test]
@@ -737,22 +997,24 @@ mod tests {
         skills_reg.loaded.push(skill);
         register_skills(&mut registry, &skills_reg, dispatcher.clone(), None);
 
-        // The Skill is in the registry, but the snapshot is still empty —
-        // exactly what we want to keep the ownership graph acyclic.
+        // The Skill is in the registry (on the hot-swap skill surface, counted
+        // by list_tools), but builtin snapshots never see it.
         assert_eq!(
             registry.list_tools().len(), 1,
-            "skill present in registry",
+            "skill present in registry (on the skill surface)",
         );
         let snapshot = match Arc::downcast::<BuiltinSnapshotDispatcher>(
-            // Re-create from the registry as it stands now to compare.
-            // In production the dispatcher is taken once and held — this is
-            // a sanity check that the original snapshot semantics held.
+            // A FRESH snapshot taken after registration still excludes the skill:
+            // skills now live on the registry's separate `skills` surface, never
+            // in the builtin `tools` map that `from_registry` snapshots — so the
+            // SkillTool↔builtin ownership graph is acyclic by construction, not
+            // just by snapshot timing.
             Arc::new(BuiltinSnapshotDispatcher::from_registry(&registry)) as Arc<dyn std::any::Any + Send + Sync>,
         ) {
             Ok(s) => s,
             Err(_) => panic!("downcast should succeed"),
         };
-        assert_eq!(snapshot.len(), 1, "fresh snapshot DOES contain the new skill — but the original held by SkillTool predates it");
+        assert_eq!(snapshot.len(), 0, "builtin snapshot never contains skills — they're on a separate surface");
     }
 
     #[test]

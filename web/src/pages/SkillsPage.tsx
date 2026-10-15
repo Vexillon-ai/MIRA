@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import {
   Boxes, ShieldCheck, ShieldAlert, FileSignature,
-  Upload, Trash2, AlertTriangle, X, KeyRound, RefreshCw, Plug, Download,
+  Upload, Trash2, AlertTriangle, X, KeyRound, RefreshCw, Plug, Download, Globe, Lock,
 } from 'lucide-react'
 import { skillsApi, type SkillSummary, type SkillPermissions, type PreviewResponse } from '@/api/skills'
 import { providersApi } from '@/api/providers'
@@ -66,6 +66,7 @@ export default function SkillsPage() {
       )}
 
       <div className={styles.body}>
+        <ProposedSkills />
         {isLoading && <div className={styles.empty}>Loading…</div>}
         {error && <div className={styles.empty}>Failed to load Skills.</div>}
 
@@ -105,6 +106,71 @@ export default function SkillsPage() {
   )
 }
 
+function ProposedSkills() {
+  const qc = useQueryClient()
+  const { data: proposals = [] } = useQuery({
+    queryKey: ['skill-proposals'],
+    queryFn:  () => skillsApi.listProposals(),
+    refetchOnWindowFocus: false,
+  })
+  const approve = useMutation({
+    mutationFn: (id: string) => skillsApi.approveProposal(id),
+    onSuccess: () => {
+      toast.success('Skill saved')
+      qc.invalidateQueries({ queryKey: ['skill-proposals'] })
+      qc.invalidateQueries({ queryKey: ['skills'] })
+    },
+    onError: () => toast.error('Could not save the skill'),
+  })
+  const reject = useMutation({
+    mutationFn: (id: string) => skillsApi.rejectProposal(id),
+    onSuccess: () => {
+      toast.success('Proposal discarded')
+      qc.invalidateQueries({ queryKey: ['skill-proposals'] })
+    },
+    onError: () => toast.error('Could not discard the proposal'),
+  })
+
+  if (proposals.length === 0) return null
+  return (
+    <div className={styles.proposals}>
+      <h2 className={styles.proposalsHead}>
+        <FileSignature size={15} style={{ verticalAlign: 'text-bottom', marginRight: 6 }} />
+        Proposed skills
+      </h2>
+      <p className={styles.proposalsSub}>
+        MIRA drafted these from what you did. Keep the ones you want — they're
+        private to you and grant no new permissions.
+      </p>
+      {proposals.map((p) => (
+        <div key={p.id} className={styles.card}>
+          <div className={styles.cardHead}>
+            <div className={styles.titleRow}>
+              <span className={styles.title}>{p.display_name}</span>
+              <span className={styles.id}>{p.id}</span>
+            </div>
+            <div className={styles.proposalActions}>
+              <button
+                type="button"
+                className={styles.installBtn}
+                disabled={approve.isPending}
+                onClick={() => approve.mutate(p.id)}
+              >Keep</button>
+              <button
+                type="button"
+                className={styles.installBtnSecondary}
+                disabled={reject.isPending}
+                onClick={() => reject.mutate(p.id)}
+              >Discard</button>
+            </div>
+          </div>
+          <p className={styles.proposalDesc}>{p.description}</p>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function SkillCard({ skill }: { skill: SkillSummary }) {
   const qc = useQueryClient()
   const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
@@ -127,6 +193,26 @@ function SkillCard({ skill }: { skill: SkillSummary }) {
     onError: (e: Error) => toast.error(`Uninstall failed: ${e.message}`),
   })
 
+  // S6: promote the caller's own user-scoped skill to global (admin / RBAC
+  // global-propose). Backend re-signs it as "this MIRA" and hot-reloads.
+  const promote = useMutation({
+    mutationFn: () => skillsApi.promote(skill.id),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ['skills'] })
+      toast.success(`Shared with everyone — now available as ${r.new_id}`)
+    },
+    onError: (e: unknown) => {
+      const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error
+      toast.error(msg ?? 'Could not share this skill')
+    },
+  })
+
+  function confirmPromote() {
+    if (window.confirm(`Share "${skill.display_name}" with everyone?\n\nIt moves out of your private skills into the shared set, visible to all users (subject to their permissions), and is re-signed as "this MIRA".`)) {
+      promote.mutate()
+    }
+  }
+
   function confirmUninstall() {
     if (window.confirm(`Uninstall "${skill.display_name}" (${skill.id})?\n\nThis removes the Skill from disk. Restart MIRA after to clear it from the running agent.`)) {
       uninstall.mutate()
@@ -143,6 +229,14 @@ function SkillCard({ skill }: { skill: SkillSummary }) {
         </div>
         <div className={styles.badges}>
           <VerificationBadge skill={skill} />
+          {skill.scope === 'user' && (
+            <span
+              className={styles.badge}
+              title="Private to you — your self-authored skill. Not visible to other users."
+            >
+              <Lock size={12} /> Private
+            </span>
+          )}
           {skill.system && (
             <span
               className={styles.badge}
@@ -157,6 +251,21 @@ function SkillCard({ skill }: { skill: SkillSummary }) {
             disabled={toggle.isPending}
             onClick={() => toggle.mutate(!skill.enabled)}
           />
+          {/* Share-with-everyone (promote) — only on the caller's own
+              user-scoped skills. The backend authorizes (admin / global-propose);
+              a denied click surfaces a clear toast. */}
+          {skill.own && skill.scope === 'user' && (
+            <button
+              type="button"
+              className={styles.iconBtn}
+              title="Share with everyone (promote to a shared skill)"
+              aria-label="Share skill with everyone"
+              disabled={promote.isPending}
+              onClick={confirmPromote}
+            >
+              <Globe size={13} />
+            </button>
+          )}
           {/* System skills ship in the binary; they can be disabled but not
               removed, so no uninstall control. */}
           {isAdmin && !skill.system && (

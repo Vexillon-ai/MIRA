@@ -115,6 +115,9 @@ This fetches the latest signed release and swaps the binary in place; the
 service restarts itself. (You can also update from the web UI, Settings →
 Server.)
 
+To remove MIRA completely — the service, the binary, and your data — see
+**[Uninstall MIRA](uninstall.md)**.
+
 ## Next steps
 
 - **[Quickstart](quickstart.md)** — finish first-run setup and have your first
