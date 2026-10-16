@@ -294,6 +294,7 @@ impl McpServerStore {
             args:      new.args.clone(),
             env:       new.env.clone(),
             url:       new.url.clone(),
+            auth_token: new.auth_token.filter(|v| !v.is_empty()),
             enabled:   new.enabled,
             sampling_enabled: new.sampling_enabled,
         };
