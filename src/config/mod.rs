@@ -4885,7 +4885,7 @@ pub struct McpConfig {
 // Notion or GitHub remote endpoints.
 // // `name` doubles as both the user-facing label and the tool-namespace
 // prefix (`mcp__<name>__<tool>`), so keep it short and unique.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     pub name:    String,
 
@@ -4909,6 +4909,12 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url:     Option<String>,
 
+    // HTTP-only bearer token. It is persisted for reconnects but never
+    // returned by the MCP API; the response DTO exposes only whether one is
+    // configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
+
     // Per-server kill switch. Disabling skips the connect on startup
     // (tools disappear from the registry until re-enable + restart).
     #[serde(default = "default_true")]
@@ -4924,6 +4930,58 @@ pub struct McpServerConfig {
     // even try.
     #[serde(default)]
     pub sampling_enabled: bool,
+}
+
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env = self
+            .env
+            .keys()
+            .map(|key| (key, "***"))
+            .collect::<std::collections::HashMap<_, _>>();
+        f.debug_struct("McpServerConfig")
+            .field("name", &self.name)
+            .field("transport", &self.transport)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env", &env)
+            .field("url", &self.url)
+            .field(
+                "auth_token_configured",
+                &self.auth_token.as_ref().is_some_and(|v| !v.is_empty()),
+            )
+            .field("enabled", &self.enabled)
+            .field("sampling_enabled", &self.sampling_enabled)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod mcp_debug_tests {
+    use super::McpServerConfig;
+
+    #[test]
+    fn debug_output_redacts_auth_and_environment_values() {
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "SYNTHETIC_SECRET".to_owned(),
+            "synthetic-env-secret".to_owned(),
+        );
+        let config = McpServerConfig {
+            name: "synthetic".to_owned(),
+            transport: "http".to_owned(),
+            command: None,
+            args: vec![],
+            env,
+            url: Some("https://mcp.example.test/v1".to_owned()),
+            auth_token: Some("synthetic-auth-token".to_owned()),
+            enabled: true, sampling_enabled: false,
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("synthetic-auth-token"));
+        assert!(!debug.contains("synthetic-env-secret"));
+        assert!(debug.contains("auth_token_configured: true"));
+    }
 }
 
 fn default_mcp_transport() -> String { "stdio".to_string() }

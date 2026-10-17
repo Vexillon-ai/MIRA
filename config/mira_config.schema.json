@@ -2744,6 +2744,13 @@
                 "description": "HTTP-only. Full URL of the Streamable-HTTP MCP endpoint, e.g. https://mcp.example.com/v1. Ignored when transport=stdio.",
                 "type": "string"
               },
+              "auth_token": {
+                "description": "HTTP-only bearer token sent as the Authorization header. Stored encrypted in MIRA's database and never returned in API responses. Ignored when transport=stdio.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "enabled": {
                 "description": "Per-server kill switch. Disabled = skip the connect at startup; tools disappear from the registry until re-enabled and MIRA restarts.",
                 "type": "boolean"

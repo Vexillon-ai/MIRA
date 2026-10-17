@@ -25,6 +25,7 @@ use std::sync::Arc;
 use rmcp::model::{CallToolRequestParams, GetPromptRequestParams, ReadResourceRequestParams};
 use rmcp::service::{RoleClient, RunningService, ServiceExt};
 use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::Value;
 use tokio::process::Command;
 use tokio::sync::RwLock;
@@ -77,6 +78,18 @@ pub struct McpClient {
 }
 
 impl McpClient {
+    fn http_transport_config(
+        url: &str,
+        auth_token: Option<&str>,
+    ) -> StreamableHttpClientTransportConfig {
+        let mut config =
+            StreamableHttpClientTransportConfig::with_uri(url.to_owned());
+        if let Some(token) = auth_token.filter(|token| !token.is_empty()) {
+            config = config.auth_header(token);
+        }
+        config
+    }
+
     // Spawn the configured child process (or open the HTTP
     // transport), run the MCP handshake, and snapshot the tool list.
     // The returned `McpClient` is ready for adapter construction.
@@ -439,7 +452,8 @@ impl McpClient {
                 // CryptoProvider installed in main(). Without it, rmcp's default client
                 // had no TLS connector and `https://` URLs failed before the handshake
                 // with "invalid URL, scheme is not http" (GH #6).
-                let transport = StreamableHttpClientTransport::from_uri(url.to_string());
+                let transport_config = Self::http_transport_config(url, cfg.auth_token.as_deref());
+                let transport = StreamableHttpClientTransport::from_config(transport_config);
                 handler.serve(transport).await
                     .map_err(|e| MiraError::ConfigError(format!(
                         "mcp server '{}': http handshake failed: {e}", cfg.name
@@ -450,6 +464,56 @@ impl McpClient {
                  (expected \"stdio\" or \"http\")", cfg.name
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::McpClient;
+    use crate::config::McpServerConfig;
+
+    #[test]
+    fn http_transport_config_sets_bearer_token_without_logging_it() {
+        let config = McpClient::http_transport_config(
+            "https://mcp.example.test/v1",
+            Some("synthetic-mcp-token"),
+        );
+
+        assert_eq!(config.auth_header.as_deref(), Some("synthetic-mcp-token"));
+    }
+
+    #[test]
+    fn http_transport_config_omits_empty_token() {
+        let config =
+            McpClient::http_transport_config("https://mcp.example.test/v1", Some(""));
+
+        assert!(config.auth_header.is_none());
+    }
+
+    #[test]
+    fn reconnect_configuration_keeps_authentication() {
+        let config = McpServerConfig {
+            name: "synthetic".to_owned(),
+            transport: "http".to_owned(),
+            command: None,
+            args: vec![],
+            env: Default::default(),
+            url: Some("https://mcp.example.test/v1".to_owned()),
+            auth_token: Some("synthetic-reconnect-token".to_owned()),
+            enabled: true,
+            sampling_enabled: false,
+        };
+
+        let reconnect_config = config.clone();
+        let transport_config = McpClient::http_transport_config(
+            reconnect_config.url.as_deref().unwrap(),
+            reconnect_config.auth_token.as_deref(),
+        );
+
+        assert_eq!(
+            transport_config.auth_header.as_deref(),
+            Some("synthetic-reconnect-token")
+        );
     }
 }
 

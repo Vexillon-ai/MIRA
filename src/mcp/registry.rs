@@ -227,7 +227,7 @@ impl McpServerRegistry {
         let needs_browser = store
             .list_all_enabled()
             .map(|rows| rows.iter().any(|r| {
-                r.to_config()
+                store.config_for_row(&r)
                     .map(|c| crate::mcp::browser::server_uses_puppeteer(
                         c.command.as_deref(), &c.args, &c.env))
                     .unwrap_or(false)
@@ -299,7 +299,7 @@ impl McpServerRegistry {
         let connect_futs = rows.iter().map(|row| {
             let provider = std::sync::Arc::clone(&provider);
             async move {
-                let cfg = match row.to_config() {
+                let cfg = match store.config_for_row(row) {
                     Ok(c)  => c,
                     Err(e) => return (row, Err(format!("bad config: {e}"))),
                 };
@@ -445,7 +445,7 @@ impl McpServerRegistry {
                 supports_resources: client.supports_resources,
                 supports_prompts:   client.supports_prompts,
                 renamed_for_collision: renamed_clients.contains(&ci),
-                sampling_enabled: row.to_config().ok()
+                sampling_enabled: store.config_for_row(row).ok()
                     .map(|c| c.sampling_enabled).unwrap_or(false),
                 last_error: None,
             });

@@ -29,6 +29,7 @@ interface McpServerRow {
   transport:  string
   enabled:    boolean
   config_json: string
+  auth_token_configured: boolean
   created_at: number
   updated_at: number
 }
@@ -59,12 +60,17 @@ interface ServerForm {
   url:       string
   enabled:   boolean
   sampling_enabled: boolean
+  auth_token: string
+  auth_token_configured: boolean
+  clear_auth_token: boolean
+  original_env_keys: string[]
+  remove_env_keys: string[]
 }
 
 function blankForm(): ServerForm {
   return {
     name: '', transport: 'stdio', command: '', args: '', env: '', url: '',
-    enabled: true, sampling_enabled: false,
+    enabled: true, sampling_enabled: false, auth_token: '', auth_token_configured: false, clear_auth_token: false, original_env_keys: [], remove_env_keys: [],
   }
 }
 
@@ -73,6 +79,7 @@ function rowToForm(r: McpServerRow): ServerForm {
   // extract command/args/env/url for the form fields.
   let cfg: any = {}
   try { cfg = JSON.parse(r.config_json) } catch {}
+  const originalEnvKeys = cfg.env && typeof cfg.env === 'object' ? Object.keys(cfg.env) : []
   return {
     id:        r.id,
     name:      r.name,
@@ -85,6 +92,11 @@ function rowToForm(r: McpServerRow): ServerForm {
     url:       cfg.url ?? '',
     enabled:   r.enabled,
     sampling_enabled: Boolean(cfg.sampling_enabled),
+    auth_token: '',
+    auth_token_configured: r.auth_token_configured,
+    clear_auth_token: false,
+    original_env_keys: originalEnvKeys,
+    remove_env_keys: [],
   }
 }
 
@@ -118,6 +130,11 @@ function catalogToForm(e: McpCatalogEntry): ServerForm {
     url:       e.url ?? '',
     enabled:   true,
     sampling_enabled: false,
+    auth_token: '',
+    auth_token_configured: false,
+    clear_auth_token: false,
+    original_env_keys: [],
+    remove_env_keys: [],
   }
 }
 
@@ -186,8 +203,15 @@ function formToPayload(f: ServerForm) {
     base.command = f.command.trim() || null
     base.args    = f.args.split(',').map((x) => x.trim()).filter(Boolean)
     base.env     = env
+    if (f.id) {
+      const currentKeys = new Set(Object.keys(env))
+      const removedKeys = f.original_env_keys.filter((key) => !currentKeys.has(key))
+      base.remove_env_keys = [...new Set([...removedKeys, ...f.remove_env_keys])]
+    }
   } else {
     base.url     = f.url.trim() || null
+    if (f.auth_token.trim()) base.auth_token = f.auth_token.trim()
+    if (f.id && f.clear_auth_token) base.clear_auth_token = true
   }
   return base
 }
@@ -547,6 +571,15 @@ function ServerEditor({
   busy: boolean
 }) {
   const update = (patch: Partial<ServerForm>) => onChange({ ...form, ...patch })
+  const envKeys = form.env.split('\n')
+    .map((line) => line.slice(0, line.indexOf('=')).trim())
+    .filter(Boolean)
+  const removableEnvKeys = [...new Set([...form.original_env_keys, ...envKeys])]
+  const removeEnvKey = (key: string) => update({
+    remove_env_keys: form.remove_env_keys.includes(key)
+      ? form.remove_env_keys.filter((existing) => existing !== key)
+      : [...form.remove_env_keys, key],
+  })
   return (
     <div style={{ ...card, background: 'var(--bg-elevated)', marginBottom: 16 }}>
       <h3 style={{ marginTop: 0, fontSize: 15 }}>{form.id ? 'Edit MCP server' : 'New MCP server'}</h3>
@@ -569,15 +602,38 @@ function ServerEditor({
                    placeholder="-y, @modelcontextprotocol/server-filesystem, /home/me/notes"
                    style={input} />
           </FormRow>
-          <FormRow label="Env" hint="KEY=value, one per line. Merged over MIRA's env.">
+          <FormRow label="Env" hint="KEY=value, one per line. Merged over MIRA's env. Use the checkboxes below to remove existing keys.">
             <textarea value={form.env} onChange={(e) => update({ env: e.target.value })} placeholder="BRAVE_API_KEY=…" rows={3} style={input} />
           </FormRow>
+          {form.id && removableEnvKeys.length > 0 && (
+            <FormRow label="Remove env keys" hint="Selected keys are removed explicitly when you save.">
+              <div style={{ display: 'grid', gap: 4 }}>
+                {removableEnvKeys.map((key) => (
+                  <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <input type="checkbox" checked={form.remove_env_keys.includes(key)} onChange={() => removeEnvKey(key)} />
+                    <code>{key}</code>
+                  </label>
+                ))}
+              </div>
+            </FormRow>
+          )}
         </>
       ) : (
-        <FormRow label="URL" hint="Full Streamable-HTTP MCP endpoint.">
-          <input type="text" value={form.url} onChange={(e) => update({ url: e.target.value })}
-                 placeholder="https://mcp.example.com/v1" style={input} />
-        </FormRow>
+        <>
+          <FormRow label="URL" hint="Full Streamable-HTTP MCP endpoint.">
+            <input type="text" value={form.url} onChange={(e) => update({ url: e.target.value })}
+                   placeholder="https://mcp.example.com/v1" style={input} />
+          </FormRow>
+          <FormRow label="Bearer token" hint={form.id ? 'Leave empty to keep the existing token.' : 'Optional token sent as Authorization: Bearer.'}>
+                 <input type="password" value={form.auth_token} onChange={(e) => update({ auth_token: e.target.value })}
+                   placeholder={form.id ? (form.auth_token_configured ? 'Token already configured' : 'Optional') : 'Optional'} style={input} autoComplete="new-password" />
+          </FormRow>
+          {form.id && form.auth_token_configured && (
+            <FormRow label="Remove bearer token" hint="Explicitly remove the stored token. Saving with this checked takes precedence over a newly entered token.">
+              <input type="checkbox" checked={form.clear_auth_token} onChange={(e) => update({ clear_auth_token: e.target.checked })} />
+            </FormRow>
+          )}
+        </>
       )}
       <FormRow label="Enabled" hint="Disabled = skip connect on startup; tools disappear until re-enabled and MIRA restarts.">
         <input type="checkbox" checked={form.enabled} onChange={(e) => update({ enabled: e.target.checked })} />

@@ -35,4 +35,6 @@ pub use catalog::{McpCatalogEntry, McpCatalogStore, UpsertCatalogEntry};
 pub use client::{McpClient, McpToolMeta};
 pub use handler::McpClientHandler;
 pub use registry::{McpServerRegistry, McpServerStatus, McpToolInfo};
-pub use store::{McpServerRow, McpServerStore, NewMcpServer, UpdateMcpServer};
+pub use store::{
+    McpServerResponse, McpServerRow, McpServerStore, NewMcpServer, UpdateMcpServer,
+};
