@@ -58,6 +58,16 @@ available to the agent on your very next message.
 > can also add a server that isn't in the catalogue by giving MIRA the command
 > (for a stdio server) or URL (for a Streamable-HTTP server) directly.
 
+## Authenticate an HTTP MCP server
+
+For a Streamable-HTTP server that requires bearer authentication, add it from
+the **MCP** page with transport **http**, its endpoint URL, and the bearer token.
+The token is stored encrypted in MIRA's database and is never returned in plain
+text by the API. To remove an existing token, edit the server, select **Remove
+bearer token**, and save. The equivalent update request uses
+`clear_auth_token: true`; omitting the token or leaving it empty keeps the
+existing token.
+
 ## How tools show up
 
 Once a server is connected, its tools appear to the agent named
