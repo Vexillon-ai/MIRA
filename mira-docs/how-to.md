@@ -49,6 +49,7 @@ Two independent settings on a Telegram account:
 ## Add an external tool (MCP)
 - Go to the `/mcp` page → **Browse catalog** → pick a server (e.g. Filesystem, GitHub, Puppeteer) → **Use** → fill any path/key → **Save**. It connects immediately (no restart). Tools appear to the agent as `mcp__<server>__<tool>`.
 - **Runtimes are handled for you.** Most catalog servers run via `npx` (Node) or `uvx` (Python/uv). If that runtime isn't installed, MIRA **asks permission** ("This MCP server needs Node.js (~55 MB) — install it now?") and, on approval, downloads a pinned, checksum-verified copy into `~/.mira/deps/` and connects the server. Works on Linux, macOS, and **Windows** — including a Windows service running as LocalSystem, which can't see a user-only Node/uv install. No manual Node/Python setup. (0.280.0+.)
+- **HTTP server that needs a token?** Add it with transport **http**, its URL and the **Bearer token**. The token is stored encrypted and shown only as "configured"; leave the field empty when editing to keep it, or tick **Remove bearer token** to delete it. To remove an `env` key from an existing server, tick it under **Remove env keys**.
 - Admins can curate the catalog (add/edit/enable/disable entries).
 
 ## Shrink the prompt with adaptive tool loading
