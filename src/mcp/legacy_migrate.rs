@@ -41,6 +41,7 @@ pub fn migrate_if_empty(
             args:      entry.args.clone(),
             env:       entry.env.clone(),
             url:       entry.url.clone(),
+            auth_token: entry.auth_token.clone(),
             enabled:   entry.enabled,
             sampling_enabled: entry.sampling_enabled,
         };

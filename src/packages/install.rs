@@ -126,6 +126,7 @@ fn build_mcp_server(
         args: spec.args,
         env,
         url: spec.url,
+        auth_token: None,
         enabled: true,
         sampling_enabled: spec.sampling_enabled,
     })
@@ -944,7 +945,7 @@ mod tests {
         let rows = mcp_store.list_for_user("admin-1").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "nextcloud");
-        let cfg = rows[0].to_config().unwrap();
+        let cfg = mcp_store.config_for_row(&rows[0]).unwrap();
         // The command is wrapped in the `mira pkg-exec` confinement launcher.
         assert!(cfg.args.iter().any(|a| a == "pkg-exec"), "args={:?}", cfg.args);
         assert!(cfg.args.iter().any(|a| a == "python3"), "real command after --: {:?}", cfg.args);
