@@ -284,11 +284,30 @@ impl McpServerStore {
             .map_err(|_| MiraError::DatabaseError("mcp token not utf-8".into()))
     }
 
+    // AAD binding a single env value to its row + key, so an encrypted value
+    // can't be swapped between keys or between servers.
+    fn env_aad(id: &str, key: &str) -> String { format!("{id}:env:{key}") }
+
     fn config_json(&self, id: &str, cfg: &McpServerConfig) -> Result<String, MiraError> {
         let mut value = serde_json::to_value(cfg)
             .map_err(|e| MiraError::ConfigError(format!("serialize McpServerConfig: {e}")))?;
         if let Some(token) = cfg.auth_token.as_deref() {
             value["auth_token"] = serde_json::Value::String(self.encrypt_field(id, token)?);
+        }
+        // Encrypt env values at rest too — they're frequently API keys. Bound to
+        // (row id, key) via AAD. Idempotent: an already-encrypted value is left
+        // as-is (cfg env is plaintext on the normal write path, so this guard
+        // only matters for a value that round-tripped undecrypted).
+        if let Some(env) = value.get_mut("env").and_then(|e| e.as_object_mut()) {
+            let keys: Vec<String> = env.keys().cloned().collect();
+            for key in keys {
+                let plain = match env.get(&key).and_then(|v| v.as_str()) {
+                    Some(s) if !s.starts_with(ENC_PREFIX) => s.to_owned(),
+                    _ => continue,
+                };
+                let enc = self.encrypt_field(&Self::env_aad(id, &key), &plain)?;
+                env.insert(key, serde_json::Value::String(enc));
+            }
         }
         serde_json::to_string(&value)
             .map_err(|e| MiraError::ConfigError(format!("serialize McpServerConfig: {e}")))
@@ -300,8 +319,21 @@ impl McpServerStore {
         value.get("auth_token").and_then(|v| v.as_str()).map(|v| self.decrypt_field(&row.id, v)).transpose()
     }
 
+    // Decrypt every env value in place (strict — a value that claims to be
+    // encrypted but won't decrypt is a corrupted/undecryptable row and surfaces
+    // as an error). A plaintext value (no `enc:v1:` prefix) passes through.
+    fn decrypt_env_in_place(&self, id: &str, cfg: &mut McpServerConfig) -> Result<(), MiraError> {
+        for (key, value) in cfg.env.iter_mut() {
+            let plain = self.decrypt_field(&Self::env_aad(id, key), value)?;
+            *value = plain;
+        }
+        Ok(())
+    }
+
     fn to_config(&self, row: &McpServerRow) -> Result<McpServerConfig, MiraError> {
-        row.to_config_with_token(self.token_from_config(row)?)
+        let mut cfg = row.to_config_with_token(self.token_from_config(row)?)?;
+        self.decrypt_env_in_place(&row.id, &mut cfg)?;
+        Ok(cfg)
     }
 
     pub fn config_for_row(&self, row: &McpServerRow) -> Result<McpServerConfig, MiraError> {
@@ -322,13 +354,38 @@ impl McpServerStore {
         for (id, raw) in rows {
             let mut value: serde_json::Value = serde_json::from_str(&raw)
                 .map_err(|e| MiraError::ConfigError(format!("mcp_servers row {id}: bad config_json: {e}")))?;
-            let Some(token) = value.get("auth_token").and_then(|v| v.as_str()) else { continue };
-            if token.starts_with(ENC_PREFIX) { continue; }
-            value["auth_token"] = serde_json::Value::String(self.encrypt_field(&id, token)?);
+            let mut changed = false;
+
+            // auth_token (as before).
+            if let Some(token) = value.get("auth_token").and_then(|v| v.as_str())
+                .filter(|t| !t.starts_with(ENC_PREFIX)).map(str::to_owned)
+            {
+                value["auth_token"] = serde_json::Value::String(self.encrypt_field(&id, &token)?);
+                changed = true;
+            }
+
+            // env values — same treatment, bound to (row id, key).
+            let plain_env: Vec<(String, String)> = value.get("env").and_then(|e| e.as_object())
+                .map(|obj| obj.iter().filter_map(|(k, v)| {
+                    let s = v.as_str()?;
+                    (!s.starts_with(ENC_PREFIX)).then(|| (k.clone(), s.to_owned()))
+                }).collect())
+                .unwrap_or_default();
+            if !plain_env.is_empty() {
+                if let Some(env) = value.get_mut("env").and_then(|e| e.as_object_mut()) {
+                    for (k, s) in plain_env {
+                        let enc = self.encrypt_field(&Self::env_aad(&id, &k), &s)?;
+                        env.insert(k, serde_json::Value::String(enc));
+                    }
+                    changed = true;
+                }
+            }
+
+            if !changed { continue; }
             let encoded = serde_json::to_string(&value)
                 .map_err(|e| MiraError::ConfigError(format!("serialize MCP config: {e}")))?;
             tx.execute("UPDATE mcp_servers SET config_json = ?1 WHERE id = ?2", params![encoded, id])
-                .map_err(|e| MiraError::DatabaseError(format!("mcp token migration failed: {e}")))?;
+                .map_err(|e| MiraError::DatabaseError(format!("mcp secret migration failed: {e}")))?;
         }
         tx.commit()
             .map_err(|e| MiraError::DatabaseError(format!("mcp token migration commit failed: {e}")))?;
@@ -392,7 +449,7 @@ impl McpServerStore {
     /// rather than failing with a UNIQUE conflict.
     pub fn create_or_replace(&self, user_id: &str, new: NewMcpServer) -> Result<McpServerRow, MiraError> {
         let now = Self::now_ms();
-        let cfg = McpServerConfig {
+        let mut cfg = McpServerConfig {
             name:      new.name.clone(),
             transport: new.transport.clone(),
             command:   new.command.clone(),
@@ -403,45 +460,55 @@ impl McpServerStore {
             enabled:   new.enabled,
             sampling_enabled: new.sampling_enabled,
         };
-        let provisional_id = self.existing_id(user_id, &new.name)?;
-        let id = provisional_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let config_json = self.config_json(&id, &cfg)?;
         let en = new.enabled as i64;
 
-        let conn = self.conn.lock().unwrap();
-        let existing = id.clone();
-        let existing_row = conn.query_row(
-            "SELECT id FROM mcp_servers WHERE user_id = ?1 AND name = ?2",
-            params![user_id, new.name],
-            |r| r.get::<_, String>(0),
-        );
-        match existing_row {
-            Ok(_) => {
+        match self.existing_id(user_id, &new.name)? {
+            Some(id) => {
+                // Reinstall over an existing row: keep operator-added secrets the
+                // incoming spec doesn't carry (a bearer token, env keys not in the
+                // spec) rather than clobbering them. Best-effort — if the existing
+                // row can't be decrypted (e.g. master key rotated) we proceed with
+                // the spec alone rather than block the reinstall. (Package specs
+                // are stdio today, so this is mostly forward-looking.)
+                if let Ok(Some(existing_row)) = self.get(&id) {
+                    if let Ok(existing_cfg) = self.to_config(&existing_row) {
+                        if cfg.auth_token.is_none() {
+                            cfg.auth_token = existing_cfg.auth_token;
+                        }
+                        for (key, value) in existing_cfg.env {
+                            cfg.env.entry(key).or_insert(value);
+                        }
+                    }
+                }
+                let config_json = self.config_json(&id, &cfg)?;
+                let conn = self.conn.lock().unwrap();
                 conn.execute(
                     "UPDATE mcp_servers SET transport = ?1, enabled = ?2, config_json = ?3, updated_at = ?4
                      WHERE id = ?5",
-                    params![new.transport, en, config_json, now, existing],
+                    params![new.transport, en, config_json, now, id],
                 )
                 .map_err(|e| MiraError::DatabaseError(format!("update mcp_server: {e}")))?;
                 Ok(McpServerRow {
-                    id: existing, user_id: user_id.to_owned(), name: new.name, transport: new.transport,
+                    id, user_id: user_id.to_owned(), name: new.name, transport: new.transport,
                     enabled: new.enabled, config_json, created_at: now, updated_at: now,
                 })
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
+            None => {
+                let id = Uuid::new_v4().to_string();
+                let config_json = self.config_json(&id, &cfg)?;
+                let conn = self.conn.lock().unwrap();
                 conn.execute(
                     "INSERT INTO mcp_servers
                        (id, user_id, name, transport, enabled, config_json, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-                    params![existing, user_id, new.name, new.transport, en, config_json, now],
+                    params![id, user_id, new.name, new.transport, en, config_json, now],
                 )
                 .map_err(|e| MiraError::DatabaseError(format!("create mcp_server: {e}")))?;
                 Ok(McpServerRow {
-                    id: existing, user_id: user_id.to_owned(), name: new.name, transport: new.transport,
+                    id, user_id: user_id.to_owned(), name: new.name, transport: new.transport,
                     enabled: new.enabled, config_json, created_at: now, updated_at: now,
                 })
             }
-            Err(e) => Err(MiraError::DatabaseError(e.to_string())),
         }
     }
 
@@ -541,7 +608,14 @@ impl McpServerStore {
         // per user), so the extra round-trip is fine.
         let row = self.get(id)?
             .ok_or_else(|| MiraError::NotFound(format!("mcp_server not found: {id}")))?;
-        let mut cfg = self.to_config(&row)?;
+        // Hydrate WITHOUT the stored token: a token that can't be decrypted
+        // (master key lost/rotated, tampered row) must not block clearing or
+        // replacing it. The token is resolved below, and only *retaining* it
+        // requires a successful decrypt. (env is decrypted strictly — for the
+        // bearer-token case the server is http with no env, so this doesn't
+        // block the common recovery.)
+        let mut cfg = row.to_config_with_token(None)?;
+        self.decrypt_env_in_place(&row.id, &mut cfg)?;
 
         if let Some(name)      = upd.name      { cfg.name = name; }
         if let Some(transport) = upd.transport { cfg.transport = transport; }
@@ -571,6 +645,13 @@ impl McpServerStore {
             cfg.auth_token = None;
         } else if let Some(token) = upd.auth_token.filter(|v| !v.is_empty()) {
             cfg.auth_token = Some(token);
+        } else {
+            // Retain the existing token — this is the only path that needs it
+            // decrypted. Fail closed with actionable guidance if it can't be,
+            // so an unrelated edit can't silently drop the token.
+            cfg.auth_token = self.token_from_config(&row).map_err(|_| MiraError::ConfigError(format!(
+                "mcp_server {id}: stored token can't be decrypted; set a new token or clear it"
+            )))?;
         }
         if let Some(enabled)   = upd.enabled   { cfg.enabled = enabled; }
         if let Some(s)         = upd.sampling_enabled { cfg.sampling_enabled = s; }
@@ -893,5 +974,119 @@ mod tests {
 
         let updated = store.update(&row.id, UpdateMcpServer { env: Some(env), ..Default::default() }).unwrap();
         assert_eq!(store.config_for_row(&updated).unwrap().env.get("SYNTHETIC_API_KEY").map(String::as_str), Some("synthetic-old"));
+    }
+
+    // Fix 1 — env values are encrypted at rest, bound to (row id, key).
+    #[test]
+    fn env_values_are_encrypted_at_rest_and_bound_to_row_and_key() {
+        let (store, _dir) = store();
+        let mut server = new_server(None);
+        server.transport = "stdio".to_owned();
+        server.command = Some("synthetic".to_owned());
+        server.env.insert("SYNTHETIC_API_KEY".to_owned(), "synthetic-env-secret".to_owned());
+        let row = store.create("synthetic-user", server).unwrap();
+
+        assert!(row.config_json.contains(ENC_PREFIX), "env stored encrypted");
+        assert!(!row.config_json.contains("synthetic-env-secret"), "no plaintext env at rest");
+        assert_eq!(store.config_for_row(&row).unwrap().env.get("SYNTHETIC_API_KEY").map(String::as_str),
+                   Some("synthetic-env-secret"));
+
+        // AAD binds the ciphertext to (id, key) — it won't decrypt under another key name.
+        let stored = serde_json::from_str::<serde_json::Value>(&row.config_json).unwrap();
+        let ciphertext = stored["env"]["SYNTHETIC_API_KEY"].as_str().unwrap();
+        assert!(store.decrypt_field(&McpServerStore::env_aad(&row.id, "SYNTHETIC_API_KEY"), ciphertext).is_ok());
+        assert!(store.decrypt_field(&McpServerStore::env_aad(&row.id, "OTHER_KEY"), ciphertext).is_err());
+    }
+
+    // Fix 1 — a legacy row with plaintext env is migrated on open, idempotently.
+    #[test]
+    fn legacy_plaintext_env_is_migrated_on_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("auth.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE users (id TEXT PRIMARY KEY); INSERT INTO users VALUES ('synthetic-user');").unwrap();
+        conn.execute_batch("CREATE TABLE mcp_servers (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, transport TEXT NOT NULL, enabled INTEGER NOT NULL, config_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);").unwrap();
+        conn.execute(
+            "INSERT INTO mcp_servers VALUES (?1, ?2, ?3, ?4, 1, ?5, 0, 0)",
+            params![
+                "legacy-env", "synthetic-user", "legacy", "stdio",
+                serde_json::json!({
+                    "name": "legacy", "transport": "stdio", "command": "synthetic",
+                    "enabled": true, "args": [], "sampling_enabled": false,
+                    "env": { "SYNTHETIC_API_KEY": "synthetic-legacy-env" }
+                }).to_string()
+            ],
+        ).unwrap();
+        drop(conn);
+
+        let store = McpServerStore::open(&path).unwrap();
+        let row = store.get("legacy-env").unwrap().unwrap();
+        assert!(row.config_json.contains(ENC_PREFIX));
+        assert!(!row.config_json.contains("synthetic-legacy-env"));
+        assert_eq!(store.config_for_row(&row).unwrap().env.get("SYNTHETIC_API_KEY").map(String::as_str),
+                   Some("synthetic-legacy-env"));
+        // Idempotent: re-opening doesn't re-encrypt / corrupt it.
+        let store2 = McpServerStore::open(&path).unwrap();
+        assert_eq!(store2.config_for_row(&store2.get("legacy-env").unwrap().unwrap()).unwrap()
+                   .env.get("SYNTHETIC_API_KEY").map(String::as_str), Some("synthetic-legacy-env"));
+    }
+
+    // Fix 2 — an undecryptable token can still be cleared or replaced; only
+    // retaining it fails closed.
+    #[test]
+    fn undecryptable_token_can_be_cleared_or_replaced_but_retain_fails() {
+        let (store, _dir) = store();
+        let corrupt = |store: &McpServerStore, id: &str| {
+            let row = store.get(id).unwrap().unwrap();
+            let mut value = serde_json::from_str::<serde_json::Value>(&row.config_json).unwrap();
+            value["auth_token"] = serde_json::Value::String(format!("{ENC_PREFIX}invalid"));
+            let raw = serde_json::to_string(&value).unwrap();
+            store.conn.lock().unwrap()
+                .execute("UPDATE mcp_servers SET config_json = ?1 WHERE id = ?2", params![raw, id]).unwrap();
+        };
+
+        // clear succeeds despite a corrupt stored token.
+        let mut a = new_server(Some("synthetic-token")); a.name = "srv-a".into();
+        let a = store.create("synthetic-user", a).unwrap();
+        corrupt(&store, &a.id);
+        let cleared = store.update(&a.id, UpdateMcpServer { clear_auth_token: true, ..Default::default() }).unwrap();
+        assert_eq!(store.config_for_row(&cleared).unwrap().auth_token, None);
+
+        // replace succeeds despite a corrupt stored token.
+        let mut b = new_server(Some("synthetic-token")); b.name = "srv-b".into();
+        let b = store.create("synthetic-user", b).unwrap();
+        corrupt(&store, &b.id);
+        let replaced = store.update(&b.id, UpdateMcpServer {
+            auth_token: Some("synthetic-fresh".into()), ..Default::default() }).unwrap();
+        assert_eq!(store.config_for_row(&replaced).unwrap().auth_token.as_deref(), Some("synthetic-fresh"));
+
+        // an unrelated edit that would retain the token fails closed (no silent drop).
+        let mut c = new_server(Some("synthetic-token")); c.name = "srv-c".into();
+        let c = store.create("synthetic-user", c).unwrap();
+        corrupt(&store, &c.id);
+        let err = store.update(&c.id, UpdateMcpServer { enabled: Some(false), ..Default::default() }).unwrap_err();
+        assert!(err.to_string().contains("can't be decrypted"), "{err}");
+    }
+
+    // Fix 3 — reinstalling (create_or_replace) over an existing row keeps an
+    // operator-added token and env keys the incoming spec doesn't carry.
+    #[test]
+    fn create_or_replace_preserves_operator_added_token_and_env() {
+        let (store, _dir) = store();
+        // Operator installed/edited: a token + two env keys.
+        let mut first = new_server(Some("synthetic-operator-token"));
+        first.env.insert("OPERATOR_KEY".to_owned(), "operator-value".to_owned());
+        first.env.insert("SHARED_KEY".to_owned(), "original".to_owned());
+        store.create_or_replace("synthetic-user", first).unwrap();
+
+        // Reinstall: spec carries no token, overrides SHARED_KEY, omits OPERATOR_KEY.
+        let mut reinstall = new_server(None);
+        reinstall.env.insert("SHARED_KEY".to_owned(), "from-spec".to_owned());
+        let row = store.create_or_replace("synthetic-user", reinstall).unwrap();
+
+        let cfg = store.config_for_row(&row).unwrap();
+        assert_eq!(cfg.auth_token.as_deref(), Some("synthetic-operator-token"), "token retained");
+        assert_eq!(cfg.env.get("OPERATOR_KEY").map(String::as_str), Some("operator-value"), "user env retained");
+        assert_eq!(cfg.env.get("SHARED_KEY").map(String::as_str), Some("from-spec"), "spec overrides shared key");
     }
 }
