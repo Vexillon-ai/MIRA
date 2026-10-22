@@ -16,6 +16,7 @@ export default function SkillsPage() {
   const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const [installOpen, setInstallOpen] = useState(false)
   const [trustOpen, setTrustOpen]     = useState(false)
+  const [authorOpen, setAuthorOpen]   = useState(false)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['skills'],
@@ -48,6 +49,13 @@ export default function SkillsPage() {
               </button>
               <button
                 type="button"
+                className={styles.installBtnSecondary}
+                onClick={() => setAuthorOpen(true)}
+              >
+                <Boxes size={14} /> New Skill
+              </button>
+              <button
+                type="button"
                 className={styles.installBtn}
                 onClick={() => setInstallOpen(true)}
               >
@@ -63,6 +71,9 @@ export default function SkillsPage() {
       )}
       {trustOpen && (
         <TrustStoreModal onClose={() => setTrustOpen(false)} />
+      )}
+      {authorOpen && (
+        <AuthorModal onClose={() => setAuthorOpen(false)} />
       )}
 
       <div className={styles.body}>
@@ -415,6 +426,99 @@ function PermLine({ label, children }: { label: string; children: React.ReactNod
       <span className={styles.permKey}>{label}:</span>
       <span>{children}</span>
     </>
+  )
+}
+
+// ── Author (compose) a skill — T1d ─────────────────────────────────────────
+
+function AuthorModal({ onClose }: { onClose: () => void }) {
+  const qc = useQueryClient()
+  const [name, setName] = useState('')
+  const [desc, setDesc] = useState('')
+  const [guidance, setGuidance] = useState('')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [filter, setFilter] = useState('')
+
+  const tools = useQuery({ queryKey: ['available-tools'], queryFn: () => skillsApi.availableTools() })
+
+  const authorMut = useMutation({
+    mutationFn: () => skillsApi.author({
+      display_name:  name.trim(),
+      description:   desc.trim(),
+      builtin_impls: [...selected],
+      guidance_md:   guidance.trim() || undefined,
+    }),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ['skills'] })
+      toast.success(`Created ${r.id} — Tier-${r.tier}, ${r.scope}`)
+      onClose()
+    },
+    onError: (e: { response?: { data?: { error?: string } } } & Error) =>
+      toast.error(`Couldn't create skill: ${e.response?.data?.error ?? e.message}`),
+  })
+
+  const toggle = (n: string) => setSelected((s) => {
+    const c = new Set(s); if (c.has(n)) c.delete(n); else c.add(n); return c
+  })
+  const f = filter.trim().toLowerCase()
+  const list = (tools.data ?? []).filter(
+    (t) => !f || t.name.toLowerCase().includes(f) || t.description.toLowerCase().includes(f))
+  const tier = selected.size > 0 ? 1 : 0
+  const canSubmit = !!name.trim() && !!desc.trim() && (selected.size > 0 || !!guidance.trim())
+
+  return (
+    <div className={styles.modalBackdrop} onClick={onClose}>
+      <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div className={styles.modalHead}>
+          <h2>New Skill</h2>
+          <button type="button" className={styles.iconBtn} onClick={onClose} aria-label="Close"><X size={14} /></button>
+        </div>
+        <div className={styles.modalBody}>
+          <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+            Compose a skill from existing tools (<strong>Tier-1</strong>) and/or a guidance prompt
+            (<strong>Tier-0</strong>). A re-exposed tool only runs for a user whose own permissions
+            already allow it. The skill is signed as “this MIRA”.
+          </p>
+
+          <label style={{ fontSize: 13 }}>Name
+            <input className={styles.textInput} value={name} onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Research helper" />
+          </label>
+          <label style={{ fontSize: 13 }}>When to use it (description)
+            <input className={styles.textInput} value={desc} onChange={(e) => setDesc(e.target.value)}
+              placeholder="One sentence — this decides when the skill is used." />
+          </label>
+
+          <div style={{ fontSize: 13, marginTop: 8 }}>
+            Re-expose tools <span style={{ color: 'var(--text-muted)' }}>({selected.size} selected)</span>
+            <input className={styles.textInput} value={filter} onChange={(e) => setFilter(e.target.value)}
+              placeholder="filter tools…" style={{ marginTop: 4 }} />
+            <div style={{ maxHeight: 180, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 6, marginTop: 4 }}>
+              {tools.isLoading && <div style={{ padding: 8, color: 'var(--text-muted)' }}>Loading tools…</div>}
+              {list.map((t) => (
+                <label key={t.name} style={{ display: 'flex', gap: 8, padding: '4px 8px', alignItems: 'baseline' }}>
+                  <input type="checkbox" checked={selected.has(t.name)} onChange={() => toggle(t.name)} />
+                  <span><code>{t.name}</code> <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{t.description}</span></span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <label style={{ fontSize: 13, marginTop: 8 }}>Guidance (optional, markdown)
+            <textarea className={styles.textInput} rows={4} value={guidance} onChange={(e) => setGuidance(e.target.value)}
+              placeholder="How MIRA should use these tools / do this task well." />
+          </label>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>This will be a <strong>Tier-{tier}</strong> skill.</span>
+            <button type="button" className={styles.installBtn} disabled={!canSubmit || authorMut.isPending}
+              onClick={() => authorMut.mutate()}>
+              {authorMut.isPending ? 'Creating…' : 'Create skill'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }
 

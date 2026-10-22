@@ -525,6 +525,15 @@ impl LocalAuthService {
         self.db.effective_capabilities(user_id, role)
     }
 
+    /// Effective capabilities when only the user id is known (resolves the role
+    /// itself). Used by the skill capability gate (Tier-1 enforcement).
+    pub fn effective_capabilities_for(
+        &self,
+        user_id: &str,
+    ) -> Result<crate::auth::CapabilityProfile, MiraError> {
+        self.db.effective_capabilities_for(user_id)
+    }
+
     pub fn change_password(&self, user_id: &str, new_password: &str) -> Result<(), MiraError> {
         let hash = Self::hash_password(new_password)?;
         self.db.change_password(user_id, hash)

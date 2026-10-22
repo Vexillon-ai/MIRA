@@ -2383,6 +2383,26 @@ pub(crate) fn host_is_local(url: &str) -> bool {
     false
 }
 
+/// Enforces the execution invariant: a Tier-1 skill re-exposing
+/// a `builtin` tool may only run it for a caller whose RBAC tools-axis allows
+/// that builtin directly (admins → unrestricted). Restricted Mode is enforced
+/// separately by the builtin dispatcher, so this gate is purely the per-caller
+/// RBAC intersection. A caller with no id (internal/system path) isn't gated.
+struct AuthSkillCapGate {
+    auth: Arc<LocalAuthService>,
+}
+
+impl crate::skills::runtime::SkillCapGate for AuthSkillCapGate {
+    fn builtin_allowed(&self, user_id: Option<&str>, builtin_impl: &str) -> bool {
+        let Some(uid) = user_id else { return true; };
+        match self.auth.effective_capabilities_for(uid) {
+            Ok(caps) => caps.allows_tool(builtin_impl),
+            // Fail closed if we can't resolve the caller's capabilities.
+            Err(_) => false,
+        }
+    }
+}
+
 fn build_tool_registry(
     config:      &MiraConfig,
     auth:        Option<&Arc<LocalAuthService>>,
@@ -3085,6 +3105,14 @@ fn build_tool_registry(
         // packages verify as Verified out of the box.
         if let Err(e) = crate::skills::trust::ensure_default_publishers(&skills_dir) {
             warn!("default publisher pin failed (official packages may read Untrusted): {e}");
+        }
+
+        // Wire the skill capability gate BEFORE the first reload, so a Tier-1
+        // skill re-exposing a builtin can't hand a caller a tool their RBAC
+        // denies. No auth service (minimal/test
+        // builds) → no gate → unchanged behaviour.
+        if let Some(a) = auth {
+            registry.set_skill_cap_gate(Some(Arc::new(AuthSkillCapGate { auth: Arc::clone(a) })));
         }
 
         // Load + register all skills (global + per-user, user-scoped) onto the

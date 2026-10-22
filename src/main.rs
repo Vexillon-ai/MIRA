@@ -551,6 +551,10 @@ pub enum SkillAction {
         // Where to create the directory. Defaults to the current directory.
         #[arg(long, value_name = "PATH")]
         out: Option<std::path::PathBuf>,
+        // Re-expose an existing builtin tool as a Tier-1 skill tool. Repeatable.
+        // Form: `impl` or `impl:tool_name` (e.g. `--builtin web_search`).
+        #[arg(long = "builtin", value_name = "IMPL[:NAME]")]
+        builtin: Vec<String>,
     },
     // Validate the manifest at `<dir>/skill.toml`. Checks parsing,
     // declared paths, directory-id agreement.
@@ -1223,7 +1227,7 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
                 });
         }
         let cli_cmd = match action {
-            SkillAction::Init     { id, out }       => mira::skills::cli::SkillCliCommand::Init     { id: id.clone(), out: out.clone() },
+            SkillAction::Init     { id, out, builtin } => mira::skills::cli::SkillCliCommand::Init { id: id.clone(), out: out.clone(), builtin: builtin.clone() },
             SkillAction::Validate { path }          => mira::skills::cli::SkillCliCommand::Validate { path: path.clone() },
             SkillAction::Keygen   { out }           => mira::skills::cli::SkillCliCommand::Keygen   { out: out.clone() },
             SkillAction::Sign     { path, key }     => mira::skills::cli::SkillCliCommand::Sign     { path: path.clone(), key: key.clone() },

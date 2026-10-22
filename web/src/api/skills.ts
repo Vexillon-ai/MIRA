@@ -128,6 +128,15 @@ export interface SkillProposal {
   tier:         number
 }
 
+/** Body for POST /api/skills/author (T1d). */
+export interface AuthorSkillRequest {
+  display_name:  string
+  description:   string
+  builtin_impls: string[]
+  guidance_md?:  string
+  slug?:         string
+}
+
 export const skillsApi = {
   async list(): Promise<SkillsResponse> {
     const { data } = await api.get<SkillsResponse>('/api/skills')
@@ -156,6 +165,19 @@ export const skillsApi = {
     const { data } = await api.post<{ new_id: string }>(
       `/api/skills/${encodeURIComponent(id)}/promote`,
     )
+    return data
+  },
+
+  /** Author a skill (Tier-1 builtin reuse, or Tier-0 guidance), tier-gated by
+   *  the caller's rights. Returns {id, tier, scope}. (T1d) */
+  async author(req: AuthorSkillRequest): Promise<{ id: string; tier: number; scope: string }> {
+    const { data } = await api.post('/api/skills/author', req)
+    return data
+  },
+
+  /** The tools the caller can use — the picker source for builtin reuse. */
+  async availableTools(): Promise<{ name: string; description: string }[]> {
+    const { data } = await api.get<{ name: string; description: string }[]>('/api/tools')
     return data
   },
 

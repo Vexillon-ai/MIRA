@@ -403,3 +403,11 @@
   font-size: 13px;
   color: var(--text-secondary);
 }
+
+/* T1d — New Skill form inputs */
+.textInput {
+  display: block; width: 100%; box-sizing: border-box; margin-top: 4px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-base); color: var(--text-primary); font-size: 13px; font-family: inherit;
+}
+.textInput:focus { outline: none; border-color: var(--accent); }

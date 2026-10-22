@@ -33,7 +33,7 @@ use crate::skills::trust::fingerprint_of;
 
 #[derive(Debug)]
 pub enum SkillCliCommand {
-    Init     { id: String,    out: Option<PathBuf> },
+    Init     { id: String,    out: Option<PathBuf>, builtin: Vec<String> },
     Validate { path: PathBuf },
     Keygen   { out: Option<PathBuf> },
     Sign     { path: PathBuf, key: PathBuf },
@@ -43,7 +43,7 @@ pub enum SkillCliCommand {
 
 pub fn run(cmd: SkillCliCommand) -> Result<(), Box<dyn Error>> {
     match cmd {
-        SkillCliCommand::Init     { id, out }       => init(&id, out.as_deref()),
+        SkillCliCommand::Init     { id, out, builtin } => init(&id, out.as_deref(), &builtin),
         SkillCliCommand::Validate { path }          => validate(&path),
         SkillCliCommand::Keygen   { out }           => keygen(out.as_deref()),
         SkillCliCommand::Sign     { path, key }     => sign(&path, &key),
@@ -54,7 +54,7 @@ pub fn run(cmd: SkillCliCommand) -> Result<(), Box<dyn Error>> {
 
 // ─── init ──────────────────────────────────────────────────────────────────
 
-fn init(id: &str, out: Option<&Path>) -> Result<(), Box<dyn Error>> {
+fn init(id: &str, out: Option<&Path>, builtin: &[String]) -> Result<(), Box<dyn Error>> {
     let cwd = std::env::current_dir()?;
     let target = out.unwrap_or(cwd.as_path()).join(id);
     if target.exists() {
@@ -65,9 +65,15 @@ fn init(id: &str, out: Option<&Path>) -> Result<(), Box<dyn Error>> {
     }
     fs::create_dir_all(&target)?;
     let manifest_path = target.join("skill.toml");
-    fs::write(&manifest_path, starter_manifest(id))?;
+    fs::write(&manifest_path, starter_manifest(id, builtin))?;
 
-    println!("✓ Created {}", target.display());
+    if !builtin.is_empty() {
+        println!("✓ Created {} (Tier-1: re-exposes {} builtin tool(s))", target.display(), builtin.len());
+        println!("  Note: a Tier-1 skill is admin-authored + explicit-approval, and only runs a");
+        println!("  builtin for a caller whose own permissions allow it.");
+    } else {
+        println!("✓ Created {}", target.display());
+    }
     println!("  ├── skill.toml");
     println!();
     println!("Next steps:");
@@ -79,7 +85,22 @@ fn init(id: &str, out: Option<&Path>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn starter_manifest(id: &str) -> String {
+fn starter_manifest(id: &str, builtin: &[String]) -> String {
+    // Each `--builtin impl[:name]` becomes a Tier-1 tool entry re-exposing an
+    // existing builtin. `name` (what the LLM calls) defaults to the impl.
+    let tools_block = if builtin.is_empty() {
+        "[tools]\n# example_clock = { kind = \"builtin\", impl = \"now\" }\n".to_string()
+    } else {
+        let mut s = String::from("[tools]\n");
+        for spec in builtin {
+            let (impl_name, tool_name) = match spec.split_once(':') {
+                Some((i, n)) => (i.trim(), n.trim()),
+                None => (spec.trim(), spec.trim()),
+            };
+            s.push_str(&format!("{tool_name} = {{ kind = \"builtin\", impl = \"{impl_name}\" }}\n"));
+        }
+        s
+    };
     format!(
         r#"# Manifest for {id}
 # Format reference.
@@ -106,9 +127,7 @@ max_llm_spend_per_invocation_usd = 0.50
 #   builtin   — wraps an existing built-in tool by name (web_fetch, math_eval, …)
 #   prompt    — applies a prompt template through the LLM
 #   executable — runs a binary/script shipped with the Skill (sandboxed)
-[tools]
-# example_clock = {{ kind = "builtin", impl = "now" }}
-
+{tools_block}
 # Filled in by `mira skill sign` — leave commented out for unsigned dev.
 # [verification]
 # signature     = "ed25519:..."
@@ -153,9 +172,17 @@ fn validate(path: &Path) -> Result<(), Box<dyn Error>> {
         }
     }
 
+    let tier = manifest.authoring_tier();
+    let tier_label = match tier {
+        0 => "0 (guidance — prompt only)",
+        1 => "1 (reuse — re-exposes builtin tools; admin-authored, explicit approval)",
+        2 => "2 (capability — declares side-effecting permissions)",
+        _ => "3 (procedure — ships an executable)",
+    };
     println!("✓ {} parses and validates", manifest_path.display());
     println!("  id          {}", manifest.skill.id);
     println!("  version     {}", manifest.skill.version);
+    println!("  tier        {tier_label}");
     println!("  tools       {}", manifest.tools.len());
     println!("  permissions {}", permission_summary(&manifest));
     if manifest.verification.is_some() {
@@ -390,7 +417,7 @@ mod tests {
     #[test]
     fn init_then_validate_then_package_roundtrips() {
         let dir = TempDir::new().unwrap();
-        init("com.example.tdd", Some(dir.path())).unwrap();
+        init("com.example.tdd", Some(dir.path()), &[]).unwrap();
 
         let skill_dir = dir.path().join("com.example.tdd");
         // The starter manifest has TODO display_name — we override before
@@ -422,7 +449,7 @@ mod tests {
         keygen(Some(&key_path)).unwrap();
 
         // Scaffold + edit a skill so it parses cleanly
-        init("com.example.signed", Some(dir.path())).unwrap();
+        init("com.example.signed", Some(dir.path()), &[]).unwrap();
         let skill_dir = dir.path().join("com.example.signed");
         let toml = fs::read_to_string(skill_dir.join("skill.toml")).unwrap()
             .replace("TODO: friendly name", "Signed Skill")

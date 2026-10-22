@@ -46,6 +46,16 @@ pub trait BuiltinDispatcher: Send + Sync {
     async fn invoke_builtin(&self, name: &str, args: ToolArgs) -> Result<ToolResult, MiraError>;
 }
 
+/// Enforces the execution invariant: a skill that re-exposes a
+/// `builtin` tool (Tier-1) must never hand a caller a tool their RBAC — or
+/// Restricted Mode — denies directly. Given the calling user and the builtin
+/// impl name, returns whether the call may proceed. Implemented over the auth
+/// service in the gateway; `None` on a `SkillTool` (tests/CLI) means "allow"
+/// (no multi-tenant context to enforce against).
+pub trait SkillCapGate: Send + Sync {
+    fn builtin_allowed(&self, user_id: Option<&str>, builtin_impl: &str) -> bool;
+}
+
 /// Tool-trait wrapper around a `LoadedSkill`. Agent sees one of these per
 /// installed Skill.
 pub struct SkillTool {
@@ -71,6 +81,10 @@ pub struct SkillTool {
     /// `None` = global (visible to all). `Some(uid)` = private: offered only to
     /// `uid` and refused for any other caller as a hard execution backstop.
     owner: Option<String>,
+
+    /// Enforces the Tier-1 invariant on `builtin` dispatch. `None` =
+    /// no multi-tenant context (tests/CLI) → allow.
+    cap_gate: Option<Arc<dyn SkillCapGate>>,
 }
 
 impl SkillTool {
@@ -78,7 +92,14 @@ impl SkillTool {
         let name = sanitise_tool_name(&skill.manifest.skill.id);
         let description = render_description(&skill);
         let args_schema = render_args_schema(&skill);
-        Self { name, description, args_schema, skill, dispatcher, prefs: None, owner: None }
+        Self { name, description, args_schema, skill, dispatcher, prefs: None, owner: None, cap_gate: None }
+    }
+
+    /// Attach the capability gate that enforces the invariant on `builtin`
+    /// tool dispatch (a skill can't hand a caller a tool their RBAC denies).
+    pub fn with_cap_gate(mut self, gate: Option<Arc<dyn SkillCapGate>>) -> Self {
+        self.cap_gate = gate;
+        self
     }
 
     /// Add a per-user prefs store. Calls from disabled users get refused
@@ -192,6 +213,19 @@ impl Tool for SkillTool {
                 })
             }
             ToolSpec::Builtin { r#impl } => {
+                // Invariant: a skill re-exposing a builtin must not run
+                // it for a caller whose RBAC / Restricted Mode denies it directly.
+                // Effective power = intersection(skill, caller). Enforced before
+                // any work; `None` gate (tests/CLI) = allow.
+                if let Some(gate) = self.cap_gate.as_ref() {
+                    let caller = args.get("_user_id").and_then(|v| v.as_str());
+                    if !gate.builtin_allowed(caller, r#impl) {
+                        return Err(MiraError::ToolError(format!(
+                            "skill {:?}: this skill uses the {:?} tool, which your permissions don't allow",
+                            self.skill_id(), r#impl,
+                        )));
+                    }
+                }
                 // Forward the handler-injected context (`_user_id`,
                 // `_conversation_id`, `_channel`, `_user_tz`, …) from the outer,
                 // trusted envelope onto the inner args the model supplied, so
@@ -370,6 +404,7 @@ pub fn build_skill_tools(
     dispatcher: Arc<dyn BuiltinDispatcher>,
     prefs: Option<Arc<SkillPrefsStore>>,
     owner: Option<&str>,
+    cap_gate: Option<Arc<dyn SkillCapGate>>,
 ) -> Vec<Arc<dyn Tool>> {
     let mut out: Vec<Arc<dyn Tool>> = Vec::new();
     for skill in skills.iter() {
@@ -378,7 +413,7 @@ pub fn build_skill_tools(
         if let Some(p) = prefs.as_ref() {
             tool = tool.with_prefs(p.clone());
         }
-        tool = tool.with_owner(owner.map(str::to_string));
+        tool = tool.with_owner(owner.map(str::to_string)).with_cap_gate(cap_gate.clone());
         debug!("Built Skill {id:?} as router tool {:?} (owner={owner:?})", tool.name());
         out.push(Arc::new(tool));
     }
@@ -403,7 +438,7 @@ pub fn register_skills(
 ) -> usize {
     // Global skills only (owner = None). User-scoped skills are applied by
     // [`reload_skills`], which combines both trees in one `set_skill_tools`.
-    let tools = build_skill_tools(skills, dispatcher, prefs, None);
+    let tools = build_skill_tools(skills, dispatcher, prefs, None, registry.skill_cap_gate());
     let count = tools.len();
     registry.set_skill_tools(tools);
     count
@@ -508,14 +543,15 @@ pub fn reload_skills(registry: &ToolRegistry, data_dir: &std::path::Path) -> usi
     let dispatcher: Arc<dyn BuiltinDispatcher> =
         Arc::new(BuiltinSnapshotDispatcher::from_registry(registry));
 
-    let mut tools = build_skill_tools(&global, dispatcher.clone(), prefs.clone(), None);
+    let gate = registry.skill_cap_gate();
+    let mut tools = build_skill_tools(&global, dispatcher.clone(), prefs.clone(), None, gate.clone());
     let global_count = tools.len();
     let mut user_count = 0;
     for (uid, reg) in &user_scoped {
         for err in &reg.errors {
             warn!("User-scoped skill reload error ({uid}) at {}: {}", err.path.display(), err.error);
         }
-        let mut t = build_skill_tools(reg, dispatcher.clone(), prefs.clone(), Some(uid));
+        let mut t = build_skill_tools(reg, dispatcher.clone(), prefs.clone(), Some(uid), gate.clone());
         user_count += t.len();
         tools.append(&mut t);
     }
@@ -609,6 +645,38 @@ mod tests {
     fn name_sanitises_reverse_dns_dots_to_underscores() {
         assert_eq!(sanitise_tool_name("com.mira.research"), "com_mira_research");
         assert_eq!(sanitise_tool_name("io.example.thing-name"), "io_example_thing_name");
+    }
+
+    // The invariant: a skill re-exposing a builtin must be refused for a
+    // caller the gate denies that builtin for, and run when allowed.
+    struct FixedGate { allow: bool }
+    impl SkillCapGate for FixedGate {
+        fn builtin_allowed(&self, _user_id: Option<&str>, _impl_name: &str) -> bool { self.allow }
+    }
+
+    #[tokio::test]
+    async fn builtin_skill_refused_when_cap_gate_denies_and_runs_when_allowed() {
+        let dir = TempDir::new().unwrap();
+        let skill = make_skill(
+            "com.example.wrap",
+            vec![("run", ToolSpec::Builtin { r#impl: "code_run".into() })],
+            dir.path().to_path_buf(),
+        );
+        let disp = MockDispatcher::new(&[("code_run", "ran")]);
+
+        // Denied: refused before dispatch, builtin never invoked.
+        let denied = SkillTool::new(skill.clone(), disp.clone())
+            .with_cap_gate(Some(Arc::new(FixedGate { allow: false })));
+        let err = denied.execute(json!({"tool":"run","args":{},"_user_id":"restricted"})).await.unwrap_err();
+        assert!(err.to_string().contains("permissions don't allow"), "{err}");
+        assert!(disp.calls().is_empty(), "builtin must not be invoked when denied");
+
+        // Allowed: dispatches to the builtin.
+        let allowed = SkillTool::new(skill, disp.clone())
+            .with_cap_gate(Some(Arc::new(FixedGate { allow: true })));
+        let ok = allowed.execute(json!({"tool":"run","args":{},"_user_id":"privileged"})).await.unwrap();
+        assert!(ok.success);
+        assert_eq!(disp.calls().len(), 1);
     }
 
     #[test]

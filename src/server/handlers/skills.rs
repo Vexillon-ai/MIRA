@@ -303,6 +303,154 @@ pub async fn promote_skill(
     }
 }
 
+// ── Skill authoring (Tier-1 reuse) — T1d ─────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AuthorSkillRequest {
+    pub display_name: String,
+    pub description:  String,
+    /// Builtin tool impls to re-expose (e.g. `["web_search","calendar"]`). ≥1
+    /// of these makes it Tier-1; none + guidance = Tier-0.
+    #[serde(default)]
+    pub builtin_impls: Vec<String>,
+    /// Optional guidance prompt body (markdown) → a `prompt` tool.
+    #[serde(default)]
+    pub guidance_md: Option<String>,
+    /// Optional id slug; derived from display_name otherwise.
+    #[serde(default)]
+    pub slug: Option<String>,
+}
+
+// Controlled serialize shapes — free text is escaped by the TOML serializer and
+// no `[permissions]`/extra sections can be injected (mirrors propose_skill).
+#[derive(Serialize)]
+struct AuthoredSkillDoc {
+    skill: AuthoredMeta,
+    tools: std::collections::BTreeMap<String, AuthoredTool>,
+}
+#[derive(Serialize)]
+struct AuthoredMeta { id: String, version: String, display_name: String, description: String, authors: Vec<String> }
+#[derive(Serialize)]
+#[serde(untagged)]
+enum AuthoredTool {
+    Builtin { kind: String, r#impl: String },
+    Prompt  { kind: String, template: String },
+}
+
+fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    let mut dash = false;
+    for c in s.chars() {
+        let lc = c.to_ascii_lowercase();
+        if lc.is_ascii_lowercase() || lc.is_ascii_digit() { out.push(lc); dash = false; }
+        else if !dash && !out.is_empty() { out.push('-'); dash = true; }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// POST /api/skills/author — compose a skill (Tier-1 reuse of builtin tools, or
+/// Tier-0 guidance) and write it live. Gated by `skill_authoring` + the caller's
+/// max authoring tier (admins unrestricted). Admin / global-propose → global
+/// skill; otherwise user-scoped. Instance-signed, hot-reloaded. (T1d)
+pub async fn author_skill(
+    AuthUser(user):      AuthUser,
+    Extension(data_dir): Extension<DataDir>,
+    Extension(mcp):      Extension<Arc<crate::mcp::McpServerRegistry>>,
+    Extension(auth):     Extension<Arc<LocalAuthService>>,
+    Json(req):           Json<AuthorSkillRequest>,
+) -> impl IntoResponse {
+    let bad = |code: StatusCode, msg: String| (code, Json(serde_json::json!({ "error": msg })));
+    let is_admin = matches!(user.role, Role::Admin);
+    let caps = auth.effective_capabilities(&user.id, &user.role).unwrap_or_default();
+    if !caps.may_author_skills() {
+        return bad(StatusCode::FORBIDDEN, "skill authoring is disabled for your account".into());
+    }
+    let allowed_tier = if is_admin { 3 } else { caps.max_author_tier() };
+
+    let display_name = req.display_name.trim();
+    let description  = req.description.trim();
+    if display_name.is_empty() || description.is_empty() {
+        return bad(StatusCode::BAD_REQUEST, "display_name and description are required".into());
+    }
+    let slug = slugify(req.slug.as_deref().unwrap_or(display_name));
+    if slug.is_empty() {
+        return bad(StatusCode::BAD_REQUEST, "could not derive a skill name — add letters/digits or a slug".into());
+    }
+    let guidance = req.guidance_md.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    // Validate requested builtins are real, registered tools (clearer than a
+    // dead skill that errors only when invoked).
+    let Some(reg) = mcp.tool_registry() else {
+        return bad(StatusCode::SERVICE_UNAVAILABLE, "tool registry unavailable".into());
+    };
+    let known: std::collections::HashSet<String> = reg.list_tools().into_iter().collect();
+    let mut tools: std::collections::BTreeMap<String, AuthoredTool> = Default::default();
+    for impl_name in &req.builtin_impls {
+        let impl_name = impl_name.trim();
+        if impl_name.is_empty() { continue; }
+        if !known.contains(impl_name) {
+            return bad(StatusCode::BAD_REQUEST, format!("unknown builtin tool {impl_name:?}"));
+        }
+        tools.insert(slugify(impl_name).replace('-', "_"), AuthoredTool::Builtin {
+            kind: "builtin".into(), r#impl: impl_name.to_string(),
+        });
+    }
+    if guidance.is_some() {
+        tools.insert("guide".into(), AuthoredTool::Prompt { kind: "prompt".into(), template: "prompts/main.md".into() });
+    }
+    if tools.is_empty() {
+        return bad(StatusCode::BAD_REQUEST, "a skill needs at least one builtin tool or a guidance prompt".into());
+    }
+
+    let global = is_admin || caps.may_propose_global();
+    let id = if global { format!("local.{slug}") } else { format!("user.{}.{slug}", slugify(&user.id)) };
+
+    let doc = AuthoredSkillDoc {
+        skill: AuthoredMeta {
+            id: id.clone(), version: "0.1.0".into(),
+            display_name: display_name.to_string(), description: description.to_string(),
+            authors: vec![format!("{} (authored)", user.username)],
+        },
+        tools,
+    };
+    let toml_text = match toml::to_string(&doc) {
+        Ok(t) => t,
+        Err(e) => return bad(StatusCode::INTERNAL_SERVER_ERROR, format!("serialise manifest: {e}")),
+    };
+
+    // Parse back + validate + tier-gate (can't under-declare).
+    let manifest = match skills::SkillManifest::parse(&toml_text) {
+        Ok(m) => m,
+        Err(e) => return bad(StatusCode::INTERNAL_SERVER_ERROR, format!("generated manifest invalid: {e}")),
+    };
+    if let Err(errs) = manifest.validate() {
+        return bad(StatusCode::BAD_REQUEST, format!("manifest failed validation: {}",
+            errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")));
+    }
+    let tier = manifest.authoring_tier();
+    if tier > allowed_tier {
+        return bad(StatusCode::FORBIDDEN, format!(
+            "you may author up to Tier-{allowed_tier}; this skill is Tier-{tier}"));
+    }
+
+    let skills_dir = skills::default_skills_dir(&data_dir.0);
+    let owner = if global { None } else { Some(user.id.as_str()) };
+    let live = match skills::authoring::author_live(&skills_dir, owner, &id, &toml_text, guidance) {
+        Ok(dir) => dir,
+        Err(e) => return bad(StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    // Instance-sign ("this MIRA") best-effort, then hot-reload.
+    if let Err(e) = skills::instance_key::sign_skill(&data_dir.0, &live) {
+        warn!("author_skill: instance-sign {id:?} failed (left unsigned): {e}");
+    }
+    skills::runtime::reload_skills(&reg, &data_dir.0);
+    info!("author_skill: {id:?} (tier {tier}, {}) authored by {}", if global { "global" } else { "user" }, user.id);
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "ok": true, "id": id, "tier": tier, "scope": if global { "global" } else { "user" }
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SetEnabledRequest {
     pub enabled: bool,

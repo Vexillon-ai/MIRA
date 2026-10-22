@@ -246,6 +246,11 @@ pub struct ToolRegistry {
     // short-circuits to a `ToolResult::failure(..)` before any work runs. `None`
     // on a normal instance → no gate, zero cost. See `crate::policy::restricted`.
     restricted: Option<Arc<crate::policy::RestrictedPolicy>>,
+    // Enforces the execution invariant: a Tier-1 skill re-exposing a
+    // builtin can't hand a caller a tool their RBAC denies. Set once at startup
+    // from the auth service; the per-turn skill reload reads it back so rebuilt
+    // SkillTools keep the gate. `None` in minimal/test builds → no gate.
+    skill_cap_gate: RwLock<Option<Arc<dyn crate::skills::runtime::SkillCapGate>>>,
 }
 
 impl ToolRegistry {
@@ -263,7 +268,19 @@ impl ToolRegistry {
             app_packages_dir: None,
             app_companion: None,
             restricted: None,
+            skill_cap_gate: RwLock::new(None),
         }
+    }
+
+    /// Set the skill capability gate (Tier-1 enforcement for builtin reuse).
+    /// Set once at startup; `reload_skills` reads it back on every rebuild.
+    pub fn set_skill_cap_gate(&self, gate: Option<Arc<dyn crate::skills::runtime::SkillCapGate>>) {
+        *self.skill_cap_gate.write().unwrap() = gate;
+    }
+
+    /// The current skill capability gate, if wired.
+    pub fn skill_cap_gate(&self) -> Option<Arc<dyn crate::skills::runtime::SkillCapGate>> {
+        self.skill_cap_gate.read().unwrap().clone()
     }
 
     // Attach a Restricted Mode capability gate. Chainable, mirrors `with_audit` /

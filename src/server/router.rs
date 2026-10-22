@@ -961,6 +961,10 @@ pub fn build_router(
             // (admin / RBAC global-propose; caller-scoped).
             .route("/api/skills/{id}/promote",
                    post(crate::server::handlers::skills::promote_skill))
+            // T1d: author a skill (Tier-1 builtin reuse / Tier-0 guidance),
+            // tier-gated by the caller's skill_authoring rights.
+            .route("/api/skills/author",
+                   post(crate::server::handlers::skills::author_skill))
             // Plugin packages: preview/verify, install, list, uninstall.
             // Admin-gated in-handler; reuses the skills trust store + MCP host.
             .route("/api/admin/packages/preview",

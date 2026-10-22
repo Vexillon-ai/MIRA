@@ -176,6 +176,41 @@ fn global_id_for(owner: &str, id: &str) -> String {
     format!("local.{stripped}")
 }
 
+/// Write a composed skill **directly to the live tree** (admin/granted authoring,
+/// T1d — not via staging, since the author IS the approver). `owner = None`
+/// writes a global skill `<skills_dir>/<id>/`; `Some(uid)` writes a user-scoped
+/// one under `users/<uid>/<id>/`. `prompt` (when present) becomes `prompts/main.md`.
+/// Refuses to overwrite an existing skill of the same id. Returns the live dir;
+/// the caller instance-signs + reloads.
+pub fn author_live(
+    skills_dir: &Path,
+    owner: Option<&str>,
+    id: &str,
+    toml_text: &str,
+    prompt: Option<&str>,
+) -> Result<PathBuf, MiraError> {
+    if !safe_segment(id) || owner.is_some_and(|o| !safe_segment(o)) {
+        return Err(MiraError::ToolError("unsafe skill owner/id".into()));
+    }
+    let dir = match owner {
+        Some(uid) => live_root(skills_dir, uid).join(id),
+        None       => skills_dir.join(id),
+    };
+    if dir.exists() {
+        return Err(MiraError::ToolError(format!("a skill {id:?} already exists")));
+    }
+    let prompts = dir.join("prompts");
+    std::fs::create_dir_all(&prompts)
+        .map_err(|e| MiraError::ToolError(format!("author {}: {e}", prompts.display())))?;
+    std::fs::write(dir.join("skill.toml"), toml_text)
+        .map_err(|e| MiraError::ToolError(format!("author skill.toml: {e}")))?;
+    if let Some(p) = prompt {
+        std::fs::write(prompts.join("main.md"), p)
+            .map_err(|e| MiraError::ToolError(format!("author prompt: {e}")))?;
+    }
+    Ok(dir)
+}
+
 /// Discard a staged proposal.
 pub fn reject(skills_dir: &Path, owner: &str, id: &str) -> Result<(), MiraError> {
     if !safe_segment(owner) || !safe_segment(id) {

@@ -103,6 +103,22 @@ pub struct Permissions {
     pub max_llm_spend_per_invocation_usd: Option<f64>,
 }
 
+impl Permissions {
+    /// True when the Skill requests a genuinely side-effecting capability —
+    /// network egress, filesystem, subprocess, or secrets. This is the
+    /// Tier-1/Tier-2 boundary. `llm_providers` (which model) and
+    /// `max_llm_spend_per_invocation_usd` (a budget cap) are deliberately
+    /// excluded: they constrain rather than grant, so a prompt- or builtin-only
+    /// skill that names a provider stays Tier-0/1.
+    pub fn declares_side_effects(&self) -> bool {
+        !self.network_egress.is_empty()
+            || !self.filesystem.is_empty()
+            || self.subprocess
+            || !self.subprocess_allowlist.is_empty()
+            || !self.secrets.is_empty()
+    }
+}
+
 /// One tool exposed to the agent. The map key (in `[tools]`) is the
 /// name the LLM sees; this struct describes how to invoke it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,6 +276,24 @@ impl SkillManifest {
     /// validation — call `validate` for that.
     pub fn parse(toml_text: &str) -> Result<Self, ManifestError> {
         toml::from_str(toml_text).map_err(ManifestError::Parse)
+    }
+
+    /// The skill authoring tier (0..3), derived from what the manifest actually
+    /// contains — the max over its tools/permissions, so it can't under-declare.
+    /// 0 = guidance (prompt tools only, no side-effecting permissions); 1 =
+    /// reuse (≥1 `builtin` tool, no side-effects/executable); 2 = capability
+    /// (declares egress/fs/subprocess/secrets); 3 = procedure (ships an
+    /// `executable`). `llm_providers`/spend caps don't raise the tier.
+    pub fn authoring_tier(&self) -> u8 {
+        if self.tools.values().any(|t| matches!(t, ToolSpec::Executable { .. })) {
+            3
+        } else if self.permissions.declares_side_effects() {
+            2
+        } else if self.tools.values().any(|t| matches!(t, ToolSpec::Builtin { .. })) {
+            1
+        } else {
+            0
+        }
     }
 
     /// Validate the manifest beyond what serde/toml enforces. Returns the
@@ -421,6 +455,27 @@ description = "The smallest valid skill."
         assert!(m.tools.is_empty());
         assert!(m.permissions.network_egress.is_empty());
         m.validate().expect("valid");
+    }
+
+    #[test]
+    fn authoring_tier_is_derived_from_contents() {
+        let base = "[skill]\nid=\"com.example.t\"\nversion=\"1.0.0\"\ndisplay_name=\"T\"\ndescription=\"d\"\n";
+        // Tier 0: prompt only, empty permissions.
+        let t0 = SkillManifest::parse(&format!("{base}\n[tools.g]\nkind=\"prompt\"\ntemplate=\"p.md\"\n")).unwrap();
+        assert_eq!(t0.authoring_tier(), 0);
+        // Tier 1: re-exposes a builtin, no permissions.
+        let t1 = SkillManifest::parse(&format!("{base}\n[tools.r]\nkind=\"builtin\"\nimpl=\"web_search\"\n")).unwrap();
+        assert_eq!(t1.authoring_tier(), 1);
+        // Tier 2: declares a permission (even with only a prompt tool).
+        let t2 = SkillManifest::parse(&format!("{base}\n[permissions]\nnetwork_egress=[\"https://x.example\"]\n[tools.g]\nkind=\"prompt\"\ntemplate=\"p.md\"\n")).unwrap();
+        assert_eq!(t2.authoring_tier(), 2);
+        // Tier 3: ships an executable (wins over everything).
+        let t3 = SkillManifest::parse(&format!("{base}\n[tools.x]\nkind=\"executable\"\npath=\"run.sh\"\n")).unwrap();
+        assert_eq!(t3.authoring_tier(), 3);
+        // llm_providers + spend cap are benign: a prompt-only skill that names a
+        // provider stays Tier-0 (they constrain, not grant).
+        let benign = SkillManifest::parse(&format!("{base}\n[permissions]\nllm_providers=[\"primary\"]\nmax_llm_spend_per_invocation_usd=0.5\n[tools.g]\nkind=\"prompt\"\ntemplate=\"p.md\"\n")).unwrap();
+        assert_eq!(benign.authoring_tier(), 0);
     }
 
     #[test]
