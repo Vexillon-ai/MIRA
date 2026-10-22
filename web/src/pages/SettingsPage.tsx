@@ -1866,6 +1866,15 @@ function SkillsTab({
           />
         </Field>
         <Field
+          label="Offer on a repeated task (opt-in)"
+          desc="Off by default. When on, MIRA may also offer once to save a skill if it notices the user asking for the same kind of task more than once — one offer per pattern, never nagging."
+        >
+          <Toggle
+            value={bool('agent.skill_authoring.propose_on_repetition', false)}
+            onChange={(v) => set('agent.skill_authoring.propose_on_repetition', v)}
+          />
+        </Field>
+        <Field
           label="Default scope"
           desc="Where a newly-authored skill lives. 'User' keeps it private to its author (recommended — contains a bad skill's blast radius). 'Global' makes it instance-wide; an admin can still promote a user skill later from the Skills page."
         >

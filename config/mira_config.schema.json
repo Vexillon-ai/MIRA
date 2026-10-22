@@ -1424,6 +1424,10 @@
               "description": "Let MIRA offer to save a skill once, inline, after completing a non-trivial reusable task. Off = authoring only when the user explicitly asks. Default true.",
               "type": "boolean"
             },
+            "propose_on_repetition": {
+              "description": "Opt-in: also let MIRA offer to save a skill when it notices the user asking for the same kind of task more than once. Off by default. One offer per pattern, decline-able.",
+              "type": "boolean"
+            },
             "default_scope": {
               "description": "Default scope for a newly authored skill: 'user' (private to the author) or 'global' (all users; still requires admin promotion to publish). Default 'user'.",
               "type": "string",

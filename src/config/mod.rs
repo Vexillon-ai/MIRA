@@ -4035,6 +4035,13 @@ pub struct SkillAuthoringConfig {
     #[serde(default = "default_true")]
     pub propose_on_task_completion: bool,
 
+    /// Opt-in: also let MIRA offer to save a skill when it notices the user has
+    /// asked for the same kind of task more than once. Off by default
+    /// (repetition nudges are the easiest way to become annoying); when on, it's
+    /// still a once-per-pattern, inline offer the user can decline.
+    #[serde(default)]
+    pub propose_on_repetition: bool,
+
     /// Default scope for a newly authored skill: "user" (private to the author)
     /// or "global" (all users — still requires admin promotion to publish).
     /// Default "user".
@@ -4048,6 +4055,7 @@ impl Default for SkillAuthoringConfig {
             enabled: true,
             auto_approve_tier0: true,
             propose_on_task_completion: true,
+            propose_on_repetition: false,
             default_scope: default_skill_scope(),
         }
     }

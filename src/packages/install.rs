@@ -222,8 +222,9 @@ pub fn install_package(
                 // create_or_replace (not create): a package install is a
                 // reinstall when a prior install left this admin's (user,name)
                 // mcp_server row behind, so reuse it instead of failing on the
-                // UNIQUE(user_id, name) constraint.
-                match mcp_store.create_or_replace(admin_id, new) {
+                // UNIQUE(user_id, name) constraint. Tag it with the package id so
+                // uninstall reverses every installer's row.
+                match mcp_store.create_or_replace(admin_id, new, Some(&m.id)) {
                     Ok(row) => {
                         ledger.push(LedgerEntry::McpServer { id: row.id.clone() });
                         mcp_ids.push(row.id);
@@ -738,6 +739,15 @@ pub fn reverse_ledger(
                 let _ = fs::remove_dir_all(dir);
             }
         }
+    }
+    // Instance-scoped teardown: remove ANY mcp_servers row tagged with this
+    // package id — covers rows other admins' installs created that the ledger
+    // (keyed to the last installer) wouldn't reverse. User-created rows
+    // (package_id NULL) are untouched.
+    match mcp_store.delete_by_package(package_id) {
+        Ok(n) if n > 0 => tracing::info!("uninstall {package_id}: removed {n} package-owned mcp_server row(s)"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("uninstall {package_id}: delete_by_package failed: {e}"),
     }
     removed
 }

@@ -242,6 +242,17 @@ impl McpServerStore {
         )
         .map_err(|e| MiraError::DatabaseError(format!("mcp_servers migration failed: {e}")))?;
 
+        // Additive migration: tag rows a package installed with the package id,
+        // so an uninstall reverses EVERY installer's row (installed_packages is
+        // one global row per package, but each install made a per-admin
+        // mcp_servers row — the old ledger only reversed the last). NULL = a
+        // user-created server. Tolerate the column already existing.
+        match conn.execute("ALTER TABLE mcp_servers ADD COLUMN package_id TEXT", []) {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("duplicate column") => {}
+            Err(e) => return Err(MiraError::DatabaseError(format!("mcp_servers add package_id: {e}"))),
+        }
+
         let key_path = path.parent().unwrap_or_else(|| Path::new(".")).join("master.key");
         let key = crate::skills::secrets::load_or_create_master_key(&key_path)
             .map_err(|e| MiraError::DatabaseError(format!("mcp master key: {e}")))?;
@@ -447,7 +458,12 @@ impl McpServerStore {
     /// (`installed_packages` is one global row per package, but each install
     /// creates a per-installer `mcp_servers` row) — succeeds as a reinstall
     /// rather than failing with a UNIQUE conflict.
-    pub fn create_or_replace(&self, user_id: &str, new: NewMcpServer) -> Result<McpServerRow, MiraError> {
+    pub fn create_or_replace(
+        &self,
+        user_id: &str,
+        new: NewMcpServer,
+        package_id: Option<&str>,
+    ) -> Result<McpServerRow, MiraError> {
         let now = Self::now_ms();
         let mut cfg = McpServerConfig {
             name:      new.name.clone(),
@@ -483,9 +499,10 @@ impl McpServerStore {
                 let config_json = self.config_json(&id, &cfg)?;
                 let conn = self.conn.lock().unwrap();
                 conn.execute(
-                    "UPDATE mcp_servers SET transport = ?1, enabled = ?2, config_json = ?3, updated_at = ?4
-                     WHERE id = ?5",
-                    params![new.transport, en, config_json, now, id],
+                    "UPDATE mcp_servers SET transport = ?1, enabled = ?2, config_json = ?3, updated_at = ?4,
+                        package_id = ?5
+                     WHERE id = ?6",
+                    params![new.transport, en, config_json, now, package_id, id],
                 )
                 .map_err(|e| MiraError::DatabaseError(format!("update mcp_server: {e}")))?;
                 Ok(McpServerRow {
@@ -499,9 +516,9 @@ impl McpServerStore {
                 let conn = self.conn.lock().unwrap();
                 conn.execute(
                     "INSERT INTO mcp_servers
-                       (id, user_id, name, transport, enabled, config_json, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-                    params![id, user_id, new.name, new.transport, en, config_json, now],
+                       (id, user_id, name, transport, enabled, config_json, created_at, updated_at, package_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
+                    params![id, user_id, new.name, new.transport, en, config_json, now, package_id],
                 )
                 .map_err(|e| MiraError::DatabaseError(format!("create mcp_server: {e}")))?;
                 Ok(McpServerRow {
@@ -692,6 +709,17 @@ impl McpServerStore {
             return Err(MiraError::NotFound(format!("mcp_server not found: {id}")));
         }
         Ok(())
+    }
+
+    /// Delete every `mcp_servers` row a package installed (across all installers),
+    /// so an uninstall fully reverses even when several admins installed the same
+    /// package. Returns the number removed. User-created rows (package_id NULL)
+    /// are never touched.
+    pub fn delete_by_package(&self, package_id: &str) -> Result<usize, MiraError> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute("DELETE FROM mcp_servers WHERE package_id = ?1", params![package_id])
+            .map_err(|e| MiraError::DatabaseError(e.to_string()))?;
+        Ok(n)
     }
 }
 
@@ -1077,16 +1105,36 @@ mod tests {
         let mut first = new_server(Some("synthetic-operator-token"));
         first.env.insert("OPERATOR_KEY".to_owned(), "operator-value".to_owned());
         first.env.insert("SHARED_KEY".to_owned(), "original".to_owned());
-        store.create_or_replace("synthetic-user", first).unwrap();
+        store.create_or_replace("synthetic-user", first, None).unwrap();
 
         // Reinstall: spec carries no token, overrides SHARED_KEY, omits OPERATOR_KEY.
         let mut reinstall = new_server(None);
         reinstall.env.insert("SHARED_KEY".to_owned(), "from-spec".to_owned());
-        let row = store.create_or_replace("synthetic-user", reinstall).unwrap();
+        let row = store.create_or_replace("synthetic-user", reinstall, None).unwrap();
 
         let cfg = store.config_for_row(&row).unwrap();
         assert_eq!(cfg.auth_token.as_deref(), Some("synthetic-operator-token"), "token retained");
         assert_eq!(cfg.env.get("OPERATOR_KEY").map(String::as_str), Some("operator-value"), "user env retained");
         assert_eq!(cfg.env.get("SHARED_KEY").map(String::as_str), Some("from-spec"), "spec overrides shared key");
+    }
+
+    // #2 — package-tagged rows are reversed across installers by delete_by_package,
+    // while user-created (NULL package_id) rows are left alone.
+    #[test]
+    fn delete_by_package_removes_only_package_rows() {
+        let (store, _dir) = store();
+        // Two "installers" of the same package → two rows (different names here
+        // since this single test db has one user; the point is the package tag).
+        let mut a = new_server(None); a.name = "pkgsrv-a".into();
+        store.create_or_replace("synthetic-user", a, Some("ai.test.pkg")).unwrap();
+        let mut b = new_server(None); b.name = "pkgsrv-b".into();
+        store.create_or_replace("synthetic-user", b, Some("ai.test.pkg")).unwrap();
+        // A user-created server (no package).
+        store.create("synthetic-user", { let mut s = new_server(None); s.name = "manual".into(); s }).unwrap();
+
+        let removed = store.delete_by_package("ai.test.pkg").unwrap();
+        assert_eq!(removed, 2, "both package rows removed");
+        let left: Vec<_> = store.list_for_user("synthetic-user").unwrap().into_iter().map(|r| r.name).collect();
+        assert_eq!(left, vec!["manual".to_string()], "user-created row untouched");
     }
 }

@@ -82,6 +82,9 @@ function EditorForm({
   const [sessionBudget, setSessionBudget] = useState(initial.session_budget_usd?.toString() ?? '')
   // Skill self-authoring: default allowed (Tier-0) unless explicitly denied.
   const [allowAuthoring, setAllowAuthoring] = useState(initial.skill_authoring?.enabled ?? true)
+  // Max authoring tier this profile grants: 0 = guidance only (default),
+  // 1 = may also author skills that re-expose existing tools.
+  const [maxTier, setMaxTier] = useState(initial.skill_authoring?.max_tier ?? 0)
   const [error, setError] = useState('')
 
   const saveMut = useMutation({
@@ -103,17 +106,23 @@ function EditorForm({
     if (!Number.isNaN(tb)) p.max_task_budget_usd = tb
     const sb = parseFloat(sessionBudget)
     if (!Number.isNaN(sb)) p.session_budget_usd = sb
-    // Only persist a skill_authoring block when DENYING (unchecked); leaving it
-    // unset keeps the default (authoring allowed, Tier-0).
+    // Persist a skill_authoring block when DENYING, or when GRANTING a tier
+    // above the default (0). Leaving it unset keeps the default (allowed, Tier-0).
     if (!allowAuthoring) {
       p.skill_authoring = { enabled: false, max_tier: 0, allow_global_propose: false }
+    } else if (maxTier > 0) {
+      p.skill_authoring = {
+        enabled: true,
+        max_tier: maxTier,
+        allow_global_propose: initial.skill_authoring?.allow_global_propose ?? false,
+      }
     }
     return p
   }
 
   const unrestricted =
     !Object.values(restrict).some(Boolean) && !taskBudget.trim()
-    && !sessionBudget.trim() && allowAuthoring
+    && !sessionBudget.trim() && allowAuthoring && maxTier === 0
 
   return (
     <div className={styles.body}>
@@ -179,6 +188,26 @@ function EditorForm({
         {!allowAuthoring && (
           <p className={styles.note}>
             This user/group won’t be offered <code>propose_skill</code> and can’t save skills.
+          </p>
+        )}
+        {allowAuthoring && (
+          <label className={styles.axisHead} style={{ marginTop: 8 }}>
+            <span>Max authoring tier</span>
+            <select
+              className={styles.input}
+              value={maxTier}
+              onChange={(e) => setMaxTier(Number(e.target.value))}
+              style={{ width: 'auto' }}
+            >
+              <option value={0}>0 — guidance only (default)</option>
+              <option value={1}>1 — may re-expose existing tools</option>
+            </select>
+          </label>
+        )}
+        {allowAuthoring && maxTier >= 1 && (
+          <p className={styles.note}>
+            Tier-1 lets them author skills that re-expose tools — a re-exposed tool still
+            only runs for a user whose own permissions allow it.
           </p>
         )}
       </div>

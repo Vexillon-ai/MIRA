@@ -314,6 +314,7 @@ _Agent reasoning and tool-calling behaviour._
 - **`agent.skill_authoring.enabled`** (boolean) — Master switch for skill self-authoring. Default true.
 - **`agent.skill_authoring.auto_approve_tier0`** (boolean) — Auto-approve newly proposed Tier-0 (guidance-only) skills so they go live immediately (still surfaced, one-tap disable) instead of waiting for review. Tier-0 grants no capability, so there is no capability risk. Default true; set false for always-ask.
 - **`agent.skill_authoring.propose_on_task_completion`** (boolean) — Let MIRA offer to save a skill once, inline, after completing a non-trivial reusable task. Off = authoring only when the user explicitly asks. Default true.
+- **`agent.skill_authoring.propose_on_repetition`** (boolean) — Opt-in: also let MIRA offer to save a skill when it notices the user asking for the same kind of task more than once. Off by default. One offer per pattern, decline-able.
 - **`agent.skill_authoring.default_scope`** (string; one of: `user`, `global`) — Default scope for a newly authored skill: 'user' (private to the author) or 'global' (all users; still requires admin promotion to publish). Default 'user'.
 - **`agent.avatar`** (string) — Assistant avatar. Encoded as 'preset:<key>' for bundled icons, or 'upload:<ext>' when a file exists at {data_dir}/avatars/agent.{ext}. Null = built-in MIRA logo.
 - **`agent.avatar_updated_at`** (integer) — Unix-ms timestamp of the last avatar change. Used as a cache-buster on the web client.

@@ -1057,10 +1057,15 @@ impl AgentCore {
                 " You may also offer once, briefly, right after completing a \
                  non-trivial, reusable task — never repeatedly."
             } else { "" };
+            let repetition = if sa.propose_on_repetition {
+                " If you notice the user has asked for the same kind of task more than \
+                 once, you may offer once to save it as a skill — one offer per pattern, \
+                 never nagging."
+            } else { "" };
             format!(
                 "{effective_system}\n\nWhen the user asks you to remember or save how to do \
                  something as a reusable skill, use the `propose_skill` tool to save a short \
-                 guidance skill (a name, a one-line when-to-use, and the instructions).{offer} \
+                 guidance skill (a name, a one-line when-to-use, and the instructions).{offer}{repetition} \
                  These are guidance only — they add no new tools, network, files, or permissions.",
             )
         } else {
