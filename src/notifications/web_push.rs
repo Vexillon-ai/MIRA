@@ -5,9 +5,13 @@
 //!
 //! Lets users opt in to browser/phone push notifications so companion
 //! check-ins reach them without an open browser tab or the messenger
-//! app. Uses [`web-push-native`] for the http-ece + VAPID work; the
-//! actual HTTP POST goes through our shared `reqwest` client so we
-//! stay on `rustls-tls` (no openssl dependency drag).
+//! app. The RFC 8291 payload encryption (ECDH + HKDF-SHA256 + aes128gcm
+//! via `ece-native`) and the RFC 8292 VAPID JWT (ES256 over `p256`) are
+//! done here directly — we used to pull `web-push-native`, but it forced
+//! `jwt-simple -> superboring` and a cluster of vulnerable/yanked crypto
+//! crates (incl. `rsa` RUSTSEC-2023-0071 with no fix). The actual HTTP POST
+//! goes through our shared `reqwest` client so we stay on `rustls-tls` (no
+//! openssl dependency drag).
 //!
 //! Lifecycle:
 //! 1. Server boot — `WebPushService::open` loads or generates a VAPID
@@ -25,15 +29,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::{engine::general_purpose, Engine as _};
+use p256::ecdsa::SigningKey;
 use p256::PublicKey;
 use rusqlite::{params, Connection};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, info, warn};
-// `jwt_simple` is re-exported from web-push-native so we don't have to
-// take a direct dep on it (the crate's API depends on these exact
-// version-pinned types — going through the re-export keeps us in lockstep).
-use web_push_native::jwt_simple::algorithms::{ECDSAP256KeyPairLike, ES256KeyPair};
-use web_push_native::{Auth, WebPushBuilder};
 
 use crate::notifications::{NotificationBus, NotificationEnvelope};
 use crate::MiraError;
@@ -49,6 +49,13 @@ const VAPID_KEY_FILENAME: &str = "web_push_vapid.key";
 /// pin a sensible default.
 const VAPID_CONTACT: &str = "mailto:admin@mira.local";
 
+/// `TTL` header (seconds) a push service should hold an undelivered message.
+const VAPID_TTL_SECS: u64 = 12 * 60 * 60;
+
+/// VAPID JWT `exp` lifetime from now. Kept well under the RFC 8292 24h cap so a
+/// little clock skew can't push it over and get the token rejected.
+const VAPID_JWT_EXP_SECS: u64 = 12 * 60 * 60;
+
 // ── Service ──────────────────────────────────────────────────────────────────
 
 /// The proactive-notification dispatcher. Despite the historical name, this
@@ -61,7 +68,9 @@ const VAPID_CONTACT: &str = "mailto:admin@mira.local";
 /// sites stay put.)
 #[derive(Clone)]
 pub struct WebPushService {
-    keypair: Arc<ES256KeyPair>,
+    /// The VAPID (application-server) P-256 signing key. We sign the RFC 8292
+    /// JWT ourselves with this rather than delegating to a JWT crate.
+    keypair: Arc<SigningKey>,
     store:   Arc<WebPushStore>,
     http:    reqwest::Client,
     /// Optional FCM transport — `None` when `notifications.fcm.enabled=false`.
@@ -91,11 +100,9 @@ impl WebPushService {
     /// encoded. The browser passes this as `applicationServerKey` to
     /// `PushManager.subscribe()`.
     pub fn vapid_public_key_b64url(&self) -> String {
-        // ES256KeyPair → P256KeyPair → P256PublicKey carries
-        // `to_bytes_uncompressed` (the SEC1 form the W3C Push API
-        // expects as `applicationServerKey`).
-        let bytes = self.keypair.key_pair().public_key().to_bytes_uncompressed();
-        general_purpose::URL_SAFE_NO_PAD.encode(&bytes)
+        // Uncompressed SEC1 point (65 bytes) — the form the W3C Push API
+        // expects as `applicationServerKey`.
+        general_purpose::URL_SAFE_NO_PAD.encode(vapid_public_key_bytes(&self.keypair))
     }
 
     /// Persist a new subscription. Endpoint uniqueness is enforced at
@@ -243,27 +250,26 @@ impl WebPushService {
                 "auth must be 16 bytes, got {}", auth_bytes.len()
             )));
         }
-        let ua_auth = Auth::clone_from_slice(&auth_bytes);
 
-        let request = WebPushBuilder::new(endpoint.clone(), ua_pub, ua_auth)
-            .with_vapid(self.keypair.as_ref(), VAPID_CONTACT)
-            .build(body.to_vec())
-            .map_err(|e| WebPushSendError::Other(format!("build: {e}")))?;
+        // RFC 8291 payload encryption (aes128gcm). Formerly web-push-native's
+        // `.build()`; ported here to drop the jwt-simple/superboring crypto drag.
+        let payload = ece::encrypt(body, &ua_pub, &auth_bytes)
+            .map_err(|e| WebPushSendError::Other(format!("encrypt: {e}")))?;
+        // RFC 8292 VAPID `Authorization: vapid t=<jwt>, k=<pubkey>` — signed
+        // with our own P-256 key (formerly `.with_vapid()`).
+        let vapid = vapid_authorization(&self.keypair, &endpoint, VAPID_CONTACT)
+            .map_err(|e| WebPushSendError::Other(format!("vapid: {e}")))?;
 
-        // The web-push-native crate returns an `http::Request` — convert
-        // to a reqwest call so we stay on the project's existing TLS
-        // stack (rustls) rather than pulling in isahc / hyper-tls.
-        let (parts, payload) = request.into_parts();
-        let mut req = self.http.request(
-            reqwest::Method::POST,
-            parts.uri.to_string(),
-        ).body(payload);
-        for (name, value) in parts.headers.iter() {
-            if let Ok(v) = value.to_str() {
-                req = req.header(name.as_str(), v);
-            }
-        }
-        let resp = req.send().await
+        // POST through the project's shared reqwest client so we stay on the
+        // existing rustls TLS stack (no isahc / hyper-tls / openssl drag).
+        let resp = self.http
+            .request(reqwest::Method::POST, endpoint.to_string())
+            .header("TTL", VAPID_TTL_SECS)
+            .header(reqwest::header::CONTENT_ENCODING, "aes128gcm")
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .header(reqwest::header::AUTHORIZATION, vapid)
+            .body(payload)
+            .send().await
             // `without_url()` keeps the FCM endpoint URL — which embeds the
             // browser's push-subscription token — out of the logged error.
             .map_err(|e| WebPushSendError::Other(format!("send: {}", e.without_url())))?;
@@ -582,14 +588,21 @@ impl WebPushStore {
 
 // ── Keypair persistence ──────────────────────────────────────────────────────
 
-/// Load the VAPID keypair from disk; mint a fresh one if the file
-/// doesn't exist yet. Stored as raw 32-byte private scalar so we don't
-/// drag in PEM encode/decode for jwt_simple's flavour.
-fn load_or_create_keypair(path: &Path) -> Result<ES256KeyPair, MiraError> {
+/// Load the VAPID keypair from disk; mint a fresh one if the file doesn't
+/// exist yet. Stored as the raw 32-byte P-256 private scalar — the exact
+/// representation jwt-simple's `ES256KeyPair::to_bytes()` wrote before this
+/// crate switched to signing with `p256` directly (both are
+/// `p256::ecdsa::SigningKey::{to,from}_bytes`), so an existing key file keeps
+/// the same keypair and browser subscriptions stay valid across the upgrade.
+fn load_or_create_keypair(path: &Path) -> Result<SigningKey, MiraError> {
     if path.exists() {
         let raw = std::fs::read(path)
             .map_err(|e| MiraError::ConfigError(format!("vapid key read: {e}")))?;
-        return ES256KeyPair::from_bytes(&raw)
+        let bytes: [u8; 32] = raw.as_slice().try_into()
+            .map_err(|_| MiraError::ConfigError(format!(
+                "vapid key parse: expected 32-byte P-256 scalar, got {} bytes", raw.len()
+            )))?;
+        return SigningKey::from_bytes(&bytes.into())
             .map_err(|e| MiraError::ConfigError(format!("vapid key parse: {e}")));
     }
     info!("Minting fresh VAPID keypair at {}", path.display());
@@ -597,7 +610,8 @@ fn load_or_create_keypair(path: &Path) -> Result<ES256KeyPair, MiraError> {
         std::fs::create_dir_all(parent)
             .map_err(|e| MiraError::ConfigError(format!("vapid keypair dir: {e}")))?;
     }
-    let kp = ES256KeyPair::generate();
+    let kp = SigningKey::from_bytes(&random_scalar_bytes().into())
+        .expect("random_scalar_bytes always yields a valid P-256 scalar");
     std::fs::write(path, kp.to_bytes())
         .map_err(|e| MiraError::ConfigError(format!("vapid key write: {e}")))?;
     // Restrict to owner-read on unix so the private key isn't
@@ -608,6 +622,187 @@ fn load_or_create_keypair(path: &Path) -> Result<ES256KeyPair, MiraError> {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(kp)
+}
+
+/// 32 bytes from the OS CSPRNG that form a valid non-zero P-256 scalar.
+/// Rejection-samples (an invalid draw — zero or ≥ group order — is ~2⁻³²) so
+/// callers can build a key infallibly. Panics only if the OS RNG is
+/// unavailable, which isn't recoverable.
+fn random_scalar_bytes() -> [u8; 32] {
+    loop {
+        let mut b = [0u8; 32];
+        getrandom::fill(&mut b).expect("OS RNG unavailable");
+        if p256::SecretKey::from_slice(&b).is_ok() {
+            return b;
+        }
+    }
+}
+
+/// Uncompressed SEC1 bytes (65) of the VAPID public key. NistP256 sets
+/// `COMPRESS_POINTS = false`, so `to_sec1_bytes` yields the uncompressed form.
+fn vapid_public_key_bytes(key: &SigningKey) -> Vec<u8> {
+    key.verifying_key().to_sec1_bytes().into_vec()
+}
+
+/// Build the RFC 8292 `Authorization: vapid t=<jwt>, k=<pubkey>` header value.
+/// `aud` is the scheme+authority of the push endpoint; `exp` is capped well
+/// under the 24h VAPID maximum.
+fn vapid_authorization(
+    key: &SigningKey,
+    endpoint: &http::Uri,
+    contact: &str,
+) -> Result<String, String> {
+    // `aud` is the endpoint origin: scheme + host, no port — matching the
+    // behaviour push services were already validated against.
+    let scheme = endpoint.scheme_str().ok_or("endpoint missing scheme")?;
+    let host = endpoint.host().ok_or("endpoint missing host")?;
+    let aud = format!("{scheme}://{host}");
+    let exp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs() + VAPID_JWT_EXP_SECS;
+
+    let jwt = es256_jwt(key, &aud, contact, exp)?;
+    let k = general_purpose::URL_SAFE_NO_PAD.encode(vapid_public_key_bytes(key));
+    Ok(format!("vapid t={jwt}, k={k}"))
+}
+
+/// Sign a minimal ES256 JWT (`{aud, exp, sub}`) with the P-256 key. Produces
+/// the compact `b64url(header).b64url(claims).b64url(r||s)` form push services
+/// expect for VAPID.
+fn es256_jwt(key: &SigningKey, aud: &str, sub: &str, exp: u64) -> Result<String, String> {
+    use p256::ecdsa::{signature::Signer, Signature};
+    let header = general_purpose::URL_SAFE_NO_PAD.encode(br#"{"typ":"JWT","alg":"ES256"}"#);
+    let claims_json = serde_json::json!({ "aud": aud, "exp": exp, "sub": sub }).to_string();
+    let claims = general_purpose::URL_SAFE_NO_PAD.encode(claims_json.as_bytes());
+    let signing_input = format!("{header}.{claims}");
+    // ECDSA/P-256 Signer hashes the message with SHA-256 (ES256) internally.
+    let sig: Signature = key.sign(signing_input.as_bytes());
+    let sig_b64 = general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
+    Ok(format!("{signing_input}.{sig_b64}"))
+}
+
+/// RFC 8291 webpush content encryption (aes128gcm), ported from the
+/// `web-push-native` crate (MIT/Apache-2.0) so we no longer depend on it or
+/// its jwt-simple/superboring crypto chain. Derives the content-encryption
+/// key via ECDH(as, ua) + HKDF-SHA256 keyed by the subscription `auth` secret,
+/// then emits a single ECE record with `ece-native`.
+mod ece {
+    use super::random_scalar_bytes;
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+
+    /// Encrypt `message` for a subscription's user-agent public key + auth
+    /// secret. `ua_auth` must be the 16-byte auth secret.
+    pub(super) fn encrypt(
+        message: &[u8],
+        ua_public: &p256::PublicKey,
+        ua_auth: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let mut salt = [0u8; 16];
+        getrandom::fill(&mut salt).map_err(|e| format!("OS RNG: {e}"))?;
+        let as_secret = p256::SecretKey::from_slice(&random_scalar_bytes())
+            .expect("random_scalar_bytes always yields a valid P-256 scalar");
+        encrypt_with(salt, &as_secret, message, ua_public, ua_auth)
+    }
+
+    /// Deterministic core of [`encrypt`] with the salt + ephemeral server key
+    /// injected, so the RFC 8291 known-answer vector can exercise it. Split out
+    /// (rather than inlined) purely to keep that test possible.
+    fn encrypt_with(
+        salt: [u8; 16],
+        as_secret: &p256::SecretKey,
+        message: &[u8],
+        ua_public: &p256::PublicKey,
+        ua_auth: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let as_public = as_secret.public_key();
+        let shared = p256::ecdh::diffie_hellman(
+            as_secret.to_nonzero_scalar(),
+            ua_public.as_affine(),
+        );
+        let ikm = compute_ikm(ua_auth, &shared, ua_public, &as_public);
+        // The ECE keyid is the ephemeral public key (uncompressed SEC1).
+        let keyid = as_public.to_sec1_bytes();
+        let record_len: u32 = (message.len() + 17)
+            .try_into()
+            .map_err(|_| "message too long".to_string())?;
+        ece_native::encrypt(
+            ikm,
+            salt,
+            keyid,
+            Some(message.to_vec()).into_iter(),
+            record_len,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// The RFC 8291 "WebPush: info" HKDF derivation of the input keying
+    /// material (verbatim port, so behaviour matches the prior crate exactly).
+    fn compute_ikm(
+        auth: &[u8],
+        shared: &p256::ecdh::SharedSecret,
+        ua_public: &p256::PublicKey,
+        as_public: &p256::PublicKey,
+    ) -> [u8; 32] {
+        let mut info = Vec::new();
+        info.extend_from_slice(&b"WebPush: info"[..]);
+        info.push(0u8);
+        info.extend_from_slice(&ua_public.to_sec1_bytes());
+        info.extend_from_slice(&as_public.to_sec1_bytes());
+
+        let mut okm = [0u8; 32];
+        let hk = Hkdf::<Sha256>::new(Some(auth), shared.raw_secret_bytes().as_ref());
+        hk.expand(&info, &mut okm)
+            .expect("okm length is always 32 bytes, cannot be too large");
+        okm
+    }
+
+    /// Known-answer tests against the worked example in RFC 8291 §5. These pin
+    /// our ported key-derivation + ECE encryption to the standard's published
+    /// vector byte-for-byte, so the hand-rolled path is provably interoperable
+    /// with what push services expect (same output the old crate produced).
+    #[cfg(test)]
+    mod rfc8291 {
+        use super::*;
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+        fn d(s: &str) -> Vec<u8> { URL_SAFE_NO_PAD.decode(s).unwrap() }
+
+        const PLAINTEXT: &[u8] = b"When I grow up, I want to be a watermelon";
+
+        #[test]
+        fn ikm_derivation_matches_rfc_vector() {
+            let auth = d("BTBZMqHH6r4Tts7J_aSIgg");
+            let ua_public = p256::PublicKey::from_sec1_bytes(&d(
+                "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4")).unwrap();
+            let as_private = p256::SecretKey::from_slice(&d(
+                "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw")).unwrap();
+            let as_public = p256::PublicKey::from_sec1_bytes(&d(
+                "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8")).unwrap();
+            let shared = p256::ecdh::diffie_hellman(
+                as_private.to_nonzero_scalar(), ua_public.as_affine());
+            assert_eq!(shared.raw_secret_bytes().as_slice(),
+                       d("kyrL1jIIOHEzg3sM2ZWRHDRB62YACZhhSlknJ672kSs").as_slice());
+            let ikm = compute_ikm(&auth, &shared, &ua_public, &as_public);
+            assert_eq!(&ikm, d("S4lYMb_L0FxCeq0WhDx813KgSYqU26kOyzWUdsXYyrg").as_slice());
+        }
+
+        #[test]
+        fn encryption_matches_rfc_vector() {
+            let auth = d("BTBZMqHH6r4Tts7J_aSIgg");
+            let ua_public = p256::PublicKey::from_sec1_bytes(&d(
+                "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4")).unwrap();
+            let as_private = p256::SecretKey::from_slice(&d(
+                "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw")).unwrap();
+            let salt: [u8; 16] = d("DGv6ra1nlYgDCS1FRnbzlw").try_into().unwrap();
+            let ciphertext = encrypt_with(salt, &as_private, PLAINTEXT, &ua_public, &auth).unwrap();
+            let expected = d("DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN");
+            // Compare from byte 21 on: the header's salt + keyid are
+            // deterministic here, but this slice is the aes128gcm record.
+            assert_eq!(&ciphertext[21..], &expected[21..]);
+        }
+    }
 }
 
 // ── Helpers re-exported for the HTTP layer ───────────────────────────────────
@@ -633,6 +828,51 @@ mod tests {
         // Reopening reuses the same keypair (subscriptions don't churn).
         let svc2 = WebPushService::open(dir.path(), &dir.path().join("wp.db"), None).unwrap();
         assert_eq!(pk, svc2.vapid_public_key_b64url());
+    }
+
+    #[test]
+    fn key_file_is_a_32_byte_scalar_and_roundtrips() {
+        // The on-disk format must stay the raw 32-byte P-256 scalar that
+        // jwt-simple wrote before the 0.360 crypto swap, so existing VAPID keys
+        // (and the browser subscriptions tied to their public key) survive the
+        // upgrade. Mint, reopen, and confirm the public key is identical.
+        let dir = tempdir().unwrap();
+        let keyfile = dir.path().join(VAPID_KEY_FILENAME);
+        let k1 = load_or_create_keypair(&keyfile).unwrap();
+        assert_eq!(std::fs::read(&keyfile).unwrap().len(), 32, "key must be a 32-byte scalar");
+        let k2 = load_or_create_keypair(&keyfile).unwrap();
+        assert_eq!(vapid_public_key_bytes(&k1), vapid_public_key_bytes(&k2));
+    }
+
+    #[test]
+    fn vapid_jwt_is_valid_es256_and_well_formed() {
+        use p256::ecdsa::{signature::Verifier, Signature};
+        let dir = tempdir().unwrap();
+        let key = load_or_create_keypair(&dir.path().join(VAPID_KEY_FILENAME)).unwrap();
+        let endpoint = "https://push.example.com/send/abc?x=1".parse::<http::Uri>().unwrap();
+        let header = vapid_authorization(&key, &endpoint, VAPID_CONTACT).unwrap();
+
+        // Shape: `vapid t=<jwt>, k=<pubkey>`.
+        let rest = header.strip_prefix("vapid t=").expect("vapid scheme prefix");
+        let (jwt, k) = rest.split_once(", k=").expect("t= and k= parts");
+        // k= is our uncompressed public key.
+        assert_eq!(k, general_purpose::URL_SAFE_NO_PAD.encode(vapid_public_key_bytes(&key)));
+
+        let parts: Vec<&str> = jwt.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT has header.claims.sig");
+        // Header + claims decode and carry the expected fields.
+        let hdr = String::from_utf8(general_purpose::URL_SAFE_NO_PAD.decode(parts[0]).unwrap()).unwrap();
+        assert!(hdr.contains("\"alg\":\"ES256\""));
+        let claims: serde_json::Value = serde_json::from_slice(
+            &general_purpose::URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+        assert_eq!(claims["aud"], "https://push.example.com");
+        assert_eq!(claims["sub"], VAPID_CONTACT);
+        assert!(claims["exp"].as_u64().unwrap() > 0);
+        // The signature verifies against our own public key over header.claims.
+        let sig = Signature::from_slice(
+            &general_purpose::URL_SAFE_NO_PAD.decode(parts[2]).unwrap()).unwrap();
+        let signing_input = format!("{}.{}", parts[0], parts[1]);
+        key.verifying_key().verify(signing_input.as_bytes(), &sig).expect("ES256 signature valid");
     }
 
     #[test]

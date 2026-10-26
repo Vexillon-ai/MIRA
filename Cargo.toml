@@ -2,7 +2,7 @@
 name = "mira"
 # First public release: 0.272.0 = "public beta 1" (tag v0.272.0; GitHub release
 # marked pre-release). Post-beta fixes continue from 0.272.1.
-version = "0.359.1"
+version = "0.359.2"
 edition = "2024"
 description = "Multi-tasking Intelligent Responsive Assistant - A personal AI agent framework"
 authors = ["Tarek El Diab"]
@@ -74,13 +74,23 @@ chrono-tz = "0.10"
 cron = "0.12"
 
 # Web Push (Q1.2) — VAPID-authenticated browser push notifications.
-# Pure-Rust; uses our existing reqwest stack for transport.
-web-push-native = "0.4"
-# RustCrypto p256 for VAPID keypair generation (host-side; signing done
-# by web-push-native via jwt-simple internally).
-p256 = { version = "0.13", features = ["pem", "pkcs8", "ecdh"] }
-# `http` types used by web-push-native; pulled in transitively via axum
-# but kept explicit so the re-exports we read against compile cleanly.
+# Pure-Rust; uses our existing reqwest stack for transport. We used to pull
+# `web-push-native` for this, but it forced `jwt-simple -> superboring`, which
+# dragged in a cluster of vulnerable/yanked crypto crates (rsa RUSTSEC-2023-0071
+# with no fix, crypto-bigint, ctutils, aes 0.9, der 0.8, spin). We now sign the
+# VAPID (RFC 8292) JWT ourselves with `p256` ECDSA and do the RFC 8291 payload
+# key derivation + ECE (RFC 8188) encryption with the modern RustCrypto stack,
+# so no part of the push path touches that cluster any more.
+# RustCrypto p256: VAPID keypair + ES256 signing (ecdsa) and the ECDH half of
+# the RFC 8291 content-encryption key derivation (ecdh).
+p256   = { version = "0.14", features = ["ecdsa", "ecdh"] }
+ece-native = "0.5"   # RFC 8188 Encrypted-Content-Encoding (aes128gcm records)
+hkdf   = "0.12"      # HKDF-SHA256 for the RFC 8291 webpush key derivation (pairs with sha2 0.10)
+# OS CSPRNG for VAPID keygen + per-message ephemeral keys. Used directly
+# (rand_core 0.10, p256 0.14's generation, no longer ships an OsRng), so we
+# draw raw bytes and build keys via `from_slice`, rejection-sampling scalars.
+getrandom = "0.3"
+# `http` types for building the push request before handing it to reqwest.
 http = "1"
 
 # Database (SQLite) - FTS5 enabled by default in SQLite
