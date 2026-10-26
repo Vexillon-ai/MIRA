@@ -45,9 +45,7 @@ pub async fn download_backup(
     // doesn't carry it (only what's *inside* the file), so we resolve
     // the same default the binary uses at boot — the operator can set
     // MIRA_CONFIG to override there too.
-    let config_path = std::env::var_os("MIRA_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(crate::config::default_config_path);
+    let config_path = crate::config::resolve_config_path(None);
 
     // Build the archive on a blocking pool — synchronous file +
     // sqlite I/O would otherwise stall the tokio runtime.

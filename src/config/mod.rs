@@ -4164,6 +4164,32 @@ pub fn data_dir_env_override() -> Option<PathBuf> {
         .map(|v| expand_path(&v))
 }
 
+// The `MIRA_CONFIG` runtime override — the config-file analogue of
+// `data_dir_env_override`. When set (and non-empty) it names the config file to
+// load; `~` is expanded. Set it directly, or indirectly via the global
+// `--config` flag (which `main` wires into this env so the Windows SCM service
+// re-entry and the pre-config restore swap see the same path). Previously only
+// the rollback / backup / Windows-service paths read this env directly, so the
+// main CLI load path silently ignored it and fell back to the default config —
+// starting the first-run wizard and writing a stray config (issue #14). This
+// function + `resolve_config_path` give one resolver for the whole binary.
+pub fn config_path_env_override() -> Option<PathBuf> {
+    std::env::var("MIRA_CONFIG")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|v| expand_path(&v))
+}
+
+/// Resolve the config path with a single precedence the whole binary shares:
+/// an explicit path (the `--config` flag) first, then the `MIRA_CONFIG` env
+/// override, then the built-in default. Mirrors how `data_dir_env_override`
+/// backs the data-dir resolution.
+pub fn resolve_config_path(override_path: Option<PathBuf>) -> PathBuf {
+    override_path
+        .or_else(config_path_env_override)
+        .unwrap_or_else(default_config_path)
+}
+
 /// Process-wide lock any test that sets/clears `MIRA_DATA_DIR` must hold for the
 /// duration of its env mutation. `MIRA_DATA_DIR` is global mutable state, and
 /// cargo runs tests in parallel threads within one process — without this, a
@@ -4228,7 +4254,8 @@ impl MiraConfig {
     //     // On first run the config is created from defaults. If a legacy
     // `~/.mira/config.toml` is found the user is offered a migration.
     pub fn load(override_path: Option<PathBuf>) -> Result<Self, MiraError> {
-        let config_path = override_path.unwrap_or_else(default_config_path);
+        // Precedence: `--config` > `MIRA_CONFIG` env > default path (issue #14).
+        let config_path = resolve_config_path(override_path);
 
         if config_path.exists() {
             Self::from_file(&config_path)
@@ -5683,6 +5710,34 @@ mod tests {
         // A non-~/.mira value (explicit custom path) is honored as-is regardless.
         assert_eq!(resolve_state_path("/var/log/mira.log"), PathBuf::from("/var/log/mira.log"));
         unsafe { std::env::remove_var("MIRA_DATA_DIR"); }
+    }
+
+    #[test]
+    fn config_path_resolver_honors_mira_config_env() {
+        let _env = ENV_TEST_LOCK.lock().unwrap();
+        // Issue #14: MIRA_CONFIG must be honored by the main config resolver the
+        // same way MIRA_DATA_DIR is — not only by the rollback/backup paths.
+        // Precedence: explicit (--config) > MIRA_CONFIG env > default path.
+        unsafe { std::env::remove_var("MIRA_CONFIG"); }
+        // No override, no env → the built-in default.
+        assert_eq!(config_path_env_override(), None);
+        assert_eq!(resolve_config_path(None), default_config_path());
+
+        // Env set → resolver uses it (with `~` expansion), where it previously
+        // fell through to the default and triggered the first-run wizard.
+        unsafe { std::env::set_var("MIRA_CONFIG", "~/custom/mira_config.json"); }
+        assert_eq!(config_path_env_override(), Some(expand_path("~/custom/mira_config.json")));
+        assert_eq!(resolve_config_path(None), expand_path("~/custom/mira_config.json"));
+
+        // An explicit path (the --config flag) still wins over the env.
+        let explicit = PathBuf::from("/etc/mira/mira_config.json");
+        assert_eq!(resolve_config_path(Some(explicit.clone())), explicit);
+
+        // Empty env is treated as unset (matches the data-dir resolver).
+        unsafe { std::env::set_var("MIRA_CONFIG", ""); }
+        assert_eq!(config_path_env_override(), None);
+        assert_eq!(resolve_config_path(None), default_config_path());
+        unsafe { std::env::remove_var("MIRA_CONFIG"); }
     }
 }
 

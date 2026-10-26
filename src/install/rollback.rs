@@ -27,9 +27,7 @@ const KEEP_SNAPSHOTS: usize = 3;
 /// The config file the running server uses — `MIRA_CONFIG` override, else the
 /// default `~/.mira/config/mira_config.json`.
 fn config_file_path() -> PathBuf {
-    std::env::var_os("MIRA_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(crate::config::default_config_path)
+    crate::config::resolve_config_path(None)
 }
 
 /// `<data_dir>/rollback` — resolved the same way at snapshot and restore time

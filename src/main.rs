@@ -1018,9 +1018,7 @@ async fn async_main() -> Result<(), Box<dyn Error>> {
     // resolver here mirrors what default_config_path uses + the
     // MIRA_CONFIG env override the rest of the binary respects.
     {
-        let cfg_path = std::env::var_os("MIRA_CONFIG")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(mira::config::default_config_path);
+        let cfg_path = mira::config::resolve_config_path(None);
         let data_dir = mira::config::default_data_dir_path();
         match mira::install::backup::apply_pending_restore(&data_dir, &cfg_path) {
             Ok(true)  => eprintln!("✓ applied pending restore from {}", data_dir.display()),

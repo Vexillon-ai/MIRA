@@ -44,7 +44,7 @@ These apply to any invocation, including subcommands:
 
 | Option | Purpose |
 |---|---|
-| `--config <PATH>` | Use a specific config file. Default: `~/.mira/config/mira_config.json`. |
+| `--config <PATH>` | Use a specific config file. Equivalent to setting `MIRA_CONFIG`; the flag wins over the env, and both win over the default `~/.mira/config/mira_config.json`. Accepted on any subcommand. |
 | `--data-dir <PATH>` | Override the data directory (databases, history, memory, auth, wiki, artifacts). Wins over the `data_dir` config field; equivalent to setting `MIRA_DATA_DIR`. Accepted on any subcommand. |
 | `--print-config-template` | Print the annotated example config and exit. |
 | `--help`, `--version` | Standard help / version output. |
