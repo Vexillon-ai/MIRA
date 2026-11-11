@@ -65,7 +65,10 @@ Two independent settings on a Telegram account:
 - Ask MIRA to "remind me / check X every morning at 8" — it creates an automation (cron). View/cancel your schedules via the automations tools or the Automations page.
 
 ## Manage memory & notes
-- MIRA writes memories automatically. Ask "what do you remember about me?" or "forget X". Use the wiki for longer notes ("add a wiki page about my project").
+- MIRA writes memories automatically (once you opt in — capture is off by default). Ask "what do you remember about me?" or "forget X". Say **"remember …"** to force-store a fact even when that category is off for automatic capture, or capture is off entirely.
+- The **Memory** page (web/mobile) lists everything held about you across **Saved / Daily summaries / Connected sources**. From there you can **edit** a memory (keeps a **View history** chain), **delete** any of your own, **Delete all my memories**, or **export** everything as JSON/Markdown. A delete hides the item from recall right away and purges it permanently after the retention window (default 30 days); use **Erase permanently now** to skip the window.
+- With an external memory source configured, **Settings → Memory** shows a **status pill** per source and a **Test connection** button so you can see at a glance whether each store is reachable.
+- Use the wiki for longer notes ("add a wiki page about my project").
 
 ## Change a setting
 - Your own: ask MIRA ("set my briefing hour to 7") or use the UI.

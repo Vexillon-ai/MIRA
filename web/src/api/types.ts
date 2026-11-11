@@ -157,6 +157,7 @@ export type ThinkingEntry =
   | { type: 'tool_result';  name: string; output: string; success: boolean; call_id?: string }
   | { type: 'reasoning';    text: string }
   | { type: 'wiki_context'; pages: string[] }
+  | { type: 'memory_context'; served: string[]; unavailable: string[] }
 
 /**
  * Q1.3 — non-text input attached to a user message. Today: inline

@@ -117,6 +117,13 @@ pub struct MiraConfig {
     #[serde(default)]
     pub stt: SttConfig,
 
+    // Real-time voice turn lifecycle (cancel/barge-in, spoken
+    // style, speculative turns, prompt-cache stability). Defaults preserve
+    // today's behaviour: cancellation only acts when a client requests it, and
+    // the voice-only disconnect behaviour never touches non-voice turns.
+    #[serde(default)]
+    pub voice: VoiceConfig,
+
     #[serde(default)]
     pub automations: AutomationsConfig,
 
@@ -547,6 +554,14 @@ pub struct ProvidersConfig {
     #[serde(default)]
     pub openai_compat: OpenAiCompatProviderConfig,
 
+    // ADDITIONAL named OpenAI-compatible providers beyond
+    // the single `openai_compat` slot, so an instance can define more than one
+    // (e.g. a local language router for the voice channel alongside the main
+    // provider). Each entry is a full `OpenAiCompatProviderConfig` with its own
+    // `name`; referenced by name from `voice.provider` (or a per-turn override).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openai_compat_extra: Vec<OpenAiCompatProviderConfig>,
+
     // Anthropic native (Claude). Uses /v1/messages, not OpenAI's
     // /v1/chat/completions, so it has its own dedicated client. Set
     // `api_key` to register; default model is the most-capable Claude
@@ -577,6 +592,7 @@ impl Default for ProvidersConfig {
             groq: GroqConfig::default(),
             xai: XaiConfig::default(),
             openai_compat: OpenAiCompatProviderConfig::default(),
+            openai_compat_extra: Vec::new(),
             anthropic: AnthropicConfig::default(),
             gemini: GeminiConfig::default(),
         }
@@ -857,6 +873,13 @@ pub struct OpenAiCompatProviderConfig {
     // (no auth header — for unsecured self-hosted endpoints).
     #[serde(default = "default_auth_style")]
     pub auth_style: String,
+    // Optional per-provider effective context budget
+    // (tokens). When set, a turn routed to this provider budgets history against
+    // THIS window instead of the instance's `agent.context_length_tokens` — so a
+    // provider reached by IP (which isn't treated as "local") still gets a sane
+    // window. `None` → the instance default applies. (e.g. the voice router: 11264.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length_tokens: Option<usize>,
 }
 
 impl Default for OpenAiCompatProviderConfig {
@@ -870,6 +893,7 @@ impl Default for OpenAiCompatProviderConfig {
             available_models: Vec::new(),
             timeout_secs:  default_provider_timeout(),
             auth_style:    default_auth_style(),
+            context_length_tokens: None,
         }
     }
 }
@@ -1465,6 +1489,11 @@ pub struct MemoryConfig {
     #[serde(default = "default_context_top_k")]
     pub context_top_k: usize,
 
+    // How many days a soft-deleted memory is retained before it is PERMANENTLY
+    // removed (a boot-time purge). 0 = never purge (keep for audit indefinitely).
+    // Default 30 so "deleted" eventually means gone, for privacy.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
 
     #[serde(default)]
     pub auto_extract: AutoExtractConfig,
@@ -1483,6 +1512,64 @@ pub struct MemoryConfig {
 
     #[serde(default)]
     pub recency: RecencyConfig,
+
+    // Pluggable memory providers (Part B). Empty (the default) means the
+    // built-in SQLite store only, configured by every other `memory.*` key —
+    // fully back-compatible. A populated list adds external providers the memory
+    // router fans recall across, on top of the always-present built-in store;
+    // writes go to the built-in store (an external provider is ingested only when
+    // writable and capture is on). See `memory-provider-spec.md`.
+    #[serde(default)]
+    pub providers: Vec<MemoryProviderConfig>,
+}
+
+/// One entry in `memory.providers`. Additive; mirrors the SPI config block.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryProviderConfig {
+    /// Stable provider id: `builtin` | `files` | `mcp:<name>` | a custom id.
+    pub id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// `in_process` (builtin/files), `mcp`, or `http`. Defaults by id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    /// `harness` (MIRA searches/injects + ingests around the turn), `agent`
+    /// (the model calls the memory tools), or `both`. Default `harness`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Never write to this provider even if it advertises `write`.
+    #[serde(default)]
+    pub read_only: bool,
+    /// Allow a non-loopback endpoint (fail-closed: refused unless set).
+    #[serde(default)]
+    pub allow_non_loopback: bool,
+    /// HTTP transport: base URL + api-key file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_file: Option<String>,
+    /// HTTP transport: a PEM CA/certificate file to additionally trust for TLS —
+    /// for a service behind a self-signed or private-CA certificate. MIRA's HTTP
+    /// client uses the bundled webpki roots (NOT the OS trust store), so a
+    /// self-signed cert installed via `update-ca-certificates` is not trusted
+    /// unless named here. Added alongside the built-in roots; `None` = roots only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_ca_file: Option<String>,
+    /// HTTP transport: which account identity to send as `user_id` on recall —
+    /// `"id"` (MIRA's UUID, the default), `"username"`, or `"email"`. For a
+    /// service keyed on something other than MIRA's UUID (e.g. an external HTTP service
+    /// keyed on the username). Falls back to the UUID if the chosen field is
+    /// blank. `None`/unknown = `"id"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id_field: Option<String>,
+    /// Files transport: store root directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    /// MCP transport: launch command + tool→verb mapping file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mapping: Option<String>,
 }
 
 impl Default for MemoryConfig {
@@ -1493,12 +1580,14 @@ impl Default for MemoryConfig {
             embedding_cache_size: default_embedding_cache_size(),
             similarity_threshold: default_similarity_threshold(),
             context_top_k:        default_context_top_k(),
+            retention_days:       default_retention_days(),
             auto_extract:         AutoExtractConfig::default(),
             indexer:              IndexerConfig::default(),
             rollup:               RollupConfig::default(),
             graph:                GraphConfig::default(),
             consolidation:        ConsolidationConfig::default(),
             recency:              RecencyConfig::default(),
+            providers:            Vec::new(),
         }
     }
 }
@@ -1937,10 +2026,10 @@ fn default_rollup_max_chars_per_message() -> u32 { 800 }
 // wants that behaviour has to opt in explicitly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoExtractConfig {
-    // `"off"` — never extract. `"heuristic"` — regex-based extractor only
-    // (the historical default). `"llm"` — run a structured extraction pass
-    // through a model after each turn; writes go through the same storage
-    // path but with conflict detection via `supersede`.
+    // `"off"` — never extract (the default; opt in explicitly). `"heuristic"` —
+    // local regex-based extractor, no model call. `"llm"` — run a structured
+    // extraction pass through a model after each turn; writes go through the
+    // same storage path but with conflict detection via `supersede`.
     #[serde(default = "default_auto_extract_mode")]
     pub mode: String,
 
@@ -2007,7 +2096,14 @@ impl Default for AutoExtractConfig {
     }
 }
 
-fn default_auto_extract_mode() -> String { "heuristic".to_owned() }
+// Default `"off"` (A.6): a fresh install does NOT auto-capture memory until the
+// operator opts in. This is the cautious default — the `"llm"` extractor sends
+// turn content to the configured model (which may be an external provider), and
+// the `"heuristic"` path, while local, still writes inferred facts without
+// review. Opt in with `memory.auto_extract.mode = "heuristic"` (local, no model
+// call) or `"llm"` (richer, conflict-aware). Existing configs that set `mode`
+// explicitly are unaffected.
+fn default_auto_extract_mode() -> String { "off".to_owned() }
 fn default_auto_extract_llm_channels() -> Vec<String> { Vec::new() }
 fn default_auto_extract_min_confidence() -> String { "medium".to_owned() }
 fn default_auto_extract_allowed_categories() -> Vec<String> {
@@ -2099,6 +2195,73 @@ impl Default for ReasoningConfig {
 
 fn default_reasoning_min_chars() -> usize { 600 }
 fn default_reasoning_effort() -> String { "medium".to_string() }
+
+// ── Voice ───────────────────────────────────────────────────────────────────
+
+/// Real-time voice turn lifecycle. Every field defaults to
+/// preserving today's behaviour: no turn is ever cancelled unless a client
+/// asks, and the disconnect-cancel is scoped to the voice channel so web/mobile
+/// turns are untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceConfig {
+    // How long after a turn starts a client may still cancel it (seconds). A
+    // cancel for a turn older than this is refused with 409 — the turn has
+    // almost certainly already finished. Generous by default.
+    #[serde(default = "default_voice_cancel_window_secs")]
+    pub cancel_window_secs: u64,
+    // When a voice client's SSE stream drops mid-turn, treat it as a cancel
+    // (barge-in by hang-up) rather than letting the turn run on unseen. Applies
+    // to the `voice` channel only; other channels always run to completion on a
+    // disconnect, exactly as today.
+    #[serde(default = "default_true")]
+    pub implicit_cancel_on_disconnect: bool,
+    // How long a speculative turn waits for a commit/discard before it times out
+    // and drops everything it was holding (seconds).
+    #[serde(default = "default_voice_speculative_timeout_secs")]
+    pub speculative_timeout_secs: u64,
+    // Soft cap (characters) for a sentence in a spoken reply — a hint folded
+    // into the voice style addendum so the model keeps sentences short enough to
+    // synthesise smoothly. Not a hard truncation.
+    #[serde(default = "default_voice_spoken_max_sentence_chars")]
+    pub spoken_max_sentence_chars: usize,
+    // The provider the VOICE channel uses, by `name`
+    // (a vendor slug, the `openai_compat` entry's name, or an
+    // `openai_compat_extra` entry's name). When set, a voice turn is routed to
+    // it while every other channel keeps the instance's default provider. Empty
+    // → voice uses the default like every other channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    // When the voice provider is unreachable, fail over to the instance's normal
+    // provider chain (with a `warning` event naming the fallback). Default on.
+    #[serde(default = "default_true")]
+    pub provider_failover: bool,
+    // Max tool-call/observe rounds on the VOICE channel
+    // before MIRA must answer from what it has (a spoken reply can't wait for
+    // 4–8 tool rounds). The global `agent.max_tool_rounds` is unchanged for other
+    // channels. On hitting the cap, the turn gets one final tools-disabled answer
+    // round + a `voice_tool_cap_reached` warning. Default 2.
+    #[serde(default = "default_voice_max_tool_rounds")]
+    pub max_tool_rounds: usize,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            cancel_window_secs: default_voice_cancel_window_secs(),
+            implicit_cancel_on_disconnect: true,
+            speculative_timeout_secs: default_voice_speculative_timeout_secs(),
+            spoken_max_sentence_chars: default_voice_spoken_max_sentence_chars(),
+            provider: None,
+            provider_failover: true,
+            max_tool_rounds: default_voice_max_tool_rounds(),
+        }
+    }
+}
+
+fn default_voice_cancel_window_secs() -> u64 { 600 }
+fn default_voice_max_tool_rounds() -> usize { 2 }
+fn default_voice_speculative_timeout_secs() -> u64 { 5 }
+fn default_voice_spoken_max_sentence_chars() -> usize { 240 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -2865,7 +3028,7 @@ pub struct WasmRootfsConfig {
 // Pyodide-on-Node sandbox settings. Pyodide is CPython-on-emscripten run by
 // the Node runtime MIRA already provisions for MCP; it brings the full
 // scientific stack (numpy/pandas/matplotlib) with on-demand wheel loading —
-// things the pure-WASI backend can't do. Python still runs in wasm (V8): no
+// things the pure-WASI backend can't do. Python still runs in wasm: no
 // syscalls, no host FS except a single granted scratch dir, no network from
 // user code. The Node *host* process is privileged, so this is a weaker
 // isolation boundary than wasmtime — fine for semi-trusted code.
@@ -3713,6 +3876,10 @@ fn default_channel_rate_limits() -> std::collections::HashMap<String, u32> {
     // Web is internal (an entry in a thread + a NotificationBus event).
     // Cheap, no external API; cap is tuned to catch loops, not user noise.
     m.insert("web".into(),      60);
+    // Voice is an interactive, internal channel like web (real-time turns, no
+    // external push). Same generous cap so proactive delivery over voice isn't
+    // throttled to the conservative `*` fallback.
+    m.insert("voice".into(),    60);
     // External user-facing channels — push to a phone. Tight by design;
     // a legitimate "every 5 minutes" reminder fits well under 3/min.
     m.insert("signal".into(),    3);
@@ -3866,6 +4033,7 @@ fn default_embedding_dim()       -> usize   { 384 }
 fn default_embedding_cache_size()-> usize   { 1000 }
 fn default_similarity_threshold()-> f32     { 0.6 }
 fn default_context_top_k()       -> usize   { 15 }
+fn default_retention_days()      -> u32     { 30 }
 
 fn default_cleanup_interval()    -> u64     { 600 }
 fn default_session_timeout()     -> u64     { 3600 }
@@ -4542,6 +4710,7 @@ impl Default for MiraConfig {
             sandbox:         SandboxConfig::default(),
             tts:             TtsConfig::default(),
             stt:             SttConfig::default(),
+            voice:           VoiceConfig::default(),
             automations:     AutomationsConfig::default(),
             companion:       CompanionConfig::default(),
             artifacts:       ArtifactsConfig::default(),
@@ -5354,6 +5523,27 @@ fn strip_removed_keys(v: &mut serde_json::Value) {
     drop_key(v, &["memory", "share_across_channels"]);
     drop_key(v, &["channels", "signal", "socket_path"]);
     drop_key(v, &["server", "max_connections"]);
+
+    // A `memory.providers[*]` entry's optional fields serialized as `null` when
+    // unset before 0.362.1 (the struct lacked `skip_serializing_if`), but the
+    // schema types them non-null — so a config the memory-provider UI saved
+    // would fail validation and crash-loop the instance on the next restart.
+    // Drop any null-valued member of each provider entry so such a config loads;
+    // the next save (now `skip_serializing_if`) omits them entirely.
+    if let Some(arr) = v.get_mut("memory")
+        .and_then(|m| m.get_mut("providers"))
+        .and_then(|p| p.as_array_mut())
+    {
+        for item in arr.iter_mut() {
+            if let Some(obj) = item.as_object_mut() {
+                // Pruned in 0.379.0 — `budget_share` was never applied to the
+                // recall token split; drop it (even a non-null value) so a config
+                // that set it still validates against the strict schema.
+                obj.remove("budget_share");
+                obj.retain(|_, val| !val.is_null());
+            }
+        }
+    }
 }
 
 /// Rewrite a `guardian.process.probe_url` that points at the retired `/health`
@@ -5425,6 +5615,26 @@ mod tests {
         assert!(!v.pinned_key.is_empty());
     }
 
+    // The new section defaults to behaviour-preserving values, and a
+    // config that predates it (no `voice` key) still loads with those defaults.
+    #[test]
+    fn voice_config_defaults_preserve_behaviour() {
+        let v = VoiceConfig::default();
+        assert_eq!(v.cancel_window_secs, 600);
+        assert!(v.implicit_cancel_on_disconnect, "voice hang-up = barge-in by default");
+        assert_eq!(v.speculative_timeout_secs, 5);
+        assert_eq!(v.spoken_max_sentence_chars, 240);
+        assert_eq!(v.max_tool_rounds, 2, "voice caps tool rounds low by default");
+        assert!(v.provider_failover, "voice provider fails over by default");
+
+        // A config without a `voice` key deserialises to the defaults (the
+        // section is `#[serde(default)]`), so an older config file is fine.
+        let cfg: MiraConfig =
+            serde_json::from_str(r#"{"config_version":"1","primary_provider":"lmstudio"}"#).unwrap();
+        assert_eq!(cfg.voice.cancel_window_secs, 600);
+        assert!(cfg.voice.implicit_cancel_on_disconnect);
+    }
+
     fn write_minimal(dir: &TempDir) -> PathBuf {
         let p = dir.path().join("mira_config.json");
         std::fs::write(&p, r#"{"config_version":"1","primary_provider":"lmstudio"}"#).unwrap();
@@ -5462,6 +5672,29 @@ mod tests {
         assert!(v["memory"].get("share_across_channels").is_none());
         assert!(v["channels"]["signal"].get("socket_path").is_none());
         assert!(v["server"].get("max_connections").is_none());
+    }
+
+    // Regression: a memory-provider entry with null-valued optional fields (as
+    // the provider UI wrote before 0.362.1) must load after stripping, not
+    // crash-loop the instance on the strict schema.
+    #[test]
+    fn strip_removed_keys_drops_null_memory_provider_fields() {
+        let mut v = serde_json::json!({
+            "config_version": "1",
+            "primary_provider": "lmstudio",
+            "memory": { "providers": [
+                { "id": "builtin", "enabled": true, "transport": null, "mode": null,
+                  "budget_share": null, "root": null, "command": null, "mapping": null }
+            ]}
+        });
+        assert!(validate_config_json(&v).is_err(), "null optional fields fail the strict schema");
+        strip_removed_keys(&mut v);
+        assert!(validate_config_json(&v).is_ok(), "stripped provider config validates");
+        let item = &v["memory"]["providers"][0];
+        assert!(item.get("transport").is_none());
+        assert!(item.get("budget_share").is_none());
+        assert_eq!(item["id"], "builtin");
+        assert_eq!(item["enabled"], true);
     }
 
     #[test]

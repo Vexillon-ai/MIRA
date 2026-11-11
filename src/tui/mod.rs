@@ -180,6 +180,16 @@ async fn run_inner(
                                     }
                                     while let Some(ev) = turn.rx.recv().await {
                                         match ev {
+                                            // Turn identity / timings; the TUI has no use for them.
+                                            StreamEvent::TurnStarted { .. } => {}
+                                            StreamEvent::Timing(_) => {}
+                                            StreamEvent::Restarted { .. } => {}
+                                            StreamEvent::ToolCapReached { .. } => {}
+                                            // A cancelled turn ends the stream like Done.
+                                            StreamEvent::Cancelled { .. } => {
+                                                let _ = tx2.send(AppEvent::StreamDone);
+                                                break;
+                                            }
                                             StreamEvent::Token(tok) => { let _ = tx2.send(AppEvent::Token(tok)); }
                                             StreamEvent::Done { usage } => {
                                                 let _ = tx2.send(AppEvent::StreamUsage(usage));
@@ -201,6 +211,19 @@ async fn run_inner(
                                                 if !pages.is_empty() {
                                                     let _ = tx2.send(AppEvent::Token(
                                                         format!("[wiki: {}]\n", pages.join(", "))
+                                                    ));
+                                                }
+                                            }
+                                            // B2d — surface which memory stores fed / were down.
+                                            StreamEvent::MemoryContext { served, unavailable } => {
+                                                if !served.is_empty() {
+                                                    let _ = tx2.send(AppEvent::Token(
+                                                        format!("[memory: {}]\n", served.join(", "))
+                                                    ));
+                                                }
+                                                for s in &unavailable {
+                                                    let _ = tx2.send(AppEvent::Token(
+                                                        format!("[memory: {} unavailable]\n", s)
                                                     ));
                                                 }
                                             }

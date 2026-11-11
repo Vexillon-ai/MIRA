@@ -117,7 +117,7 @@ pub async fn run_tool_loop_with_context(
 ) -> Result<(String, TokenUsage), MiraError> {
     run_tool_loop_with_provider_context(provider, tools, messages, options, mode, max_rounds, tx,
         allowed_tool_names, inject_args, event_ctx, expander, expand_pool, tool_result_cap_bytes,
-        &crate::providers::ProviderRequestContext::default()).await
+        &crate::providers::ProviderRequestContext::default(), None, None, false).await
 }
 
 pub async fn run_tool_loop_with_provider_context(
@@ -145,6 +145,17 @@ pub async fn run_tool_loop_with_provider_context(
     // returned to the model is clamped. See `clamp_tool_result`.
     tool_result_cap_bytes: usize,
     request_context: &crate::providers::ProviderRequestContext,
+    // When set, incremented once per tool-loop round so the
+    // caller can report `tool_rounds` in its timing event. Measurement only.
+    round_counter: Option<&std::sync::atomic::AtomicUsize>,
+    // Speculative commit barrier. When set, the loop awaits it
+    // before executing ANY tool, so a speculative turn holds tool execution
+    // until commit. `None` for a normal turn.
+    commit_gate: Option<&crate::agent::turn_registry::CommitGate>,
+    // Voice channel: on hitting `max_rounds`, emit
+    // a `ToolCapReached` warning and nudge the model for a brief best-effort
+    // answer (the graceful final round below already runs for every channel).
+    voice_mode: bool,
 ) -> Result<(String, TokenUsage), MiraError> {
 
     if *mode == ToolMode::Disabled || tools.is_empty() {
@@ -187,6 +198,9 @@ pub async fn run_tool_loop_with_provider_context(
 
     for round in 0..max_rounds {
         debug!("Tool loop round {}/{}", round + 1, max_rounds);
+        if let Some(c) = round_counter {
+            c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // Build per-round options.
         //
@@ -309,7 +323,7 @@ pub async fn run_tool_loop_with_provider_context(
                     messages.push(ChatMessage::tool(clamp_tool_result(output, tool_result_cap_bytes), tc.call_id.clone()));
                     continue;
                 }
-                let merged = merge_injected_args(tc.arguments.clone(), inject_args);
+                let merged = merge_injected_args(&tc.name, tc.arguments.clone(), inject_args);
                 let _ = tx.send(StreamEvent::ToolCall {
                     name:    tc.name.clone(),
                     args:    merged.to_string(),
@@ -318,7 +332,7 @@ pub async fn run_tool_loop_with_provider_context(
 
                 let (output, success) = dispatch_tool_call(
                     tools, &tc.name, merged, active.as_deref(), &mut seen_calls,
-                    event_ctx,
+                    event_ctx, commit_gate,
                 ).await;
 
                 info!("Tool '{}' → success={} output_len={}", tc.name, success, output.len());
@@ -395,7 +409,7 @@ pub async fn run_tool_loop_with_provider_context(
                         messages.push(ChatMessage::user(wrapped));
                         continue;
                     }
-                    let merged = merge_injected_args(tc.arguments.clone(), inject_args);
+                    let merged = merge_injected_args(&tc.name, tc.arguments.clone(), inject_args);
                     let _ = tx.send(StreamEvent::ToolCall {
                         name:    tc.name.clone(),
                         args:    merged.to_string(),
@@ -404,7 +418,7 @@ pub async fn run_tool_loop_with_provider_context(
 
                     let (output, success) = dispatch_tool_call(
                         tools, &tc.name, merged, active.as_deref(), &mut seen_calls,
-                        event_ctx,
+                        event_ctx, commit_gate,
                     ).await;
 
                     info!("Tool '{}' (Hermes) → success={} output_len={}", tc.name, success, output.len());
@@ -440,7 +454,7 @@ pub async fn run_tool_loop_with_provider_context(
                 // Append the assistant's reasoning + action to history
                 messages.push(ChatMessage::assistant(content.clone()));
 
-                let merged = merge_injected_args(tool_args, inject_args);
+                let merged = merge_injected_args(&tool_name, tool_args, inject_args);
                 let _ = tx.send(StreamEvent::ToolCall {
                     name:    tool_name.clone(),
                     args:    merged.to_string(),
@@ -449,7 +463,7 @@ pub async fn run_tool_loop_with_provider_context(
 
                 let (output, success) = dispatch_tool_call(
                     tools, &tool_name, merged, active.as_deref(), &mut seen_calls,
-                    event_ctx,
+                    event_ctx, commit_gate,
                 ).await;
 
                 info!("Tool '{}' (ReAct) → success={}", tool_name, success);
@@ -460,8 +474,11 @@ pub async fn run_tool_loop_with_provider_context(
                     call_id: call_id.clone(),
                 }).await;
 
-                // Append observation for next round
-                let observation = format!("Observation: {}", output);
+                // Append observation for next round. Cap it HERE (write-once),
+                // not in a later round — rewriting an earlier message busts the
+                // planner's prompt cache.
+                let observation = format!("Observation: {}",
+                    clamp_tool_result(output, tool_result_cap_bytes));
                 messages.push(ChatMessage::user(observation));
                 continue; // next round
             }
@@ -496,10 +513,21 @@ pub async fn run_tool_loop_with_provider_context(
     // non-tool generation. The onboarding extractor runs post-turn anyway,
     // so any missed tool calls get back-filled server-side.
     warn!("Tool loop hit max_rounds={} — asking model for a final prose reply", max_rounds);
-    messages.push(ChatMessage::user(
+    // On the voice channel, tell the client the cap was
+    // reached (holding-phrase signal) and nudge for a BRIEF best-effort answer
+    // that admits if it couldn't find something, rather than a silent stop.
+    if voice_mode {
+        let _ = tx.send(StreamEvent::ToolCapReached { rounds_used: max_rounds as u32 }).await;
+    }
+    let nudge = if voice_mode {
+        "You've reached the tool limit for this spoken turn. Stop calling tools and \
+         answer now, briefly, from what you already have. If you couldn't find \
+         something, say so plainly in a sentence."
+    } else {
         "You've used all your tool calls for this turn. Stop calling tools now and \
-         respond to me directly in plain prose.".to_string()
-    ));
+         respond to me directly in plain prose."
+    };
+    messages.push(ChatMessage::user(nudge.to_string()));
     let mut final_opts = options.clone();
     final_opts.tools       = None;
     final_opts.tool_choice = None;
@@ -546,6 +574,8 @@ async fn dispatch_tool_call(
     allowed:   Option<&[String]>,
     seen:      &mut std::collections::HashSet<(String, String)>,
     event_ctx: ToolEventCtx<'_>,
+    // Hold execution here until a speculative turn commits.
+    commit_gate: Option<&crate::agent::turn_registry::CommitGate>,
 ) -> (String, bool) {
     if !tool_allowed(name, allowed) {
         let body = format!(
@@ -570,6 +600,13 @@ async fn dispatch_tool_call(
         // already emitted (or succeeded), and a follow-up would just spam
         // subscribers without adding signal.
         return (body, false);
+    }
+
+    // A speculative turn holds here until committed. The
+    // `tool_call` event was already emitted upstream; only EXECUTION waits.
+    // Discard/timeout/restart fire the cancel token, which drops this future.
+    if let Some(gate) = commit_gate {
+        gate.wait().await;
     }
 
     match tools.execute(name, args.clone()).await {
@@ -671,20 +708,18 @@ fn build_tool_specs(
     tools: &ToolRegistry,
     allowed: Option<&[String]>,
 ) -> Vec<crate::types::ToolSpec> {
-    let all = tools.list_tools();
-    all.into_iter()
-        .filter(|n| match allowed {
-            None      => true,
-            Some(set) => set.iter().any(|a| a == n),
-        })
-        .filter_map(|name| {
-            tools.get(&name).map(|t| crate::types::ToolSpec::function(
-                t.name(),
-                t.description(),
-                t.args_schema(),
-            ))
-        })
-        .collect()
+    let spec_of = |name: &str| tools.get(name).map(|t| crate::types::ToolSpec::function(
+        t.name(), t.description(), t.args_schema(),
+    ));
+    match allowed {
+        // Order the specs by the ACTIVE list, so a
+        // tool loaded mid-turn by `find_tools` (appended to `active`) lands at
+        // the END of the `tools` array. Iterating the registry + filtering (the
+        // old path) inserted it at its registry position, in the MIDDLE, which
+        // shifts every later entry's bytes and busts the planner's prompt cache.
+        Some(set) => set.iter().filter_map(|n| spec_of(n)).collect(),
+        None      => tools.list_tools().iter().filter_map(|n| spec_of(n)).collect(),
+    }
 }
 
 /// Estimated input tokens the tool-definition block will cost on the wire for a
@@ -768,25 +803,30 @@ fn tool_allowed(name: &str, allowed: Option<&[String]>) -> bool {
     }
 }
 
-// Merge `inject` keys into `args`. If `args` is not an object (e.g. ReAct
-// wrapped a raw string as `{"input": "..."}`), returns it unchanged — the
-// caller's inject keys only make sense for object-shaped args. Existing
-// keys in `args` win over injected ones so the LLM can't accidentally
-// overwrite an injected identity field, but the reverse (inject overwriting
-// LLM-supplied value) would let an LLM's made-up `_user_id` be ignored
-// which is what we want.
+// Merge `inject` keys into `args` for the tool named `tool_name`. If `args` is
+// not an object (e.g. ReAct wrapped a raw string as `{"input": "..."}`), returns
+// it unchanged — the caller's inject keys only make sense for object-shaped args.
+// Inject WINS over any LLM-supplied value for these reserved keys, so the model
+// can't spoof an injected identity field (e.g. a made-up `_user_id`).
+//
+// `_user_message` is scoped: it carries the raw user turn, which
+// can contain a secret the memory guard would refuse to store, so it is injected
+// only for the two memory tools that need it for subject-grounding — never spread
+// to any other tool. (Internal `_*` keys are additionally stripped at the MCP
+// boundary before they could reach a remote server.)
 fn merge_injected_args(
-    args:   serde_json::Value,
-    inject: &serde_json::Map<String, serde_json::Value>,
+    tool_name: &str,
+    args:      serde_json::Value,
+    inject:    &serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
     if inject.is_empty() {
         return args;
     }
+    let message_scoped = matches!(tool_name, "memory_add" | "memory_supersede");
     match args {
         serde_json::Value::Object(mut map) => {
             for (k, v) in inject {
-                // Inject wins: any LLM-supplied value for these reserved keys
-                // is overwritten with the trusted value.
+                if k == "_user_message" && !message_scoped { continue; }
                 map.insert(k.clone(), v.clone());
             }
             serde_json::Value::Object(map)
@@ -1572,6 +1612,29 @@ Nice to meet you!
         assert!(out.contains("tool result truncated"));
     }
 
+    // Specs are ordered by the ACTIVE list, so a tool loaded
+    // mid-turn (appended to `active`) lands at the END, keeping earlier entries'
+    // bytes stable. Registry insertion order must NOT dictate the spec order.
+    #[test]
+    fn build_tool_specs_preserves_active_order_for_appended_tools() {
+        let mut r = ToolRegistry::new();
+        for n in ["alpha", "beta", "gamma", "delta"] {
+            r.register(StubTool { name: n, reply: ToolResult::success("") });
+        }
+        // Start with [gamma, alpha]; find_tools then appends `beta`.
+        let active_before = vec!["gamma".to_string(), "alpha".to_string()];
+        let before: Vec<String> = build_tool_specs(&r, Some(&active_before))
+            .iter().map(|s| s.function.name.clone()).collect();
+        assert_eq!(before, vec!["gamma", "alpha"], "order follows the active list, not the registry");
+
+        let active_after = vec!["gamma".to_string(), "alpha".to_string(), "beta".to_string()];
+        let after: Vec<String> = build_tool_specs(&r, Some(&active_after))
+            .iter().map(|s| s.function.name.clone()).collect();
+        // The new tool is appended; the earlier entries keep their positions.
+        assert_eq!(after, vec!["gamma", "alpha", "beta"], "appended, not inserted mid-list");
+        assert_eq!(&after[..before.len()], &before[..], "earlier entries byte-stable");
+    }
+
     #[test]
     fn tool_reserve_is_nonzero_scales_with_set_and_is_mode_aware() {
         let mut r = ToolRegistry::new();
@@ -1611,6 +1674,27 @@ Nice to meet you!
             "adaptive config but bypassed must reserve the FULL toolset");
     }
 
+    #[test]
+    fn user_message_injects_only_for_memory_tools() {
+        // `_user_message` (raw user turn, may hold a secret) must reach the
+        // memory tools for grounding but NO other tool. `_user_id` still reaches
+        // every tool as before.
+        let mut inject = serde_json::Map::new();
+        inject.insert("_user_id".into(), "alice".into());
+        inject.insert("_user_message".into(), "my password is hunter2".into());
+
+        for t in ["memory_add", "memory_supersede"] {
+            let m = merge_injected_args(t, serde_json::json!({"content":"x"}), &inject);
+            assert!(m.get("_user_message").is_some(), "{t} should receive _user_message");
+            assert!(m.get("_user_id").is_some(), "{t} should receive _user_id");
+        }
+        for t in ["mcp__web__search", "memory_search", "spawn_background_task"] {
+            let m = merge_injected_args(t, serde_json::json!({"query":"x"}), &inject);
+            assert!(m.get("_user_message").is_none(), "{t} must NOT receive _user_message");
+            assert!(m.get("_user_id").is_some(), "{t} should still receive _user_id");
+        }
+    }
+
     #[tokio::test]
     async fn dispatch_success_passes_output_through() {
         let tools = registry_with(StubTool {
@@ -1618,7 +1702,7 @@ Nice to meet you!
             reply: ToolResult::success("hello world"),
         });
         let mut seen = std::collections::HashSet::new();
-        let (out, ok) = dispatch_tool_call(&tools, "ok_tool", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE).await;
+        let (out, ok) = dispatch_tool_call(&tools, "ok_tool", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE, None).await;
         assert!(ok);
         assert_eq!(out, "hello world");
     }
@@ -1635,7 +1719,7 @@ Nice to meet you!
             reply: ToolResult::failure("sandbox refused: EPERM"),
         });
         let mut seen = std::collections::HashSet::new();
-        let (out, ok) = dispatch_tool_call(&tools, "boom", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE).await;
+        let (out, ok) = dispatch_tool_call(&tools, "boom", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE, None).await;
         assert!(!ok, "failed tool must report success=false");
         assert!(!out.is_empty(),
             "failed tool must not return empty output (would invite hallucination)");
@@ -1654,7 +1738,7 @@ Nice to meet you!
             reply: ToolResult { success: false, output: String::new(), error: None },
         });
         let mut seen = std::collections::HashSet::new();
-        let (out, ok) = dispatch_tool_call(&tools, "silent_fail", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE).await;
+        let (out, ok) = dispatch_tool_call(&tools, "silent_fail", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE, None).await;
         assert!(!ok);
         assert!(!out.is_empty(), "fallback label must not be empty, got: {out:?}");
         assert!(out.contains("silent_fail"), "fallback should name the failing tool, got: {out}");
@@ -1664,7 +1748,7 @@ Nice to meet you!
     async fn dispatch_unknown_tool_returns_registry_error() {
         let tools = ToolRegistry::new();
         let mut seen = std::collections::HashSet::new();
-        let (out, ok) = dispatch_tool_call(&tools, "missing", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE).await;
+        let (out, ok) = dispatch_tool_call(&tools, "missing", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE, None).await;
         assert!(!ok);
         assert!(out.starts_with("Tool error:"), "got: {out}");
     }
@@ -1677,7 +1761,7 @@ Nice to meet you!
         });
         let allowed = vec!["calendar".to_string()];
         let mut seen = std::collections::HashSet::new();
-        let (out, ok) = dispatch_tool_call(&tools, "shell", serde_json::json!({}), Some(&allowed), &mut seen, ToolEventCtx::NONE).await;
+        let (out, ok) = dispatch_tool_call(&tools, "shell", serde_json::json!({}), Some(&allowed), &mut seen, ToolEventCtx::NONE, None).await;
         assert!(!ok);
         assert!(out.contains("not available"), "got: {out}");
     }

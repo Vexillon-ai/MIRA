@@ -20,6 +20,35 @@ fn short_reason(e: &crate::MiraError) -> String {
 /// Subsystem key for the "primary LLM provider unreachable" degradation.
 const PRIMARY_DOWN_SUBSYSTEM: &str = "provider.primary";
 
+/// Adapts a shared `Arc<dyn ModelProvider>` into a `Box<dyn ModelProvider>` so an
+/// already-built provider (e.g. the instance's default chain) can be used as a
+/// [`FailoverProvider`] fallback without rebuilding it. Delegates every call.
+pub struct SharedProvider(pub std::sync::Arc<dyn ModelProvider>);
+
+#[async_trait]
+impl ModelProvider for SharedProvider {
+    fn name(&self) -> &str { self.0.name() }
+    async fn generate(&self, messages: &[ChatMessage], options: &GenerationOptions)
+        -> Result<GenerationResponse, crate::MiraError> {
+        self.0.generate(messages, options).await
+    }
+    async fn generate_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        ctx: &crate::providers::ProviderRequestContext) -> Result<GenerationResponse, crate::MiraError> {
+        self.0.generate_with_context(messages, options, ctx).await
+    }
+    async fn generate_stream(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        on_token: &mut (dyn FnMut(String) + Send)) -> Result<GenerationResponse, crate::MiraError> {
+        self.0.generate_stream(messages, options, on_token).await
+    }
+    async fn generate_stream_with_context(&self, messages: &[ChatMessage], options: &GenerationOptions,
+        on_token: &mut (dyn FnMut(String) + Send), ctx: &crate::providers::ProviderRequestContext)
+        -> Result<GenerationResponse, crate::MiraError> {
+        self.0.generate_stream_with_context(messages, options, on_token, ctx).await
+    }
+    fn guards_degeneracy(&self) -> bool { self.0.guards_degeneracy() }
+    async fn health_check(&self) -> bool { self.0.health_check().await }
+}
+
 /// A provider that falls back to alternatives on failure
 pub struct FailoverProvider {
     primary: Box<dyn ModelProvider>,

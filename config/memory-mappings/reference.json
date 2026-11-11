@@ -1,0 +1,11 @@
+{
+  "server": "reference-knowledge-graph",
+  "verbs": {
+    "search": {
+      "tool": "search_nodes",
+      "args": { "query": "$query" },
+      "result": { "list_at": "nodes", "content_at": "name" }
+    }
+  },
+  "capabilities": { "read": true, "write": false, "forget": false }
+}

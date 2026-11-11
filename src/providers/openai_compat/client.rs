@@ -72,8 +72,19 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: Vec<OutboundMessage<'a>>,
     stream: bool,
+    // On a streamed request, ask the provider to
+    // include a final usage chunk. Without it, OpenAI-compatible servers omit
+    // `usage` on streams, so `prompt_tokens`/`cached_tokens` never arrive and the
+    // timing event can't show cache hits. Harmless for providers that ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
     #[serde(flatten)]
     options: &'a GenerationOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -417,6 +428,7 @@ impl OpenAiCompatClient {
             model:    &self.config.model,
             messages: to_outbound(messages),
             stream:   false,
+            stream_options: None,
             options,
         };
         debug!("{}: POST {url} (non-streaming, model={})",
@@ -491,6 +503,7 @@ impl OpenAiCompatClient {
             model:    &self.config.model,
             messages: to_outbound(messages),
             stream:   true,
+            stream_options: Some(StreamOptions { include_usage: true }),
             options,
         };
         debug!("{}: POST {url} (streaming, model={})",
@@ -666,6 +679,7 @@ mod tests {
                 model:    "test-model",
                 messages: vec![],
                 stream:   false,
+                stream_options: None,
                 options:  &opts,
             };
             let v = serde_json::to_value(&req).unwrap();
@@ -674,6 +688,26 @@ mod tests {
                 "prompt_cache leaked onto the wire (flag={flag}): {v}"
             );
         }
+    }
+
+    // A streamed request asks for a final usage
+    // chunk (so prompt/cached tokens arrive); a non-streamed one omits it.
+    #[test]
+    fn stream_request_includes_usage_option() {
+        let opts = GenerationOptions::default();
+        let streamed = ChatRequest {
+            model: "m", messages: vec![], stream: true,
+            stream_options: Some(StreamOptions { include_usage: true }), options: &opts,
+        };
+        let v = serde_json::to_value(&streamed).unwrap();
+        assert_eq!(v["stream_options"]["include_usage"], serde_json::json!(true));
+
+        let non = ChatRequest {
+            model: "m", messages: vec![], stream: false,
+            stream_options: None, options: &opts,
+        };
+        let vn = serde_json::to_value(&non).unwrap();
+        assert!(vn.get("stream_options").is_none(), "non-streamed omits stream_options");
     }
 
     #[test]

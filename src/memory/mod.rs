@@ -22,10 +22,13 @@
 //! | `"openai"`     | OpenAI embeddings API           | API key         |
 //! | `"openrouter"` | OpenRouter embeddings endpoint  | API key         |
 
+pub mod authorship;
 pub mod auto_extract;
 pub mod categorizer;
 pub mod fastembed_provider;
 pub mod graph;
+pub mod provider;
+pub mod router;
 pub mod rollup;
 pub mod semantic;
 pub mod storage;
@@ -40,6 +43,43 @@ use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
+
+/// What a conflict-aware [`MemorySystem::remember_fact`] write actually did, so
+/// a caller (e.g. the `memory_add` tool) can report the truth to the model/user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// A new memory was stored.
+    Added(u64),
+    /// An existing memory was corrected (the old row now points to the new one).
+    Updated { new_id: u64, superseded: u64 },
+    /// The fact was already held (same value) — nothing written.
+    Duplicate(u64),
+    /// Nothing written for a benign reason (empty / echo / recently-deleted).
+    Skipped(&'static str),
+}
+
+/// Normalised equality for "same value" under a matching conflict key: compare
+/// lowercased alphanumeric tokens, ignoring punctuation/whitespace. So "User's
+/// favourite colour is teal" == "user favourite colour is teal", but != "…orange".
+fn norm_eq(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { ' ' })
+        .collect::<String>()
+        .split_whitespace().collect::<Vec<_>>().join(" ");
+    norm(a) == norm(b)
+}
+
+/// Result of a post-turn extractor pass. `candidates` is how many facts the
+/// extractor distilled from the turn; `written` is how many were actually new or
+/// corrected. The explicit path uses `candidates == 0` (nothing to distil) — NOT
+/// `written == 0` — to decide the verbatim fallback, so a candidate that merely
+/// deduped against an existing (or just-written) row never triggers a duplicate
+/// verbatim save (N3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExtractStats {
+    pub written: usize,
+    pub candidates: usize,
+}
 
 // High-level memory system interface
 pub struct MemorySystem {
@@ -503,6 +543,192 @@ impl MemorySystem {
         items
     }
 
+    /// Near-duplicate guard for the auto-extractor (M2). A candidate that is
+    /// ≥ [`ECHO_SIM_THRESHOLD`] similar to one of THIS user's own live memories
+    /// is almost certainly an echo of a fact just recalled into the turn (an
+    /// injected memory IS a live stored memory), so it must not be re-stored.
+    /// Unlike the exact-match `content_dedup_status`, this catches paraphrases.
+    /// Returns false whenever there's no embedder, nothing similar, or on any
+    /// error — it only ever SUPPRESSES a write, never deletes.
+    /// `require_key = Some(k)` restricts the match to rows carrying key `k`, so a
+    /// paraphrased restatement of a multi-valued fact ("speaks French" → "speaks
+    /// French fluently") is caught WITHOUT letting a keyed candidate echo-match an
+    /// unrelated (e.g. legacy, keyless) row.
+    async fn is_semantic_echo(&self, content: &str, user_id: &str, require_key: Option<&str>) -> bool {
+        const ECHO_SIM_THRESHOLD: f32 = 0.90;
+        let Some(sem) = &self.semantic_memory else { return false; };
+        let hits = {
+            let s = sem.lock().await;
+            s.search(content, 25).await
+        };
+        let hits = match hits { Ok(h) => h, Err(_) => return false };
+        let key_tag = require_key.map(crate::memory::auto_extract::conflict_key_tag);
+        for (id, _content, sim) in hits {
+            if sim < ECHO_SIM_THRESHOLD { continue; }
+            // The global vector store spans all users; only this user's own live
+            // memory counts (SQL check also excludes deleted/superseded rows).
+            if !self.storage.lock().unwrap().is_live_owned_memory(id, user_id).unwrap_or(false) {
+                continue;
+            }
+            // Keyed candidate: only a SAME-KEY row counts (so a legacy/keyless or
+            // different-subject neighbour never blocks it).
+            if let Some(kt) = &key_tag {
+                let same_key = matches!(self.storage.lock().unwrap().load_any(id),
+                    Ok(Some(m)) if m.tags.iter().any(|t| t == kt));
+                if !same_key { continue; }
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Find a LIVE memory this user holds that conflicts with `content` — i.e.
+    /// the same subject. Primary signal is the `entity:` tag (authoritative);
+    /// otherwise the nearest embedding neighbour ≥ [`CONFLICT_SIM_THRESHOLD`]
+    /// whose distinctive tokens relate (so unrelated facts are never matched).
+    /// Returns `(id, same_value)` — `same_value=true` means a duplicate, `false`
+    /// Conflict-aware single-fact write, shared by the LLM/heuristic extractors,
+    /// the explicit "remember" path, and the `memory_add` tool. It:
+    ///   1. detects a conflict on the EXACT `subject.attribute` key FIRST — if a
+    ///      live row shares the key and the attribute is single-valued, a changed
+    ///      value **supersedes** and an unchanged value is a **duplicate**; a
+    ///      multi-valued attribute or an absent/unreliable key just adds (no
+    ///      token-overlap heuristic — keep-both when unsure, so no false delete);
+    ///   2. only then applies the exact/echo guards (auto, unkeyed writes only);
+    ///   3. otherwise inserts.
+    /// Returns what actually happened so a tool can report it truthfully (N2).
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn remember_fact(
+        &self,
+        user_id:        &str,
+        content:        String,
+        category:       Category,
+        // The subject (`user` or a named person) and attribute this fact is about.
+        // Together with `cardinality` they form the conflict key (`subject.attr`)
+        // that decides supersede-vs-add. `attribute` None (e.g. the heuristic
+        // path) ⇒ unkeyed ⇒ NEVER supersedes — add only. See `conflict_key_of`.
+        subject:        Option<&str>,
+        attribute:      Option<&str>,
+        cardinality:    &str,
+        // The user's message (or clause) the fact came from, for SUBJECT grounding
+        //: a key may supersede only if its subject is grounded here. `None`
+        // (e.g. the model-driven `memory_add` tool, where the model set the
+        // subject deliberately) skips the check.
+        grounding:      Option<&str>,
+        base_tags:      &[String],
+        explicit:       bool,
+        source:         MemorySource,
+        channel:        Option<&str>,
+        conversation_id: Option<&str>,
+        user_message_id: Option<&str>,
+    ) -> Result<WriteOutcome, crate::MiraError> {
+        use crate::memory::auto_extract::{conflict_key_of, conflict_key_tag, Cardinality};
+        let content = content.trim().to_string();
+        if content.is_empty() { return Ok(WriteOutcome::Skipped("empty")); }
+        // Single choke point — never persist a credential, on ANY write path.
+        if crate::memory::auto_extract::looks_like_secret(&content) {
+            warn!("remember_fact: refusing to store credential-like content for user='{user_id}'");
+            return Ok(WriteOutcome::Skipped("secret"));
+        }
+
+        // A PAST/former value must never supersede the current one (R1). The model
+        // often keeps the base attribute and only signals "past" in the content,
+        // so detect it here and route to a distinct `<attr>_past` (multi) key.
+        let past_attr;
+        let attribute = if let Some(a) = attribute {
+            if crate::memory::auto_extract::is_backward_looking(&content) && !a.ends_with("_past") {
+                past_attr = format!("{a}_past");
+                Some(past_attr.as_str())
+            } else { Some(a) }
+        } else { None };
+        // Normalised conflict key (None ⇒ unkeyed ⇒ never supersedes).
+        let mut key_card = attribute.and_then(|a|
+            conflict_key_of(subject.unwrap_or("user"), a, cardinality));
+        // SUBJECT GROUNDING: a key may only supersede when its subject is
+        // grounded in the user's message. If not (e.g. the extractor dropped a
+        // third party's name and mis-keyed the fact to `user.*`), DROP the key so
+        // the write keeps-both instead of overwriting the wrong person's fact.
+        if let (Some((k, _)), Some(text)) = (&key_card, grounding) {
+            let subj = k.split('.').next().unwrap_or("user");
+            // `user.*` uses CLAUSE-level grounding against the fact's value;
+            // a named subject must appear in the message.
+            let grounded = if subj == "user" {
+                crate::memory::auto_extract::user_fact_grounded(text, &content)
+            } else {
+                crate::memory::auto_extract::subject_grounded(subj, text)
+            };
+            if !grounded {
+                debug!("remember_fact: subject '{subj}' not grounded in the message — keeping both (no supersede)");
+                key_card = None;
+            }
+        }
+
+        // Tag builder takes the key explicitly (so `key_card` can still be cleared
+        // below without a borrow conflict).
+        let build_tags = |key: Option<&str>| -> Vec<String> {
+            let mut t: Vec<String> = base_tags.to_vec();
+            if let Some(a) = attribute.filter(|s| !s.is_empty()) { t.push(format!("entity:{a}")); }
+            if let Some(k) = key { t.push(conflict_key_tag(k)); }
+            if explicit { t.push("user_explicit".to_owned()); }
+            t
+        };
+
+        // 1. Keyed conflict: a live row on the SAME subject.attribute.
+        //    A supersede requires ALL of: exact key match (here), a grounded
+        //    subject (above), AND a VALUE check that the new fact actually
+        //    CONTRADICTS the old one — else keep both.
+        if let Some((key, card)) = key_card.clone() {
+            use crate::memory::auto_extract::{value_verdict, is_per_thing_key, ValueVerdict};
+            let existing = self.storage.lock().unwrap().find_by_conflict_key(user_id, &key).ok().flatten();
+            if let Some(old) = existing {
+                match value_verdict(&old.content, &content, is_per_thing_key(&key)) {
+                    ValueVerdict::Same => return Ok(WriteOutcome::Duplicate(old.id)),
+                    ValueVerdict::Contradicts if card == Cardinality::Single => {
+                        let new_id = self.supersede(
+                            old.id, content, category, build_tags(Some(&key)), Some(source), user_id,
+                        ).await?;
+                        debug!("remember_fact: #{} superseded by #{new_id} (key='{key}', value-verified)", old.id);
+                        return Ok(WriteOutcome::Updated { new_id, superseded: old.id });
+                    }
+                    // Otherwise keep both. A MULTI sibling (e.g. another language)
+                    // keeps its key; a SINGLE non-contradicting value (e.g. "no
+                    // longer works at Google" vs "works at Atlassian") drops the key
+                    // so it can't masquerade as the canonical value later.
+                    _ => { if card != Cardinality::Multi { key_card = None; } }
+                }
+            }
+        }
+
+        // 2. No supersede — exact/recent-delete/echo guards (auto writes only).
+        const DEDUP_DELETED_WINDOW_MS: i64 = 7 * 24 * 3600 * 1000;
+        let dedup_since = chrono::Utc::now().timestamp_millis() - DEDUP_DELETED_WINDOW_MS;
+        let (live, recently_deleted) = self.storage.lock().unwrap()
+            .content_dedup_status(user_id, &content, dedup_since).unwrap_or((false, false));
+        if live { return Ok(WriteOutcome::Skipped("duplicate")); }
+        if recently_deleted && !explicit { return Ok(WriteOutcome::Skipped("recently-deleted")); }
+        // Echo guard: only for UNKEYED candidates. A keyed candidate that found no
+        // key-match is a genuinely new (or legacy-correcting) fact — dropping it as
+        // an echo would silently lose an implicit correction of a pre-0.382 row
+        // that has no key: tag (W2 legacy).
+        // Echo guard. For an UNKEYED candidate, match any similar live memory. For
+        // a KEYED one, match only a SAME-KEY row — so a multi-valued paraphrase
+        // ("speaks French" → "speaks French fluently") is caught, while a keyed
+        // correction of a legacy/keyless row is NOT dropped (it adds).
+        let echo_key = key_card.as_ref().map(|(k, _)| k.as_str());
+        if !explicit && self.is_semantic_echo(&content, user_id, echo_key).await {
+            return Ok(WriteOutcome::Skipped("echo"));
+        }
+
+        // 3. Insert (with the key only if it survived the checks above).
+        let id = self.store_scoped(
+            content, category, build_tags(key_card.as_ref().map(|(k, _)| k.as_str())),
+            Some(source), Scope::User, Some(user_id),
+            user_id, &[user_id.to_owned()], channel, conversation_id, user_message_id,
+        ).await?;
+        Ok(WriteOutcome::Added(id))
+    }
+
     // Extract memories from a conversation turn and store them.
     //     // Returns the number of memories stored. Errors are non-fatal — callers
     // should log and continue rather than propagate.
@@ -511,19 +737,58 @@ impl MemorySystem {
         text:    &str,
         user_id: &str,
         channel: &str,
+        // Categories the user has opted into (empty = allow all). Applied to the
+        // HEURISTIC path too, so (e.g.) Relationship-off keeps pets/family out of
+        // auto-capture here, matching the LLM path.
+        allowed_categories: &[String],
+        // The user explicitly asked to remember something: bypass the category
+        // gate and record as `user_explicit`.
+        explicit: bool,
     ) -> Result<usize, crate::MiraError> {
+        // A.6: defence-in-depth — strip reasoning markup even though the caller
+        // now feeds only the user turn (the heuristic patterns are user-phrased,
+        // so assistant text must never reach them).
+        let clean = authorship::strip_reasoning_blocks(text);
         let extractor = auto_extract::HeuristicExtractor::new();
-        let candidates = extractor.extract(text);
+        let candidates = extractor.extract(&clean);
+
+        let source = if explicit {
+            MemorySource::UserExplicit("remember".into())
+        } else {
+            MemorySource::AutoExtracted
+        };
+        const DEDUP_DELETED_WINDOW_MS: i64 = 7 * 24 * 3600 * 1000;
+        let dedup_since = chrono::Utc::now().timestamp_millis() - DEDUP_DELETED_WINDOW_MS;
 
         let mut count = 0;
         for candidate in candidates {
-            self.store_auto(candidate.content).await?;
-            count += 1;
+            let category = self.categorizer.categorize(&candidate.content);
+            // Privacy gate: an opted-out category is not auto-captured — unless
+            // the user explicitly asked to remember this.
+            if !explicit
+                && !allowed_categories.is_empty()
+                && !allowed_categories.iter().any(|c| c.eq_ignore_ascii_case(category.as_str()))
+            {
+                debug!("heuristic extractor: dropping '{}' category '{}' (not in allowed_categories)",
+                    candidate.content, category.as_str());
+                continue;
+            }
+            // Heuristic candidates carry no subject/attribute, so they are UNKEYED
+            // → remember_fact never supersedes, only adds (behind the echo/dedup
+            // guards). Safe by construction: a heuristic fact can't overwrite one.
+            match self.remember_fact(
+                user_id, candidate.content.clone(), category,
+                None, None, "", None, &["auto".to_owned(), "heuristic".to_owned()], explicit,
+                source.clone(), Some(channel), None, None,
+            ).await {
+                Ok(WriteOutcome::Added(_)) | Ok(WriteOutcome::Updated { .. }) => count += 1,
+                Ok(_) => {}
+                Err(e) => warn!("heuristic extractor: write failed: {}", e),
+            }
         }
 
-        let _ = (user_id, channel); // tagging not yet implemented
-
         debug!("auto_extract_and_store: {} memories for user '{}' channel '{}'", count, user_id, channel);
+        let _ = dedup_since;
         Ok(count)
     }
 
@@ -553,23 +818,51 @@ impl MemorySystem {
         user_message_id:    Option<&str>,
         allowed_categories: &[String],
         min_confidence:     auto_extract::ConfidenceTier,
-    ) -> usize {
+        // The user EXPLICITLY asked to remember something this turn: bypass the
+        // category/confidence privacy gates and record as `user_explicit`.
+        explicit:           bool,
+    ) -> ExtractStats {
         use auto_extract::LlmMemoryExtractor;
 
         let extractor = LlmMemoryExtractor::new();
+        // An explicit "remember this" must never be dropped by a privacy gate
+        // (e.g. Relationship being off), so widen the categories and floor the
+        // confidence for that turn only.
+        let all_cats: Vec<String>;
+        let (eff_cats, eff_conf): (&[String], auto_extract::ConfidenceTier) = if explicit {
+            all_cats = auto_extract::ALL_CATEGORIES.iter().map(|s| s.to_string()).collect();
+            (&all_cats, auto_extract::ConfidenceTier::Low)
+        } else {
+            (allowed_categories, min_confidence)
+        };
+        // R4: show the extractor the keys it already uses for this user, so a
+        // correction reuses the same subject.attribute instead of drifting.
+        let existing_keys = self.storage.lock().unwrap()
+            .list_conflict_keys(user_id).unwrap_or_default();
         let candidates = extractor.extract(
-            provider, user_msg, assistant_msg, allowed_categories, min_confidence,
+            provider, user_msg, assistant_msg, eff_cats, eff_conf, &existing_keys,
         ).await;
+        let n_candidates = candidates.len();
         if candidates.is_empty() {
-            return 0;
+            return ExtractStats::default();
         }
+
+        // Provenance: an explicit request is a user-stated fact, not an auto guess.
+        let source = if explicit {
+            MemorySource::UserExplicit("remember".into())
+        } else {
+            MemorySource::AutoExtracted
+        };
+        // Echo / resurrection window: a fact soft-deleted within this window is
+        // not re-created by the auto-extractor (unless the user explicitly asks).
+        const DEDUP_DELETED_WINDOW_MS: i64 = 7 * 24 * 3600 * 1000;
+        let dedup_since = chrono::Utc::now().timestamp_millis() - DEDUP_DELETED_WINDOW_MS;
 
         let mut written = 0usize;
         for c in candidates {
-            // Map the textual category to the storage enum. An unknown
-            // category here would only happen if the LLM emitted something
-            // outside the allowed set; the extractor already filters those,
-            // so default to Fact just as a belt-and-braces fallback.
+            // Map the textual category to the storage enum. An unknown category
+            // would only happen if the LLM emitted something outside the allowed
+            // set; the extractor already filters those, so default to Fact.
             let category = match c.category.as_str() {
                 "fact"         => Category::Fact,
                 "preference"   => Category::Preference,
@@ -578,72 +871,34 @@ impl MemorySystem {
                 "project"      => Category::Project,
                 _              => Category::Fact,
             };
-            let mut tags = vec![
+            let mut base = vec![
                 "auto".to_owned(),
-                format!("entity:{}", c.entity),
                 format!("confidence:{}", c.confidence.to_ascii_lowercase()),
             ];
-            // Coarse topic tag (when present) powers topic-grouped retrieval:
-            // siblings sharing a topic are pulled together for aggregation.
-            if !c.topic.is_empty() {
-                tags.push(format!("topic:{}", c.topic));
-            }
+            // Coarse topic tag (when present) powers topic-grouped retrieval.
+            if !c.topic.is_empty() { base.push(format!("topic:{}", c.topic)); }
 
-            // Conflict check — does this user already have a memory for
-            // this entity? If yes, supersede; if no, insert.
-            let existing = self.storage.lock().unwrap()
-                .find_by_entity_tag(user_id, &c.entity)
-                .ok()
-                .flatten();
-
-            let result = if let Some(old) = existing {
-                // Supersede preserves audit history: the old row stays but
-                // points to the new one via `superseded_by`.
-                debug!(
-                    "auto_extract_llm: superseding memory #{} (entity='{}') for user='{}'",
-                    old.id, c.entity, user_id,
-                );
-                self.supersede(
-                    old.id,
-                    c.content.clone(),
-                    category.clone(),
-                    tags.clone(),
-                    Some(MemorySource::AutoExtracted),
-                    user_id,
-                ).await.map(|_| ())
-            } else {
-                debug!(
-                    "auto_extract_llm: storing new memory (entity='{}') for user='{}'",
-                    c.entity, user_id,
-                );
-                self.store_scoped(
-                    c.content.clone(),
-                    category,
-                    tags,
-                    Some(MemorySource::AutoExtracted),
-                    Scope::User,
-                    Some(user_id),
-                    user_id,
-                    &[user_id.to_owned()],
-                    Some(channel),
-                    conversation_id,
-                    user_message_id,
-                ).await.map(|_| ())
-            };
-
-            match result {
-                Ok(()) => written += 1,
-                Err(e) => warn!(
-                    "auto_extract_llm: write failed for entity='{}': {}", c.entity, e,
-                ),
+            // Conflict-aware write keyed on subject.attribute + cardinality: a
+            // single-valued attribute with a changed value supersedes; a
+            // multi-valued one (languages, pets, siblings) always adds; an
+            // unreliable/absent key only adds (never overwrites).
+            match self.remember_fact(
+                user_id, c.content.clone(), category,
+                Some(&c.subject), Some(&c.entity), &c.cardinality, Some(user_msg), &base, explicit,
+                source.clone(), Some(channel), conversation_id, user_message_id,
+            ).await {
+                Ok(WriteOutcome::Added(_)) | Ok(WriteOutcome::Updated { .. }) => written += 1,
+                Ok(_) => {}
+                Err(e) => warn!("auto_extract_llm: write failed for entity='{}': {}", c.entity, e),
             }
         }
+        let _ = dedup_since; // (now handled inside remember_fact)
 
         info!(
             "auto_extract_llm: persisted {} memory updates for user '{}' (channel '{}')",
             written, user_id, channel,
         );
-        written
+        ExtractStats { written, candidates: n_candidates }
     }
 
     // Extract typed triples from one turn and persist them to the knowledge
@@ -861,6 +1116,36 @@ impl MemorySystem {
         self.storage.lock().unwrap().count()
     }
 
+    /// Instance-wide count of live memories (all users), for the admin status metric.
+    pub fn count_all_live(&self) -> Result<u64, crate::MiraError> {
+        self.storage.lock().unwrap().count_all_live()
+    }
+
+    /// Permanently remove all of a user's own user-scoped memories (and reap
+    /// their vectors). For the "delete everything permanently" action.
+    pub async fn hard_delete_all_user(&self, user_id: &str) -> Result<usize, crate::MiraError> {
+        // Collect ids first (for vector reap), then hard-delete.
+        let ids = self.storage.lock().unwrap().soft_delete_all_user_scope(user_id, user_id)?;
+        let n = self.storage.lock().unwrap().hard_delete_all_user_scope(user_id)?;
+        if let Some(ref sem) = self.semantic_memory {
+            let mut sem = sem.lock().await;
+            for id in &ids { sem.delete_memory(*id); }
+        }
+        Ok(n)
+    }
+
+    /// Retention purge: permanently remove memories soft-deleted more than
+    /// `retention_days` ago. `retention_days == 0` keeps them indefinitely.
+    /// Returns the number purged.
+    pub fn purge_deleted(&self, retention_days: u32) -> Result<usize, crate::MiraError> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = chrono::Utc::now().timestamp_millis()
+            - (retention_days as i64) * 24 * 3600 * 1000;
+        self.storage.lock().unwrap().purge_deleted_before(cutoff)
+    }
+
     // ── Visibility-aware delegates ──────────────────────────────────────────
     // These forward straight to MemoryStorage, which enforces the visibility
     // chokepoint over (scope, scope_id).
@@ -886,6 +1171,28 @@ impl MemorySystem {
         sort:      ListSort,
     ) -> Result<Vec<MemoryItem>, crate::MiraError> {
         self.storage.lock().unwrap().list_visible_sorted(user_id, group_ids, limit, offset, sort)
+    }
+
+    /// Filtered + counted list: `kind` ∈ saved|summary (None = all). Returns
+    /// (page, total) so the UI shows correct counts past the page size.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_visible_filtered(
+        &self,
+        user_id:   &str,
+        group_ids: &[String],
+        kind:      Option<&str>,
+        category:  Option<&str>,
+        scope:     Option<&str>,
+        source:    Option<&str>,
+        tag:       Option<&str>,
+        limit:     u64,
+        offset:    u64,
+        sort:      ListSort,
+    ) -> Result<(Vec<MemoryItem>, u64), crate::MiraError> {
+        self.storage.lock().unwrap().list_visible_filtered(
+            user_id, group_ids, kind, category, scope, source, tag, limit, offset, sort,
+        )
     }
 
     // Reinforce a memory: bump access_count, push last_reinforced = now, and
@@ -982,14 +1289,85 @@ impl MemorySystem {
 
     // Admin-only soft delete: hides from every visibility read but keeps
     // the row in place for audit.
-    pub fn soft_delete(&self, id: u64, actor_user_id: &str) -> Result<bool, crate::MiraError> {
-        self.storage.lock().unwrap().soft_delete(id, actor_user_id)
+    //
+    // A.9: also reap the embedding so a soft-deleted row can't surface as a
+    // semantic hit. `get_visible` already filters `deleted_at`, so this was
+    // latent rather than a live bug, but it left orphan vectors as dead weight
+    // and a trap for any future reader that skips the visibility gate. Mirrors
+    // `delete()`'s vector reap; now async for the semantic lock.
+    pub async fn soft_delete(&self, id: u64, actor_user_id: &str) -> Result<bool, crate::MiraError> {
+        let deleted = self.storage.lock().unwrap().soft_delete(id, actor_user_id)?;
+        if deleted {
+            if let Some(ref sem) = self.semantic_memory {
+                sem.lock().await.delete_memory(id);
+            }
+        }
+        Ok(deleted)
+    }
+
+    /// Owner-scoped soft delete — removes a live user-scoped row owned by
+    /// `user_id` AND its whole supersede chain (so deleting a corrected fact
+    /// doesn't leave older versions live). Reaps the vectors. Returns true if
+    /// anything was deleted. Rejects a non-owned / non-user-scope / already-gone
+    /// head (the provider-level authorization backstop).
+    pub async fn soft_delete_owned(&self, id: u64, user_id: &str) -> Result<bool, crate::MiraError> {
+        // Guard: only a live user-scoped row the caller owns can be deleted here.
+        if !self.storage.lock().unwrap().is_live_owned_memory(id, user_id)? {
+            return Ok(false);
+        }
+        let ids = self.storage.lock().unwrap().soft_delete_chain(id, user_id)?;
+        if !ids.is_empty() {
+            if let Some(ref sem) = self.semantic_memory {
+                let mut sem = sem.lock().await;
+                for i in &ids { sem.delete_memory(*i); }
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Undo a soft-delete for a user's OWN memory (the "Undo" toast). Clears
+    /// `deleted_at` and re-embeds the row so it's searchable again (soft_delete
+    /// reaped the vector). Returns true if a row was restored.
+    pub async fn restore(&self, id: u64, user_id: &str) -> Result<bool, crate::MiraError> {
+        let restored = self.storage.lock().unwrap().restore(id, user_id)?;
+        if let Some(item) = restored {
+            if let Some(ref sem) = self.semantic_memory {
+                let mut sem = sem.lock().await;
+                if let Err(e) = sem.add_memory(item.id, item.content.clone(), item.category.as_str().to_string()).await {
+                    warn!("restore: failed to re-embed memory {}: {}", item.id, e);
+                }
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     // Proxy: does `user_id` own a live memory with exactly this tag? Used
     // by the daily rollup job for idempotency (`rollup:YYYY-MM-DD`).
     pub fn has_tag_for_user(&self, user_id: &str, tag: &str) -> Result<bool, crate::MiraError> {
         self.storage.lock().unwrap().has_tag_for_user(user_id, tag)
+    }
+
+    /// The full supersede chain through `id`, oldest → newest. `include_deleted`
+    /// (admin only) keeps soft-deleted rows; otherwise they're excluded. The
+    /// caller authorizes visibility against the returned rows.
+    pub fn memory_history(&self, id: u64, include_deleted: bool) -> Result<Vec<crate::memory::storage::MemoryItem>, crate::MiraError> {
+        self.storage.lock().unwrap().memory_history(id, include_deleted)
+    }
+
+    /// "Delete all my memories": soft-delete every user-scoped memory the user
+    /// owns (shared group/system memories are untouched) and reap their vectors.
+    /// Returns the number removed.
+    pub async fn soft_delete_all_user(&self, user_id: &str, actor: &str) -> Result<usize, crate::MiraError> {
+        let ids = self.storage.lock().unwrap().soft_delete_all_user_scope(user_id, actor)?;
+        if let Some(ref sem) = self.semantic_memory {
+            let mut sem = sem.lock().await;
+            for id in &ids {
+                sem.delete_memory(*id);
+            }
+        }
+        Ok(ids.len())
     }
 }
 
@@ -1009,7 +1387,8 @@ mod tests {
         MemoryItem {
             id: 1, content: String::new(), category: Category::Fact, tags: vec![],
             source: None, created_at, relevance_score: score, scope: Scope::User,
-            scope_id: None, created_by: None, supersedes: None, superseded_by: None,
+            scope_id: None, created_by: None, source_speaker: "user".into(),
+            supersedes: None, superseded_by: None,
             strength: 1.0, effective_strength: 1.0, access_count: 0, last_reinforced: 0,
             stability: "stable".into(), source_channel: None,
             source_conversation_id: None, source_message_id: None,
@@ -1162,6 +1541,263 @@ mod tests {
         let deleted = mem.delete(id).await.unwrap();
         assert!(deleted);
         assert_eq!(mem.count().unwrap(), 0);
+    }
+
+    // N1: a correction (same entity, changed value) supersedes rather than
+    // piling up a second row, and a restated fact is a no-op duplicate.
+    #[tokio::test]
+    async fn remember_fact_supersedes_corrections_and_skips_duplicates() {
+        let mem = MemorySystem::new(temp_db()).unwrap();
+        let u = "u1";
+        let add = |content: &str| {
+            let content = content.to_string();
+            async { mem.remember_fact(
+                u, content, Category::Preference, Some("user"), Some("favourite_colour"), "single", None,
+                &["tool".to_owned()], true,
+                MemorySource::UserExplicit("memory_add".into()), None, None, None,
+            ).await.unwrap() }
+        };
+        assert!(matches!(add("User's favourite colour is teal").await, WriteOutcome::Added(_)));
+        // Same value restated → duplicate, no new row.
+        assert!(matches!(add("User's favourite colour is teal").await, WriteOutcome::Duplicate(_)));
+        // Corrected value → supersede.
+        assert!(matches!(add("User's favourite colour is orange").await, WriteOutcome::Updated { .. }));
+        // Exactly one live memory on this subject, and it's orange.
+        let (live, _) = mem.list_visible_filtered(u, &[], None, None, None, None, None, 50, 0, ListSort::Recent).unwrap();
+        let colours: Vec<_> = live.iter()
+            .filter(|m| m.tags.iter().any(|t| t == "entity:favourite_colour")).collect();
+        assert_eq!(colours.len(), 1, "one live favourite_colour row after a correction");
+        assert!(colours[0].content.contains("orange"), "the live value is the correction");
+    }
+
+    // Distinct multi-valued facts COEXIST; same-key single-valued
+    // changes (incl. a negation) SUPERSEDE; a wildcard key injection never deletes.
+    #[tokio::test]
+    async fn conflict_key_coexist_supersede_and_injection() {
+        let mem = MemorySystem::new(temp_db()).unwrap();
+        let u = "u1";
+        let tags = vec!["tool".to_owned()];
+        let put = |content: &'static str, subj: &'static str, attr: &'static str, card: &'static str| {
+            mem.remember_fact(
+                u, content.to_string(), Category::Fact, Some(subj), Some(attr), card, None,
+                &tags, true, MemorySource::UserExplicit("memory_add".into()), None, None, None,
+            )
+        };
+        let live_count = || mem.list_visible_filtered(u, &[], None, None, None, None, None, 100, 0, ListSort::Recent);
+
+        // Two languages coexist (multi attribute) — no false supersede.
+        assert!(matches!(put("User speaks French", "user", "language", "multi").await.unwrap(), WriteOutcome::Added(_)));
+        assert!(matches!(put("User also speaks Arabic", "user", "language", "multi").await.unwrap(), WriteOutcome::Added(_)));
+        assert_eq!(live_count().unwrap().0.len(), 2, "French and Arabic both live");
+
+        // Two different people's locations coexist (distinct subjects).
+        assert!(matches!(put("Leila lives in Perth", "leila", "location", "single").await.unwrap(), WriteOutcome::Added(_)));
+        assert!(matches!(put("Omar lives in Perth", "omar", "location", "single").await.unwrap(), WriteOutcome::Added(_)));
+        assert_eq!(live_count().unwrap().0.len(), 4, "both siblings' locations live");
+
+        // Correction: Leila moves — supersedes Leila only, Omar untouched.
+        assert!(matches!(put("Leila moved to Sydney", "leila", "location", "single").await.unwrap(), WriteOutcome::Updated { .. }));
+        assert_eq!(live_count().unwrap().0.len(), 4, "still 4: Leila superseded in place, Omar unchanged");
+
+        // A negation on the same single attribute supersedes (not "already held").
+        assert!(matches!(put("User is allergic to penicillin", "user", "penicillin_allergy", "single").await.unwrap(), WriteOutcome::Added(_)));
+        assert!(matches!(put("User is not allergic to penicillin", "user", "penicillin_allergy", "single").await.unwrap(), WriteOutcome::Updated { .. }));
+
+        // Injection: an attribute of "%" is unkeyed → adds, never overwrites.
+        let before = live_count().unwrap().0.len();
+        let out = put("User's favourite colour is teal", "user", "favourite_colour", "single").await.unwrap();
+        assert!(matches!(out, WriteOutcome::Added(_)));
+        let out2 = put("garbage", "user", "%", "single").await.unwrap(); // crafted wildcard key
+        assert!(matches!(out2, WriteOutcome::Added(_)), "wildcard key adds, never supersedes");
+        assert_eq!(live_count().unwrap().0.len(), before + 2, "injection added a row, deleted nothing");
+    }
+
+    // Deleting a corrected fact removes the WHOLE supersede chain, so an old
+    // version isn't left live-but-orphaned (and still served via /history).
+    #[tokio::test]
+    async fn delete_removes_whole_supersede_chain() {
+        let mem = MemorySystem::new(temp_db()).unwrap();
+        let u = "u1";
+        let tags = vec!["tool".to_owned()];
+        let mk = |content: &'static str| {
+            mem.remember_fact(
+                u, content.to_string(), Category::Preference, Some("user"), Some("favourite_colour"), "single", None,
+                &tags, true, MemorySource::UserExplicit("memory_add".into()), None, None, None,
+            )
+        };
+        let teal_id = match mk("User's favourite colour is teal").await.unwrap() { WriteOutcome::Added(id) => id, o => panic!("{o:?}") };
+        let orange_id = match mk("User's favourite colour is orange").await.unwrap() { WriteOutcome::Updated { new_id, .. } => new_id, o => panic!("{o:?}") };
+        assert!(mem.soft_delete_owned(orange_id, u).await.unwrap());
+        assert!(mem.get_visible(orange_id, u, &[]).unwrap().is_none(), "head gone");
+        assert!(mem.get_visible(teal_id, u, &[]).unwrap().is_none(), "predecessor gone too");
+        assert!(mem.memory_history(orange_id, false).unwrap().is_empty(), "non-admin history excludes the deleted chain");
+    }
+
+    // ── Standing conflict-resolution matrix (followups 2–6) ──────────────────
+    // Replays the {subject, attribute, content, cardinality, grounding} the
+    // extractor would emit for each live case, and asserts the final live set.
+    // The invariant: NEVER supersede unless the key matches exactly, the attribute
+    // is single-valued, and the subject is grounded — otherwise keep both.
+    #[tokio::test]
+    async fn conflict_resolution_matrix() {
+        use WriteOutcome::*;
+        // One scenario = a fresh store + a sequence of writes + the expected live
+        // contents (substrings). `g` is the user's message (grounding).
+        struct Step { subj: &'static str, attr: &'static str, card: &'static str, content: &'static str, g: &'static str }
+        struct Case { name: &'static str, steps: Vec<Step>, live: Vec<&'static str>, dead: Vec<&'static str> }
+        let s = |subj, attr, card, content, g| Step { subj, attr, card, content, g };
+        let cases = vec![
+            Case { name: "teal→orange (single, supersede)",
+                steps: vec![
+                    s("user","favourite_colour","single","User's favourite colour is teal","my favourite colour is teal"),
+                    s("user","favourite_colour","single","User's favourite colour is orange","my favourite colour is now orange"),
+                ], live: vec!["orange"], dead: vec!["teal"] },
+            Case { name: "French+Arabic (multi, coexist)",
+                steps: vec![
+                    s("user","language","multi","User speaks French","I speak French"),
+                    s("user","language","multi","User speaks Arabic","I also speak Arabic"),
+                ], live: vec!["French","Arabic"], dead: vec![] },
+            Case { name: "two siblings' locations (distinct subjects, coexist)",
+                steps: vec![
+                    s("leila","location","single","Leila lives in Perth","my sister Leila lives in Perth"),
+                    s("omar","location","single","Omar lives in Perth","my brother Omar lives in Perth"),
+                ], live: vec!["Leila lives in Perth","Omar lives in Perth"], dead: vec![] },
+            Case { name: "Leila moves (same subject single, supersede)",
+                steps: vec![
+                    s("leila","location","single","Leila lives in Perth","my sister Leila lives in Perth"),
+                    s("leila","location","single","Leila lives in Sydney","Leila moved to Sydney"),
+                ], live: vec!["Sydney"], dead: vec!["Perth"] },
+            Case { name: "penicillin negation (per-thing single, supersede)",
+                steps: vec![
+                    s("user","allergy_penicillin","single","User is allergic to penicillin","I am allergic to penicillin"),
+                    s("user","allergy_penicillin","single","User is not allergic to penicillin","I am not allergic to penicillin"),
+                ], live: vec!["not allergic"], dead: vec![] },
+            Case { name: "coffee polarity (dislikes→likes key, supersede)",
+                steps: vec![
+                    s("user","likes_coffee","single","User likes coffee","I like coffee"),
+                    s("user","dislikes_coffee","single","User no longer likes coffee","I don't like coffee anymore"),
+                ], live: vec!["no longer likes coffee"], dead: vec!["User likes coffee"] },
+            Case { name: "previous employer (past content, coexist) — R1",
+                steps: vec![
+                    s("user","employer","single","User works at Atlassian","I work at Atlassian"),
+                    s("user","employer","single","User previously worked at Google","my previous employer was Google"),
+                ], live: vec!["Atlassian","Google"], dead: vec![] },
+            Case { name: "mis-attributed third party must NOT overwrite user",
+                steps: vec![
+                    s("user","location","single","User lives in Sydney","I live in Sydney"),
+                    // extractor dropped the name and mis-keyed to user.location:
+                    s("user","location","single","User has moved to Doha","سارة has moved to Doha"),
+                ], live: vec!["Sydney","Doha"], dead: vec![] },
+            Case { name: "\"I heard <name> moved\" must NOT overwrite user",
+                steps: vec![
+                    s("user","location","single","User lives in Sydney","I live in Sydney"),
+                    s("user","location","single","User moved to Doha","I heard Sara moved to Doha"),
+                ], live: vec!["Sydney"], dead: vec![] },
+            Case { name: "negated unrelated value must NOT overwrite current",
+                steps: vec![
+                    s("user","employer","single","User works at Atlassian","I work at Atlassian"),
+                    s("user","employer","single","User no longer works at Google","I no longer work at Google"),
+                ], live: vec!["Atlassian"], dead: vec![] },
+            Case { name: "negated CURRENT value supersedes (control)\",
+                steps: vec![
+                    s("user","location","single","User lives in Perth","I live in Perth"),
+                    s("user","location","single","User no longer lives in Perth","I no longer live in Perth"),
+                ], live: vec!["no longer lives in Perth"], dead: vec!["User lives in Perth"] },
+            Case { name: "\"moved from X to Y\" supersedes, not duplicate",
+                steps: vec![
+                    s("user","location","single","User lives in Brisbane","I live in Brisbane"),
+                    s("user","location","single","User moved from Brisbane to Hobart","I moved from Brisbane to Hobart"),
+                ], live: vec!["Hobart"], dead: vec!["User lives in Brisbane"] },
+            Case { name: "\"switched from X to Y\" supersedes (per-thing)",
+                steps: vec![
+                    s("user","favourite_colour","single","User's favourite colour is teal","my favourite colour is teal"),
+                    s("user","favourite_colour","single","User switched from teal to orange","I switched from teal to orange"),
+                ], live: vec!["orange"], dead: vec!["favourite colour is teal"] },
+            Case { name: "\"after leaving X\" supersedes employer",
+                steps: vec![
+                    s("user","employer","single","User works at Atlassian","I work at Atlassian"),
+                    s("user","employer","single","User now works at Canva after leaving Atlassian","I now work at Canva after leaving Atlassian"),
+                ], live: vec!["Canva"], dead: vec!["User works at Atlassian"] },
+        ];
+        for c in cases {
+            let mem = MemorySystem::new(temp_db()).unwrap();
+            let u = "u";
+            let tags = vec!["tool".to_owned()];
+            for st in &c.steps {
+                let out = mem.remember_fact(
+                    u, st.content.to_string(), Category::Fact, Some(st.subj), Some(st.attr), st.card,
+                    Some(st.g), &tags, true, MemorySource::UserExplicit("memory_add".into()), None, None, None,
+                ).await.unwrap();
+                assert!(!matches!(out, Skipped(r) if r == "secret"), "{}: unexpected secret skip", c.name);
+            }
+            let (rows, _) = mem.list_visible_filtered(u, &[], None, None, None, None, None, 100, 0, ListSort::Recent).unwrap();
+            let contents: Vec<String> = rows.iter().map(|m| m.content.clone()).collect();
+            for want in &c.live {
+                assert!(contents.iter().any(|x| x.contains(want)),
+                    "{}: expected a LIVE row containing {want:?}, got {contents:?}", c.name);
+            }
+            for gone in &c.dead {
+                assert!(!contents.iter().any(|x| x.contains(gone)),
+                    "{}: expected NO live row containing {gone:?}, got {contents:?}", c.name);
+            }
+        }
+    }
+
+    // R1 regression: a PAST value (detected from the content) must NOT overwrite
+    // the current one, even when the model keeps the base attribute label.
+    #[tokio::test]
+    async fn past_value_does_not_overwrite_current() {
+        let mem = MemorySystem::new(temp_db()).unwrap();
+        let u = "u1";
+        let tags = vec!["tool".to_owned()];
+        let put = |content: &'static str| mem.remember_fact(
+            u, content.to_string(), Category::Fact, Some("user"), Some("employer"), "single", None,
+            &tags, true, MemorySource::UserExplicit("memory_add".into()), None, None, None,
+        );
+        assert!(matches!(put("User works at Atlassian").await.unwrap(), WriteOutcome::Added(_)));
+        // "previously" in the content routes this to employer_past → it ADDS, it
+        // does NOT supersede the current Atlassian row.
+        assert!(matches!(put("User previously worked at Google").await.unwrap(), WriteOutcome::Added(_)));
+        let (live, _) = mem.list_visible_filtered(u, &[], None, None, None, None, None, 50, 0, ListSort::Recent).unwrap();
+        assert!(live.iter().any(|m| m.content.contains("Atlassian")), "current employer kept");
+        assert!(live.iter().any(|m| m.content.contains("Google")), "past employer kept alongside");
+    }
+
+    // N4: restore only undoes the caller's OWN delete, not another user's.
+    #[tokio::test]
+    async fn restore_is_owner_scoped() {
+        let mem = MemorySystem::new(temp_db()).unwrap();
+        let id = mem.store_scoped(
+            "User's cat is Mango".into(), Category::Relationship, vec![], None,
+            Scope::User, Some("alice"), "alice", &["alice".into()], None, None, None,
+        ).await.unwrap();
+        assert!(mem.soft_delete(id, "alice").await.unwrap());
+        // A different user cannot undo alice's delete.
+        assert!(!mem.restore(id, "bob").await.unwrap(), "cross-user restore refused");
+        // The owner can.
+        assert!(mem.restore(id, "alice").await.unwrap(), "owner restore allowed");
+        assert!(mem.get_visible(id, "alice", &[]).unwrap().is_some(), "row live again after restore");
+    }
+
+    // M5: a category filter is applied in SQL, so the total reflects it.
+    #[tokio::test]
+    async fn list_filter_total_is_server_side() {
+        let mem = MemorySystem::new(temp_db()).unwrap();
+        for (content, cat) in [
+            ("User likes tea", Category::Preference),
+            ("User likes cycling", Category::Preference),
+            ("User works at Acme", Category::Fact),
+        ] {
+            mem.store_scoped(
+                content.into(), cat, vec![], None, Scope::User, Some("u"), "u", &["u".into()], None, None, None,
+            ).await.unwrap();
+        }
+        // Filter to preference → total is 2 (not 3), even with a tiny page.
+        let (items, total) = mem.list_visible_filtered(
+            "u", &[], None, Some("preference"), None, None, None, 1, 0, ListSort::Recent,
+        ).unwrap();
+        assert_eq!(total, 2, "total reflects the category filter");
+        assert_eq!(items.len(), 1, "page is capped but total is full");
     }
 
     #[tokio::test]

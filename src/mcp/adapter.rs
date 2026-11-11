@@ -37,6 +37,20 @@ use crate::tools::{Tier, Tool, ToolArgs, ToolResult, ToolVisibility};
 // Adapter for one remote MCP tool. Cheap to clone (everything is
 // `Arc`'d). The registry constructs one per `(server, tool)` at
 // startup and registers it into the agent's `ToolRegistry`.
+/// Drop MIRA's internal, underscore-prefixed context keys from tool args before
+/// they cross the process boundary to a remote MCP server. These
+/// keys (`_user_id`, `_user_message`, `_conversation_id`, `_agent_id`, …) are
+/// injected by the agent for first-party tools and must never leak outward.
+fn strip_internal_keys(args: ToolArgs) -> ToolArgs {
+    match args {
+        Value::Object(mut m) => {
+            m.retain(|k, _| !k.starts_with('_'));
+            Value::Object(m)
+        }
+        other => other,
+    }
+}
+
 pub struct McpToolAdapter {
     // Namespaced public name: `mcp__<server>__<tool>`.
     qualified_name: String,
@@ -206,6 +220,24 @@ mod render_tests {
     use tempfile::tempdir;
 
     #[test]
+    fn internal_underscore_keys_are_stripped_before_dispatch() {
+        // A remote MCP server must receive only the model-supplied args,
+        // never MIRA's injected `_user_id` / `_user_message` / `_conversation_id`.
+        let args = json!({
+            "query": "weather in Perth",
+            "_user_id": "alice",
+            "_user_message": "my password is hunter2, what's the weather?",
+            "_conversation_id": "c1",
+            "_agent_id": "a1",
+        });
+        let out = strip_internal_keys(args);
+        let obj = out.as_object().unwrap();
+        assert_eq!(obj.len(), 1, "only the model arg should remain: {obj:?}");
+        assert_eq!(obj.get("query").unwrap(), "weather in Perth");
+        assert!(!obj.keys().any(|k| k.starts_with('_')), "no _* keys may survive: {obj:?}");
+    }
+
+    #[test]
     fn text_blocks_pass_through() {
         let v = json!({"content":[{"type":"text","text":"Navigated to https://example.com"}],"isError":false});
         assert_eq!(render_call_result(&v, None, "t"), "Navigated to https://example.com");
@@ -263,6 +295,13 @@ impl Tool for McpToolAdapter {
     fn args_schema(&self) -> Value { self.schema.clone() }
 
     async fn execute(&self, args: ToolArgs) -> Result<ToolResult, MiraError> {
+        // Never forward MIRA's internal, underscore-prefixed
+        // context keys (`_user_id`, `_user_message`, `_conversation_id`,
+        // `_agent_id`, …) to a remote MCP server. They carry caller identity and
+        // the raw user message (which may hold a secret the memory guard would
+        // refuse), and a strict-schema server would reject the unknown key. A
+        // well-behaved server never needs them — strip them at the boundary.
+        let args = strip_internal_keys(args);
         match self.client.call_tool(&self.remote_name, args).await {
             Ok(v) => {
                 // Render content blocks: text passes through; image blocks

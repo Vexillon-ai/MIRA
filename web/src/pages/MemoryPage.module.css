@@ -172,6 +172,9 @@
   color: var(--text-primary);
   margin-bottom: 8px;
   white-space: pre-wrap;
+  /* Clear the absolutely-positioned action cluster (top-right) so text never
+     runs under the icons. ~3 icons + gaps. */
+  padding-right: 92px;
 }
 
 .cardMeta {
@@ -218,8 +221,23 @@
   right: 10px;
   display: flex;
   gap: 4px;
-  opacity: 0;
+  /* Always visible — hover-only hid actions from touch + keyboard users. */
+  opacity: 0.55;
   transition: opacity var(--transition);
+}
+.card:hover .cardActions,
+.card:focus-within .cardActions { opacity: 1; }
+
+/* On narrow screens, let the actions flow below the content instead of
+   overlapping it (the top-right overlay collided with wrapped text). */
+@media (max-width: 560px) {
+  .cardActions {
+    position: static;
+    opacity: 1;
+    margin-top: 8px;
+    justify-content: flex-end;
+  }
+  .cardContent { padding-right: 0; }
 }
 
 .editBody {
@@ -295,6 +313,55 @@
 }
 .btnSecondary:hover { background: var(--border); }
 
+.btnDanger {
+  padding: 8px 14px;
+  background: var(--error, #f25c5c);
+  border: none;
+  border-radius: var(--radius-md);
+  color: white;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all var(--transition);
+}
+.btnDanger:hover:not(:disabled) { opacity: 0.9; }
+.btnDanger:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Provenance deep-link to the source conversation. */
+.provLink { color: var(--accent-light); text-decoration: none; }
+.provLink:hover { text-decoration: underline; }
+
+/* Undo toast (bottom-centre), shown briefly after a delete. */
+.undoToast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.3);
+  font-size: 13px;
+  color: var(--text-primary);
+  z-index: 60;
+}
+.undoBtn {
+  background: none;
+  border: none;
+  color: var(--accent-light);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.undoBtn:hover:not(:disabled) { text-decoration: underline; }
+.undoBtn:disabled { opacity: 0.6; cursor: default; }
+
 .scopeBadge {
   display: inline-flex;
   align-items: center;
@@ -354,3 +421,82 @@
 .strengthWrap[data-stability="ephemeral"] .strengthFill { background: var(--warning); }
 .strengthWrap[data-stability="episodic"]  .strengthFill { background: var(--info); }
 .strengthWrap[data-stability="permanent"] .strengthFill { background: var(--success); }
+
+/* ── WP5: tabs, provenance, history modal, danger zone ─────────────────────── */
+.headerActions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.tab {
+  padding: 8px 14px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.tab:hover { color: var(--text-secondary); }
+.tabActive { color: var(--accent-light); border-bottom-color: var(--accent); }
+
+.provenance {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+/* In-flow danger row (was floated bottom-right, which overlapped on mobile). */
+.dangerZone {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.dangerLink {
+  background: none;
+  border: none;
+  color: var(--error, #f25c5c);
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.8;
+  padding: 0;
+}
+.dangerLink:hover:not(:disabled) { text-decoration: underline; opacity: 1; }
+.dangerLink:disabled { opacity: 0.5; cursor: default; }
+@media (max-width: 560px) {
+  .dangerZone { justify-content: flex-start; }
+}
+
+.modalOverlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 50; padding: 16px;
+}
+.modal {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  width: min(560px, 100%);
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.modalHead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+
+.history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.historyItem {
+  padding: 10px;
+  border-left: 3px solid var(--border);
+  background: var(--bg-overlay);
+  border-radius: var(--radius-md);
+}
+.historyItem[data-current='true'] { border-left-color: var(--accent); }

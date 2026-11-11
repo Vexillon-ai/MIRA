@@ -1,0 +1,12 @@
+{
+  "server": "graphiti",
+  "verbs": {
+    "search": {
+      "tool": "search_memory_facts",
+      "args": { "query": "$query", "group_id": "$user_id", "max_facts": "$k" },
+      "result": { "list_at": "facts", "content_at": "fact", "id_at": "uuid" }
+    },
+    "add": { "tool": "add_memory", "args": { "episode_body": "$content", "group_id": "$user_id" } }
+  },
+  "capabilities": { "read": true, "write": true, "forget": false }
+}

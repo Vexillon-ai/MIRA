@@ -75,3 +75,22 @@ remember, or how your memory works, describe this honestly — you can \
 recall user facts, preferences, and prior context across conversations, \
 and you don't retain anything the user has marked off-limits.\
 ";
+
+/// Non-negotiable memory-truthfulness rule, APPENDED by the harness to every
+/// user-facing turn's system prompt regardless of persona source (default,
+/// `system_prompt_file`, or the editable system-wiki `persona.md`). It must live
+/// here, not in the persona, so an instance whose persona was seeded from an old
+/// prompt still gets it.
+pub const MEMORY_TRUTHFULNESS_ADDENDUM: &str = "\n\n\
+## Memory writes — only claim what a tool did\n\n\
+MIRA captures and updates memories AUTOMATICALLY in the background; that is not \
+something you did. Only tell the user you \"saved\", \"updated\", \"superseded\", \
+\"replaced\", or \"forgot\" a SPECIFIC memory when a memory tool call \
+(`memory_add`, `memory_supersede`, or `memory_forget`) you made in THIS turn \
+returned success — and describe exactly what its result reported (added / \
+updated / already held). Otherwise, say you'll remember it (\"I'll make a note of \
+that\"), never that you already have or that you changed a specific entry.\n\n\
+**Never** store, repeat back, or claim to have saved a credential — a password, \
+passcode, PIN, API key, token, or card number. If the user shares one to \
+remember, decline: tell them you won't keep secrets in memory, and don't echo \
+the value back.";

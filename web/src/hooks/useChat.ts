@@ -194,6 +194,15 @@ export function useChat() {
                 pushThinking({ type: 'wiki_context', pages: payload.pages })
               }
             } catch { /* ignore */ }
+          } else if (evName === 'memory_context') {
+            try {
+              const payload = JSON.parse(data)
+              const served: string[] = Array.isArray(payload?.served) ? payload.served : []
+              const unavailable: string[] = Array.isArray(payload?.unavailable) ? payload.unavailable : []
+              if (served.length || unavailable.length) {
+                pushThinking({ type: 'memory_context', served, unavailable })
+              }
+            } catch { /* ignore */ }
           } else if (evName === 'reasoning') {
             // Reasoning models stream a separate chain-of-thought.
             // Multi-round tool loops may emit several `reasoning`

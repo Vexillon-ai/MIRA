@@ -165,6 +165,12 @@ pub struct MemoryItem {
     pub scope_id: Option<String>,
     #[serde(default)]
     pub created_by: Option<String>,
+    // Who SPOKE the source content (A.1): `user` | `assistant` | `system` |
+    // `rollup`. Distinct from `created_by` (the owning user). Auto-extracted
+    // rows should be `user` once the authorship gates pass; a non-`user` value
+    // flags a leak.
+    #[serde(default = "default_source_speaker")]
+    pub source_speaker: String,
     #[serde(default)]
     pub supersedes: Option<u64>,
     #[serde(default)]
@@ -206,6 +212,7 @@ pub struct MemoryItem {
 
 fn default_strength() -> f32 { 1.0 }
 fn default_stability() -> String { "stable".into() }
+fn default_source_speaker() -> String { "user".into() }
 
 // SQLite memory storage backend
 pub struct MemoryStorage {
@@ -308,6 +315,12 @@ impl MemoryStorage {
             // Soft-delete (admin-only) — rows stay for audit but become invisible.
             "ALTER TABLE memories ADD COLUMN deleted_at INTEGER",
             "ALTER TABLE memories ADD COLUMN deleted_by TEXT",
+            // Who SPOKE the content this memory was distilled from (A.1):
+            // 'user' | 'assistant' | 'system' | 'rollup'. Distinct from
+            // `created_by` (which records the owning user_id, not the speaker).
+            // The authorship gates (A.2) should keep all auto-extracted rows at
+            // 'user'; a non-'user' value is a signal something leaked.
+            "ALTER TABLE memories ADD COLUMN source_speaker TEXT NOT NULL DEFAULT 'user'",
         ];
         for sql in alters {
             // Swallow "duplicate column name" errors so migration is idempotent.
@@ -324,6 +337,29 @@ impl MemoryStorage {
         let _ = self.conn.execute(
             "UPDATE memories SET created_by = user_id WHERE created_by IS NULL",
             [],
+        );
+        // A.1 backfill: rollup summaries are tagged 'rollup'; mark their speaker
+        // so day-summaries are distinguishable from user-stated facts. Everything
+        // else keeps the column default 'user'.
+        let _ = self.conn.execute(
+            "UPDATE memories SET source_speaker = 'rollup' WHERE tags LIKE '%rollup%'",
+            [],
+        );
+        // One-off cleanup: earlier rollup rows stored raw model reasoning
+        // (`<think>`/`<thinking>`) because the summary was checked/stored without
+        // stripping the output. Soft-delete those garbage rows so they stop
+        // surfacing as "facts". Idempotent (already-deleted rows are skipped);
+        // new rollups are clean (see rollup::clean_rollup_summary).
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        // Match only a LEADING reasoning block (L11): a rollup whose content
+        // starts with `<think`/`<thinking` is the id-4491 garbage class. The old
+        // `%Thinking Process%` substring could catch a legitimate rollup that
+        // merely quotes the phrase, so it's dropped.
+        let _ = self.conn.execute(
+            "UPDATE memories SET deleted_at = ?1, deleted_by = 'migration:rollup-reasoning'
+             WHERE deleted_at IS NULL AND tags LIKE '%rollup%'
+               AND (TRIM(content) LIKE '<think%' OR content LIKE '%</think%')",
+            [now_ms],
         );
         // last_reinforced is stored in milliseconds. Seed unbackfilled rows
         // from created_at (which is in seconds) × 1000.
@@ -732,6 +768,161 @@ impl MemoryStorage {
         Ok(rows > 0)
     }
 
+    /// De-dup signal for a candidate memory for `user_id`. Returns
+    /// `(live_exists, recently_deleted)`: whether a live (non-deleted,
+    /// non-superseded) memory with the same normalised content already exists,
+    /// and whether one was soft-deleted at or after `deleted_since_ms`. Used to
+    /// stop the auto-extractor re-storing a just-recalled fact (echo) or
+    /// resurrecting one the user just deleted.
+    /// Is memory `id` a LIVE, non-superseded memory owned by `user_id` at user
+    /// scope? Used by the semantic echo-guard (M2) to confirm a vector-search hit
+    /// is this user's own live memory before treating a paraphrase as an echo.
+    pub fn is_live_owned_memory(&self, id: u64, user_id: &str) -> Result<bool, MiraError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM memories
+             WHERE id = ?1 AND user_id = ?2 AND scope = 'user'
+               AND deleted_at IS NULL AND superseded_by IS NULL",
+            params![id as i64, user_id],
+            |r| r.get(0),
+        ).map_err(|e| MiraError::MemoryError(format!("is_live_owned_memory: {e}")))?;
+        Ok(n > 0)
+    }
+
+    pub fn content_dedup_status(
+        &self, user_id: &str, candidate: &str, deleted_since_ms: i64,
+    ) -> Result<(bool, bool), MiraError> {
+        let target = normalize_for_dedup(candidate);
+        if target.is_empty() {
+            return Ok((false, false));
+        }
+        let mut stmt = self.conn
+            .prepare("SELECT content, deleted_at, superseded_by FROM memories WHERE user_id = ?1")
+            .map_err(|e| MiraError::MemoryError(format!("dedup prepare: {e}")))?;
+        let rows = stmt
+            .query_map(params![user_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                ))
+            })
+            .map_err(|e| MiraError::MemoryError(format!("dedup query: {e}")))?;
+        let (mut live, mut recently_deleted) = (false, false);
+        for row in rows {
+            let (content, deleted_at, superseded_by) =
+                row.map_err(|e| MiraError::MemoryError(format!("dedup row: {e}")))?;
+            if normalize_for_dedup(&content) != target {
+                continue;
+            }
+            match deleted_at {
+                // A live, non-superseded row with this content is "already present".
+                None if superseded_by.is_none() => { live = true; break; }
+                None => {}
+                Some(ts) if ts >= deleted_since_ms => recently_deleted = true,
+                Some(_) => {}
+            }
+        }
+        Ok((live, recently_deleted))
+    }
+
+    /// Soft-delete ALL of a user's own user-scoped live memories (their
+    /// "delete all my memory" action). Returns the ids affected so the caller
+    /// can reap their vectors. Group/system memories are shared and untouched.
+    pub fn soft_delete_all_user_scope(&self, user_id: &str, actor: &str) -> Result<Vec<u64>, MiraError> {
+        let ids: Vec<u64> = {
+            let mut stmt = self.conn
+                .prepare("SELECT id FROM memories WHERE user_id = ?1 AND scope = 'user' AND deleted_at IS NULL")
+                .map_err(|e| MiraError::MemoryError(format!("purge select: {e}")))?;
+            let rows = stmt.query_map(params![user_id], |r| r.get::<_, i64>(0))
+                .map_err(|e| MiraError::MemoryError(format!("purge query: {e}")))?;
+            rows.filter_map(|r| r.ok()).map(|i| i as u64).collect()
+        };
+        if ids.is_empty() {
+            return Ok(ids);
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        self.conn.execute(
+            "UPDATE memories SET deleted_at = ?1, deleted_by = ?2
+             WHERE user_id = ?3 AND scope = 'user' AND deleted_at IS NULL",
+            params![now, actor, user_id],
+        ).map_err(|e| MiraError::MemoryError(format!("purge update: {e}")))?;
+        Ok(ids)
+    }
+
+    /// The full supersede chain through `id`, oldest → newest. Walks `supersedes`
+    /// back to the root then `superseded_by` forward. `include_deleted` keeps
+    /// soft-deleted rows (admin only); otherwise they're dropped so a non-admin
+    /// can't read deleted content through history. Empty if the id is unknown.
+    /// No scope filter — the caller authorizes.
+    pub fn memory_history(&self, id: u64, include_deleted: bool) -> Result<Vec<MemoryItem>, MiraError> {
+        let Some(start) = self.load_any(id)? else { return Ok(Vec::new()); };
+        // Back to the root (oldest).
+        let mut root = start;
+        let mut guard = 0;
+        while let Some(prev) = root.supersedes {
+            guard += 1;
+            if guard > 1000 { break; }
+            match self.load_any(prev)? { Some(p) => root = p, None => break }
+        }
+        // Forward from the root, collecting the chain.
+        let mut chain = vec![root.clone()];
+        let mut cur = root;
+        guard = 0;
+        while let Some(next) = cur.superseded_by {
+            guard += 1;
+            if guard > 1000 { break; }
+            match self.load_any(next)? { Some(n) => { chain.push(n.clone()); cur = n; } None => break }
+        }
+        // Drop soft-deleted rows unless the caller is allowed to see them.
+        if !include_deleted && !chain.is_empty() {
+            let ids: Vec<i64> = chain.iter().map(|m| m.id as i64).collect();
+            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!("SELECT id FROM memories WHERE deleted_at IS NOT NULL AND id IN ({placeholders})");
+            let mut stmt = self.conn.prepare(&sql)
+                .map_err(|e| MiraError::MemoryError(format!("history deleted-check: {e}")))?;
+            let deleted: std::collections::HashSet<u64> = stmt
+                .query_map(rusqlite::params_from_iter(ids.iter()), |r| r.get::<_, i64>(0))
+                .map_err(|e| MiraError::MemoryError(format!("history deleted-check: {e}")))?
+                .filter_map(Result::ok).map(|i| i as u64).collect();
+            chain.retain(|m| !deleted.contains(&m.id));
+        }
+        Ok(chain)
+    }
+
+    /// Permanently remove ALL of a user's own user-scoped rows (their "delete
+    /// everything, for good" action). Returns the count removed.
+    pub fn hard_delete_all_user_scope(&self, user_id: &str) -> Result<usize, MiraError> {
+        let n = self.conn.execute(
+            "DELETE FROM memories WHERE user_id = ?1 AND scope = 'user'",
+            params![user_id],
+        ).map_err(|e| MiraError::MemoryError(format!("hard purge: {e}")))?;
+        Ok(n)
+    }
+
+    /// Permanently remove soft-deleted rows whose `deleted_at` is older than
+    /// `cutoff_ms` (retention purge). Vectors were already reaped on soft-delete.
+    /// Returns the number of rows hard-deleted.
+    pub fn purge_deleted_before(&self, cutoff_ms: i64) -> Result<usize, MiraError> {
+        let n = self.conn.execute(
+            "DELETE FROM memories WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+            params![cutoff_ms],
+        ).map_err(|e| MiraError::MemoryError(format!("retention purge: {e}")))?;
+        Ok(n)
+    }
+
+    /// Instance-wide count of LIVE memories (all users, excluding soft-deleted
+    /// and superseded rows) — for the admin status metric. `count()` is scoped to
+    /// the storage's bound user_id, which under-reports on a multi-user install.
+    pub fn count_all_live(&self) -> Result<u64, MiraError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND superseded_by IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| MiraError::MemoryError(format!("Failed to count memories: {e}")))
+    }
+
     // Get total count of memories for this user
     pub fn count(&self) -> Result<u64, MiraError> {
         self.conn
@@ -809,6 +1000,93 @@ impl MemoryStorage {
             .collect();
 
         Ok(items)
+    }
+
+    /// Like `list_visible_sorted` but filters by `kind` ("saved" = non-rollup,
+    /// "summary" = rollup-tagged; None = all) in SQL and ALSO returns the total
+    /// matching count — so the UI's tab counts stay correct past the page size
+    /// (the old client-side split truncated at the fetch cap).
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_visible_filtered(
+        &self,
+        user_id:   &str,
+        group_ids: &[String],
+        kind:      Option<&str>,
+        // All applied IN SQL so the returned `total` reflects every filter (M5),
+        // not just visibility+kind. category/scope/source are validated enums;
+        // `tag` is user text, matched as an exact JSON-array member (bound).
+        category:  Option<&str>,
+        scope:     Option<&str>,
+        source:    Option<&str>,
+        tag:       Option<&str>,
+        limit:     u64,
+        offset:    u64,
+        sort:      ListSort,
+    ) -> Result<(Vec<MemoryItem>, u64), MiraError> {
+        let visibility = visibility_where_clause(group_ids.len(), 1);
+        // `kind` is a fixed enum (not user text) → safe to inline. Rollups carry
+        // a `rollup` tag in the JSON tags array.
+        let kind_clause = match kind {
+            Some("summary") => " AND tags LIKE '%rollup%'",
+            Some("saved")   => " AND tags NOT LIKE '%rollup%'",
+            _               => "",
+        };
+
+        // Visibility params first (user = ?1, groups = ?2..). Filter params follow
+        // at the next index; everything is bound (no injection), `tag` included.
+        let mut vparams: Vec<Box<dyn ToSql>> = Vec::with_capacity(group_ids.len() + 1);
+        vparams.push(Box::new(user_id.to_string()));
+        for g in group_ids { vparams.push(Box::new(g.clone())); }
+
+        let mut extra = String::new();
+        let mut next = group_ids.len() + 1; // last index used so far (1 + groups)
+        if let Some(c) = category { next += 1; extra.push_str(&format!(" AND category = ?{next}")); vparams.push(Box::new(c.to_string())); }
+        if let Some(s) = scope    { next += 1; extra.push_str(&format!(" AND scope = ?{next}"));    vparams.push(Box::new(s.to_string())); }
+        if let Some(s) = source   { next += 1; extra.push_str(&format!(" AND source_type = ?{next}")); vparams.push(Box::new(s.to_string())); }
+        if let Some(t) = tag.filter(|t| !t.is_empty()) {
+            next += 1;
+            // Exact JSON-array member `["…","<tag>","…"]`. ESCAPE the LIKE wildcards
+            // (`\`, `%`, `_`) in the user value so a tag like `topic:home_assistant`
+            // matches literally (the `_` isn't a single-char wildcard) and can't be
+            // injected.
+            extra.push_str(&format!(" AND tags LIKE ?{next} ESCAPE '\\'"));
+            let esc = t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            vparams.push(Box::new(format!("%\"{esc}\"%")));
+        }
+
+        let base_where = format!(
+            "({vis}) AND superseded_by IS NULL AND deleted_at IS NULL{kind_clause}{extra}",
+            vis = visibility,
+        );
+        let order = match sort {
+            ListSort::Strength => format!("{} DESC, created_at DESC", EFFECTIVE_STRENGTH_EXPR),
+            ListSort::Recent   => "created_at DESC".to_string(),
+        };
+
+        // Total — reflects visibility, kind AND the filters above.
+        let count_sql = format!("SELECT COUNT(*) FROM memories WHERE {base_where}");
+        let total: u64 = self.conn
+            .query_row(&count_sql, params_from_iter(vparams.iter().map(|p| p.as_ref())), |r| r.get(0))
+            .map_err(|e| MiraError::MemoryError(format!("list_visible_filtered count: {e}")))?;
+
+        // Page (limit/offset indices come after the filter params).
+        let sql = format!(
+            "SELECT {cols} FROM memories WHERE {base_where} ORDER BY {order} LIMIT ?{lim} OFFSET ?{off}",
+            cols = MEMORY_COLUMNS,
+            lim  = next + 1,
+            off  = next + 2,
+        );
+        let mut params: Vec<Box<dyn ToSql>> = vparams;
+        params.push(Box::new(limit as i64));
+        params.push(Box::new(offset as i64));
+        let mut stmt = self.conn.prepare(&sql)
+            .map_err(|e| MiraError::MemoryError(format!("list_visible_filtered prepare: {e}")))?;
+        let items = stmt
+            .query_map(params_from_iter(params.iter().map(|p| p.as_ref())), row_to_memory_item)
+            .map_err(|e| MiraError::MemoryError(format!("list_visible_filtered query: {e}")))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok((items, total))
     }
 
     // Count memories visible to `(user_id, group_ids)`.
@@ -976,6 +1254,103 @@ impl MemoryStorage {
             .optional()
             .map_err(|e| MiraError::MemoryError(format!("find_by_entity_tag query: {}", e)))?;
         Ok(row)
+    }
+
+    /// Find this user's live, user-scoped memory carrying the exact conflict-key
+    /// tag `key:<subject>.<attribute>`. Uses `json_each` for an EXACT array-member
+    /// match (bound param), so a model-supplied key containing `%`/`_` can't
+    /// widen the match or inject a wildcard (the LIKE path's weakness). Returns
+    /// the most recent on the off-chance of duplicates.
+    pub fn find_by_conflict_key(&self, user_id: &str, key: &str) -> Result<Option<MemoryItem>, MiraError> {
+        if key.is_empty() { return Ok(None); }
+        let tag = crate::memory::auto_extract::conflict_key_tag(key);
+        // EXACT array-member match via json_each (bound param) — `%`/`_` in a
+        // model-supplied key are literal here, not LIKE wildcards. `memories.tags`
+        // in the correlated subquery is unambiguous; no table alias needed.
+        let sql = format!(
+            "SELECT {cols} FROM memories
+             WHERE user_id = ?1 AND scope = 'user'
+               AND superseded_by IS NULL AND deleted_at IS NULL
+               AND EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?2)
+             ORDER BY created_at DESC
+             LIMIT 1",
+            cols = MEMORY_COLUMNS,
+        );
+        let mut stmt = self.conn.prepare(&sql)
+            .map_err(|e| MiraError::MemoryError(format!("find_by_conflict_key prepare: {}", e)))?;
+        let row = stmt.query_row(params![user_id, tag], row_to_memory_item)
+            .optional()
+            .map_err(|e| MiraError::MemoryError(format!("find_by_conflict_key query: {}", e)))?;
+        Ok(row)
+    }
+
+    /// Distinct `subject.attribute` conflict keys this user currently holds
+    /// (live, user-scoped), stripped of the `key:` tag prefix. Fed to the
+    /// extractor prompt so corrections reuse an existing key (R4).
+    pub fn list_conflict_keys(&self, user_id: &str) -> Result<Vec<String>, MiraError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT substr(json_each.value, 5) FROM memories, json_each(memories.tags)
+             WHERE memories.user_id = ?1 AND memories.scope = 'user'
+               AND memories.deleted_at IS NULL AND memories.superseded_by IS NULL
+               AND json_each.value LIKE 'key:%'
+             LIMIT 200",
+        ).map_err(|e| MiraError::MemoryError(format!("list_conflict_keys prepare: {e}")))?;
+        let keys = stmt
+            .query_map(params![user_id], |r| r.get::<_, String>(0))
+            .map_err(|e| MiraError::MemoryError(format!("list_conflict_keys query: {e}")))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(keys)
+    }
+
+    /// Soft-delete an entire supersede chain (predecessors + successors) for a
+    /// user-owned head, so deleting a corrected fact doesn't leave older
+    /// versions live-but-orphaned. Returns how many rows were newly deleted.
+    pub fn soft_delete_chain(&self, head_id: u64, user_id: &str) -> Result<Vec<u64>, MiraError> {
+        // Walk back to the root, then forward, collecting owned ids.
+        let mut ids: Vec<u64> = Vec::new();
+        let load = |id: u64, conn: &rusqlite::Connection| -> Option<(Option<u64>, Option<u64>, String)> {
+            conn.query_row(
+                "SELECT supersedes, superseded_by, user_id FROM memories WHERE id = ?1",
+                params![id as i64],
+                |r| Ok((r.get::<_, Option<i64>>(0)?.map(|v| v as u64),
+                        r.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+                        r.get::<_, String>(2)?)),
+            ).optional().ok().flatten()
+        };
+        // Find the root.
+        let mut root = head_id;
+        let mut guard = 0;
+        while let Some((prev, _, _)) = load(root, &self.conn) {
+            if let Some(p) = prev { if guard < 1000 { root = p; guard += 1; continue; } }
+            break;
+        }
+        // Forward from root.
+        let mut cur = Some(root);
+        guard = 0;
+        while let Some(id) = cur {
+            if guard > 1000 { break; }
+            guard += 1;
+            match load(id, &self.conn) {
+                Some((_, next, owner)) if owner == user_id => { ids.push(id); cur = next; }
+                _ => break,
+            }
+        }
+        if ids.is_empty() { return Ok(Vec::new()); }
+        let now = Utc::now().timestamp_millis();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE memories SET deleted_at = ?1, deleted_by = ?2
+             WHERE deleted_at IS NULL AND id IN ({placeholders})"
+        );
+        let mut params: Vec<Box<dyn ToSql>> = vec![Box::new(now), Box::new(user_id.to_string())];
+        for id in &ids { params.push(Box::new(*id as i64)); }
+        let n = self.conn.execute(&sql, params_from_iter(params.iter().map(|p| p.as_ref())))
+            .map_err(|e| MiraError::MemoryError(format!("soft_delete_chain: {e}")))?;
+        if n > 0 {
+            self.audit(Some(head_id), user_id, "soft_delete", None, None, None)?;
+        }
+        Ok(ids)
     }
 
     // Return **all** live memories owned by `user_id` tagged with any of the
@@ -1559,6 +1934,15 @@ impl MemoryStorage {
     ) -> Result<u64, MiraError> {
         let created_at = Utc::now().timestamp();
         let created_at_ms = created_at * 1000;
+        // A.1 — derive the speaker from the tags: a rollup summary is a MIRA-
+        // authored day digest, not a user-stated fact. Everything else is a
+        // user fact (the A.2 authorship gates keep assistant/system content out
+        // of the auto-extract path, so no other speaker reaches this write).
+        let source_speaker = if tags.iter().any(|t| t == "rollup" || t.starts_with("rollup")) {
+            "rollup"
+        } else {
+            "user"
+        };
         let tags_json = serde_json::to_string(&tags).unwrap_or_default();
         let subjects_json = serde_json::to_string(subject_user_ids).unwrap_or_else(|_| "[]".into());
 
@@ -1586,9 +1970,10 @@ impl MemoryStorage {
                 source_type, source_detail, created_at, relevance_score,
                 scope, scope_id, subject_user_ids, created_by,
                 stability, strength, last_reinforced, access_count,
-                source_channel, source_conversation_id, source_message_id
+                source_channel, source_conversation_id, source_message_id,
+                source_speaker
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1.0, ?8, ?9, ?10, ?11,
-                       'stable', 1.0, ?12, 0, ?13, ?14, ?15)",
+                       'stable', 1.0, ?12, 0, ?13, ?14, ?15, ?16)",
             params![
                 legacy_user_id,
                 content,
@@ -1605,6 +1990,7 @@ impl MemoryStorage {
                 source_channel,
                 source_conversation_id,
                 source_message_id,
+                source_speaker,
             ],
         ).map_err(|e| MiraError::MemoryError(format!("store_scoped: {}", e)))?;
 
@@ -1648,7 +2034,11 @@ impl MemoryStorage {
             old.scope_id.as_deref(),
             actor_user_id,
             &[],
-            None, None, None,
+            // Inherit provenance from the row being superseded: a correction
+            // must not lose which channel/conversation the fact came from.
+            old.source_channel.as_deref(),
+            old.source_conversation_id.as_deref(),
+            old.source_message_id.as_deref(),
         )?;
 
         // Link the chain — old.superseded_by -> new_id, new.supersedes -> old_id.
@@ -1669,7 +2059,7 @@ impl MemoryStorage {
 
     // Internal: fetch a row by id with no user/scope filter. Callers must
     // have already resolved authorization before invoking.
-    fn load_any(&self, id: u64) -> Result<Option<MemoryItem>, MiraError> {
+    pub(crate) fn load_any(&self, id: u64) -> Result<Option<MemoryItem>, MiraError> {
         let item = self.conn
             .query_row(
                 &format!("SELECT {} FROM memories WHERE id = ?1", MEMORY_COLUMNS),
@@ -1727,6 +2117,50 @@ impl MemoryStorage {
         Ok(rows > 0)
     }
 
+    /// Owner-scoped soft delete: delete `id` ONLY if it is a live, user-scoped
+    /// row owned by `user_id`. A cross-user or non-user-scope id affects no rows
+    /// (returns false) — the provider-level authorization backstop the SPI
+    /// contract requires, so a numeric id can't reach another user's memory even
+    /// if a caller forgets to check scope.
+    pub fn soft_delete_user_scoped(&self, id: u64, user_id: &str) -> Result<bool, MiraError> {
+        let now = Utc::now().timestamp_millis();
+        let rows = self.conn.execute(
+            "UPDATE memories SET deleted_at = ?1, deleted_by = ?2
+             WHERE id = ?3 AND user_id = ?2 AND scope = 'user' AND deleted_at IS NULL",
+            params![now, user_id, id as i64],
+        ).map_err(|e| MiraError::MemoryError(format!("soft_delete_user_scoped: {}", e)))?;
+        if rows > 0 {
+            self.audit(Some(id), user_id, "soft_delete", None, None, None)?;
+        }
+        Ok(rows > 0)
+    }
+
+    /// Undo a soft-delete (the Memory page's "Undo" toast). Clears `deleted_at`
+    /// for a row this `user_id` owns that is still soft-deleted, and returns the
+    /// restored row so the caller can re-embed it. Owner-scoped: a user can only
+    /// restore their OWN user-scoped memory. Returns None if there was nothing to
+    /// restore (wrong owner, not deleted, or gone).
+    pub fn restore(&self, id: u64, user_id: &str) -> Result<Option<MemoryItem>, MiraError> {
+        // N4: only undo the CALLER's OWN recent delete — never an admin
+        // moderation delete (deleted_by != caller) or a cleanup migration
+        // (deleted_by LIKE 'migration:%'), and only within the undo window so a
+        // long-forgotten row can't be resurrected just before the purge.
+        const UNDO_WINDOW_MS: i64 = 24 * 3600 * 1000;
+        let cutoff = Utc::now().timestamp_millis() - UNDO_WINDOW_MS;
+        let rows = self.conn.execute(
+            "UPDATE memories SET deleted_at = NULL, deleted_by = NULL
+             WHERE id = ?1 AND user_id = ?2 AND scope = 'user'
+               AND deleted_at IS NOT NULL AND deleted_at >= ?3
+               AND deleted_by = ?2",
+            params![id as i64, user_id, cutoff],
+        ).map_err(|e| MiraError::MemoryError(format!("restore: {}", e)))?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        self.audit(Some(id), user_id, "restore", None, None, None)?;
+        self.load_any(id)
+    }
+
     // Append a row to the audit log. Errors are logged but not propagated
     // for non-critical actions to avoid masking the underlying write.
     fn audit(
@@ -1755,7 +2189,8 @@ const MEMORY_COLUMNS: &str =
      scope, scope_id, created_by, supersedes, superseded_by, \
      strength, access_count, last_reinforced, stability, \
      source_channel, source_conversation_id, source_message_id, \
-     mira_decay(strength, last_reinforced, stability) AS effective_strength";
+     mira_decay(strength, last_reinforced, stability) AS effective_strength, \
+     source_speaker";
 
 fn row_to_memory_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryItem> {
     let category_str: String = row.get(2)?;
@@ -1783,6 +2218,7 @@ fn row_to_memory_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryItem> {
         source_conversation_id: row.get::<_, Option<String>>(18)?,
         source_message_id:      row.get::<_, Option<String>>(19)?,
         effective_strength:  row.get::<_, Option<f64>>(20)?.unwrap_or(1.0) as f32,
+        source_speaker:      row.get::<_, Option<String>>(21)?.unwrap_or_else(|| "user".into()),
     })
 }
 
@@ -1804,6 +2240,17 @@ fn register_decay_udf(conn: &Connection) -> Result<(), MiraError> {
     )
     .map_err(|e| MiraError::MemoryError(format!("register mira_decay: {}", e)))?;
     Ok(())
+}
+
+/// Normalise memory content for de-dup comparison: collapse whitespace,
+/// lowercase, and drop surrounding quotes / trailing sentence punctuation so
+/// "User's favourite tea is Lapsang." and "user's favourite tea is lapsang"
+/// compare equal.
+fn normalize_for_dedup(s: &str) -> String {
+    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    collapsed
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '.' | '!' | '?' | ','))
+        .to_string()
 }
 
 fn parse_category(s: &str) -> Option<Category> {
@@ -1859,7 +2306,31 @@ fn visibility_where_clause(group_count: usize, first_param_index: usize) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
+    #[test]
+    fn source_speaker_defaults_user_and_marks_rollups() {
+        // A.1: a plain stored fact records source_speaker='user'; a rollup-tagged
+        // memory records 'rollup', so day-summaries stay distinguishable from
+        // user-stated facts and round-trip through MEMORY_COLUMNS.
+        let path = "/tmp/mira_test_source_speaker.db";
+        std::fs::remove_file(path).ok();
+        let s = MemoryStorage::new(path).unwrap();
+
+        let fact_id = s.store_scoped(
+            "User likes tea".into(), Category::Preference, vec![], None,
+            Scope::User, Some("default"), "default", &[], None, None, None,
+        ).unwrap();
+        let roll_id = s.store_scoped(
+            "Summary of the day".into(), Category::Fact,
+            vec!["rollup".into(), "rollup:2026-11-02".into()], None,
+            Scope::User, Some("default"), "default", &[], None, None, None,
+        ).unwrap();
+
+        assert_eq!(s.load_any(fact_id).unwrap().unwrap().source_speaker, "user");
+        assert_eq!(s.load_any(roll_id).unwrap().unwrap().source_speaker, "rollup");
+        std::fs::remove_file(path).ok();
+    }
+
     #[test]
     fn contradiction_consolidator_closes_older_single_valued_edges() {
         let path = "/tmp/mira_test_contradict.db";
@@ -2198,6 +2669,98 @@ mod tests {
         assert!(unsourced.source_channel.is_none());
         assert!(unsourced.source_conversation_id.is_none());
         assert!(unsourced.source_message_id.is_none());
+    }
+
+    #[test]
+    fn content_dedup_detects_live_and_scopes_by_user() {
+        let path = "/tmp/mira_test_dedup.db";
+        std::fs::remove_file(path).ok();
+        let s = MemoryStorage::new_for_user(path, "alice").unwrap();
+        s.store_scoped(
+            "User's favourite tea is Lapsang Souchong.".into(), Category::Preference, vec![], None,
+            Scope::User, Some("alice"), "alice", &[], None, None, None,
+        ).unwrap();
+        // Live + normalised-equal (case / whitespace / trailing punctuation insensitive).
+        let (live, del) = s.content_dedup_status(
+            "alice", "  user's favourite tea is   lapsang souchong  ", 0).unwrap();
+        assert!(live && !del, "normalised live duplicate should be detected");
+        // Scoped by user — bob has no such memory.
+        let (live_b, _) = s.content_dedup_status(
+            "bob", "User's favourite tea is Lapsang Souchong.", 0).unwrap();
+        assert!(!live_b, "dedup is per-user");
+        // A different fact doesn't match.
+        let (live_c, _) = s.content_dedup_status("alice", "User drives a Subaru", 0).unwrap();
+        assert!(!live_c);
+    }
+
+    #[test]
+    fn soft_delete_all_user_scope_only_touches_own_user_rows() {
+        let path = "/tmp/mira_test_delete_all.db";
+        std::fs::remove_file(path).ok();
+        let s = MemoryStorage::new_for_user(path, "alice").unwrap();
+        // alice's own user-scoped rows.
+        s.store_scoped("a1".into(), Category::Fact, vec![], None,
+            Scope::User, Some("alice"), "alice", &[], None, None, None).unwrap();
+        s.store_scoped("a2".into(), Category::Fact, vec![], None,
+            Scope::User, Some("alice"), "alice", &[], None, None, None).unwrap();
+        // a system-scoped row alice created — shared, must NOT be purged.
+        s.store_scoped("sys".into(), Category::Fact, vec![], None,
+            Scope::System, None, "alice", &[], None, None, None).unwrap();
+        // bob's own row — different user, untouched.
+        s.store_scoped("b1".into(), Category::Fact, vec![], None,
+            Scope::User, Some("bob"), "bob", &[], None, None, None).unwrap();
+
+        let deleted = s.soft_delete_all_user_scope("alice", "alice").unwrap();
+        assert_eq!(deleted.len(), 2, "only alice's two user-scoped rows");
+        // alice's user-scope rows are gone from her visible list; the system row stays.
+        let alice_vis = s.list_visible("alice", &[], 100, 0).unwrap();
+        assert!(alice_vis.iter().all(|m| m.content != "a1" && m.content != "a2"));
+        assert!(alice_vis.iter().any(|m| m.content == "sys"), "system row survives");
+        // bob still has his.
+        let bob_vis = s.list_visible("bob", &[], 100, 0).unwrap();
+        assert!(bob_vis.iter().any(|m| m.content == "b1"));
+    }
+
+    #[test]
+    fn count_all_live_excludes_deleted_and_superseded() {
+        let path = "/tmp/mira_test_count_live.db";
+        std::fs::remove_file(path).ok();
+        let s = MemoryStorage::new_for_user(path, "alice").unwrap();
+        s.store_scoped("live1".into(), Category::Fact, vec![], None, Scope::User, Some("alice"), "alice", &[], None, None, None).unwrap();
+        let v1 = s.store_scoped("to supersede".into(), Category::Fact, vec![], None, Scope::User, Some("alice"), "alice", &[], None, None, None).unwrap();
+        s.supersede(v1, "newer".into(), Category::Fact, vec![], None, "alice").unwrap(); // v1 now superseded
+        let gone = s.store_scoped("to delete".into(), Category::Fact, vec![], None, Scope::User, Some("bob"), "bob", &[], None, None, None).unwrap();
+        s.soft_delete(gone, "admin").unwrap();
+        // live1 + "newer" = 2 (v1 superseded, "to delete" soft-deleted both excluded),
+        // counted across users.
+        assert_eq!(s.count_all_live().unwrap(), 2);
+    }
+
+    #[test]
+    fn memory_history_walks_the_supersede_chain() {
+        let path = "/tmp/mira_test_history.db";
+        std::fs::remove_file(path).ok();
+        let s = MemoryStorage::new_for_user(path, "alice").unwrap();
+        let v1 = s.store_scoped("v1".into(), Category::Fact, vec![], None,
+            Scope::User, Some("alice"), "alice", &[], None, None, None).unwrap();
+        let v2 = s.supersede(v1, "v2".into(), Category::Fact, vec![], None, "alice").unwrap();
+        let v3 = s.supersede(v2, "v3".into(), Category::Fact, vec![], None, "alice").unwrap();
+        // From any point in the chain, history returns oldest → newest.
+        let from_mid = s.memory_history(v2, true).unwrap();
+        assert_eq!(from_mid.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), vec!["v1", "v2", "v3"]);
+        let from_tip = s.memory_history(v3, true).unwrap();
+        assert_eq!(from_tip.len(), 3);
+        assert_eq!(from_tip[0].content, "v1");
+        assert_eq!(s.memory_history(999999, true).unwrap().len(), 0, "unknown id → empty");
+    }
+
+    #[test]
+    fn normalize_for_dedup_canonicalises() {
+        assert_eq!(
+            normalize_for_dedup("  User's Favourite Tea is Lapsang.  "),
+            normalize_for_dedup("user's favourite tea is lapsang"),
+        );
+        assert_eq!(normalize_for_dedup("Hello!!!"), "hello");
     }
 
     // ── Scope + visibility ────────────────────────────────────────────────

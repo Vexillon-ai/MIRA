@@ -22,6 +22,7 @@ pub mod companion;
 pub mod config_api;
 pub mod conversations;
 pub mod deps;
+pub mod device_tokens;
 pub mod groups;
 pub mod health;
 pub mod guardian;

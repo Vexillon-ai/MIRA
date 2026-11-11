@@ -272,7 +272,7 @@ fn is_local_provider(name: &str) -> bool {
 }
 
 /// True when a base URL points at the local host.
-fn url_is_loopback(url: &str) -> bool {
+pub(crate) fn url_is_loopback(url: &str) -> bool {
     // Pull the host between scheme:// and the next / or :.
     let after = url.split("://").nth(1).unwrap_or(url);
     let host = after.split('/').next().unwrap_or(after);

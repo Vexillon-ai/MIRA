@@ -402,6 +402,33 @@
                 "azure",
                 "none"
               ]
+            },
+            "context_length_tokens": {
+              "description": "Optional per-provider effective context budget (tokens). When set, a turn routed to this provider budgets its history against this window instead of the instance default \u2014 useful for a provider reached by IP (not treated as 'local') or a router with a fixed per-request slot. Omit to use the instance default.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        },
+        "openai_compat_extra": {
+          "description": "Additional named OpenAI-compatible providers beyond the single openai_compat slot, so an instance can define more than one (e.g. a local language router for the voice channel alongside the main provider). Each entry has the same shape as openai_compat and is referenced by its `name` from `voice.provider` or a per-turn provider override.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean", "description": "When false, skip registration. Default true." },
+              "name": { "type": "string", "description": "Slug used in logs + ProviderId, and the name referenced by voice.provider. Empty = disabled." },
+              "api_key": { "type": ["string", "null"] },
+              "base_url": { "type": "string" },
+              "default_model": { "type": "string" },
+              "available_models": { "type": "array", "items": { "type": "string" } },
+              "timeout_secs": { "type": "integer", "minimum": 1 },
+              "auth_style": { "type": "string", "enum": ["bearer", "azure", "none"], "description": "Auth header: 'bearer' (default), 'azure', or 'none' (unsecured local endpoint)." },
+              "context_length_tokens": { "type": ["integer", "null"], "minimum": 0, "description": "Optional per-provider effective context budget (tokens)." }
             }
           }
         },
@@ -928,6 +955,11 @@
           "type": "integer",
           "minimum": 1
         },
+        "retention_days": {
+          "description": "How many days a deleted memory is retained before it is permanently removed. A purge runs at startup and then every few hours. 0 = never purge (keep for audit indefinitely). Default 30.",
+          "type": "integer",
+          "minimum": 0
+        },
         "indexer": {
           "description": "Background transcript indexer. Embeds historical chat messages into message_vectors so semantic recall can reach past conversations. Disabling stops new inserts but leaves existing vectors intact.",
           "type": "object",
@@ -957,12 +989,12 @@
           }
         },
         "auto_extract": {
-          "description": "Post-turn memory auto-extraction. 'off' disables proactive writes, 'heuristic' uses the bundled regex extractor (default), and 'llm' runs a structured extraction pass through the model with confidence gating and category allow-listing. 'llm_channels' enables the LLM extractor per-channel independently of 'mode'.",
+          "description": "Post-turn memory auto-extraction. 'off' disables proactive writes (the default — opt in explicitly), 'heuristic' uses the bundled local regex extractor, and 'llm' runs a structured extraction pass through the model with confidence gating and category allow-listing. 'llm_channels' enables the LLM extractor per-channel independently of 'mode'.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "mode": {
-              "description": "Default extraction mode for all channels. 'off' \u2014 no auto-extraction anywhere. 'heuristic' \u2014 bundled regex extractor runs after every turn (default). 'llm' \u2014 LLM extractor runs on every channel post-turn. Per-channel overrides live in 'llm_channels'.",
+              "description": "Default extraction mode for all channels. 'off' \u2014 no auto-extraction anywhere (the default; a fresh install does not auto-capture memory until you opt in). 'heuristic' \u2014 bundled local regex extractor runs after every turn (no model call). 'llm' \u2014 LLM extractor runs on every channel post-turn. Per-channel overrides live in 'llm_channels'.",
               "type": "string",
               "enum": [
                 "off",
@@ -1034,7 +1066,7 @@
           }
         },
         "graph": {
-          "description": "Temporal knowledge-graph memory. Additive and off by default. When enabled, the post-turn extractor also writes typed, timestamped triples to kg_entities/kg_edges so aggregation/counting questions resolve against exact set membership instead of fuzzy top-k retrieval.",
+          "description": "Temporal knowledge-graph memory. Additive and off by default. Designed so the post-turn extractor also writes typed, timestamped triples to kg_entities/kg_edges for exact set-membership on aggregation/counting questions — but there is not yet a live per-turn writer, so enabling this currently has no effect outside the benchmark (the writer is pending; the graph read and its completeness claim are disabled until it exists).",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -1063,7 +1095,7 @@
           }
         },
         "consolidation": {
-          "description": "Sleep-like consolidation passes over the knowledge graph. Phased nightly clean-up that resolves contradictions, dedups entities, and scores importance — all deterministic and MIRA-side. Each phase independently togglable so the ones that don't fit your use case can be turned off without disabling the others. All off by default.",
+          "description": "Sleep-like consolidation passes over the knowledge graph. Phased nightly clean-up that resolves contradictions, dedups entities, and scores importance \u2014 all deterministic and MIRA-side. Each phase independently togglable. All off by default. Note: these passes operate on kg_edges, which have no live per-turn writer yet, so they are currently no-ops outside the benchmark until the graph writer lands.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -1090,6 +1122,30 @@
               "type": "number",
               "minimum": 1.0,
               "maximum": 365.0
+            }
+          }
+        },
+        "providers": {
+          "description": "Pluggable memory providers. Empty (the default) means the built-in SQLite store only, configured by every other memory.* key (fully back-compatible). A populated list declares the external providers the memory router fans recall across in addition to the always-present built-in store. Writes go to the built-in store; an external provider receives ingested facts only when it is writable and capture is on. Each entry carries: id (required), enabled, transport ('in_process' | 'mcp' | 'http'), mode ('harness' = MIRA searches/injects + ingests around the turn, 'agent' = the model calls the memory tools, 'both'), read_only (never write even if the provider can), allow_non_loopback (fail-closed: a non-loopback endpoint is refused unless this is set), and transport-specific base_url/api_key_file (http), root (files), or command/mapping (mcp).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id"],
+            "properties": {
+              "id": { "type": "string" },
+              "enabled": { "type": "boolean" },
+              "transport": { "type": "string", "enum": ["in_process", "mcp", "http"] },
+              "mode": { "type": "string", "enum": ["harness", "agent", "both"] },
+              "read_only": { "type": "boolean" },
+              "allow_non_loopback": { "type": "boolean" },
+              "base_url": { "type": "string" },
+              "api_key_file": { "type": "string" },
+              "tls_ca_file": { "type": "string", "description": "HTTP transport: a PEM CA/certificate file to additionally trust for TLS, for a service behind a self-signed or private-CA certificate. MIRA's HTTP client uses bundled roots, not the OS trust store, so a self-signed cert installed via update-ca-certificates must be named here. Added alongside the built-in roots." },
+              "user_id_field": { "type": "string", "enum": ["id", "username", "email"], "description": "HTTP transport: which account identity to send as user_id on recall — 'id' (MIRA's UUID, the default), 'username', or 'email'. For a service keyed on something other than MIRA's UUID. Falls back to the UUID if the chosen field is blank." },
+              "root": { "type": "string" },
+              "command": { "type": "string" },
+              "mapping": { "type": "string" }
             }
           }
         }
@@ -1136,6 +1192,48 @@
           "description": "Minimum minutes between consecutive proactive check-ins (frequency floor). Default 90.",
           "type": "integer",
           "minimum": 0
+        }
+      }
+    },
+    "voice": {
+      "description": "Real-time voice turn lifecycle: cancelling a reply mid-sentence (barge-in), speaking in a given style/language, and speculative turns. Every setting defaults to preserving existing behaviour — a turn is cancelled only when a client asks, and the disconnect behaviour is scoped to the voice channel.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cancel_window_secs": {
+          "description": "How long after a turn starts a client may still cancel it, in seconds. A cancel for an older turn is refused (the turn has almost certainly already finished). Default 600.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "implicit_cancel_on_disconnect": {
+          "description": "When a voice client's connection drops mid-reply, treat it as a cancel (hang-up = barge-in) instead of letting the reply run on unseen. Applies to the voice channel only; other channels always finish on a disconnect. Default true.",
+          "type": "boolean"
+        },
+        "speculative_timeout_secs": {
+          "description": "How long a speculative turn (started before the user finished speaking) waits for a commit or discard before timing out and dropping everything it was holding, in seconds. Default 5.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "spoken_max_sentence_chars": {
+          "description": "Soft cap on sentence length, in characters, hinted to the model for spoken replies so sentences stay short enough to synthesise smoothly. A hint, not a hard cut-off. Default 240.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider": {
+          "description": "The provider the voice channel uses, by name (a built-in vendor slug, the openai_compat entry's name, or an openai_compat_extra entry's name). When set, a voice turn is routed to it while every other channel keeps the instance's default provider — so a local language router can serve voice without replacing the main provider. Empty = voice uses the default provider.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_failover": {
+          "description": "When the voice provider is unreachable, fail over to the instance's normal provider chain (a runtime failure then surfaces as a warning event naming the fallback). Default true.",
+          "type": "boolean"
+        },
+        "max_tool_rounds": {
+          "description": "Maximum tool-call/observe rounds on the voice channel before MIRA must answer from what it has (a spoken reply can't wait for many rounds). On hitting the cap, the turn gets one final answer round with tools disabled and emits a voice_tool_cap_reached warning. The global agent.max_tool_rounds is unchanged for other channels. Default 2.",
+          "type": "integer",
+          "minimum": 1
         }
       }
     },

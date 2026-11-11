@@ -20,6 +20,7 @@ import toast from 'react-hot-toast'
 import { api } from '@/api/client'
 import btn from './actionButton.module.css'
 import PairDeviceCard from './PairDeviceCard'
+import DeviceTokensCard from './DeviceTokensCard'
 
 const SW_URL = '/mira-sw.js'
 
@@ -280,6 +281,8 @@ export default function NotificationSettings() {
       </div>
 
       <PairDeviceCard />
+
+      <DeviceTokensCard />
 
       <div>
         <strong style={{ fontSize: 13 }}>Registered devices</strong>

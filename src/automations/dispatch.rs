@@ -714,7 +714,7 @@ impl Dispatcher {
             }
 
             "discord" => {
-                // D3 — scheduled/triggered Discord dispatch. Mirrors the
+                // Scheduled/triggered Discord dispatch. Mirrors the
                 // telegram arm: global kill switch, personal-first token
                 // with shared-bot fallback, channel id from `to_override`
                 // or the recipient's most-recent inbound thread. Discord
@@ -1542,11 +1542,19 @@ async fn drain_to_text(
         match ev {
             StreamEvent::Token(t) => text.push_str(&t),
             StreamEvent::Done { .. } => break,
+            // A cancelled turn is terminal too (automations don't set a cancel
+            // token, so this is defensive — stop on it rather than hang).
+            StreamEvent::Cancelled { .. } => break,
             StreamEvent::Error(e) => return Err(MiraError::ConfigError(e)),
-            StreamEvent::Warning(_)
+            StreamEvent::TurnStarted { .. }
+            | StreamEvent::Restarted { .. }
+            | StreamEvent::Timing(_)
+            | StreamEvent::ToolCapReached { .. }
+            | StreamEvent::Warning(_)
             | StreamEvent::ToolCall { .. }
             | StreamEvent::ToolResult { .. }
             | StreamEvent::WikiContext { .. }
+            | StreamEvent::MemoryContext { .. }
             | StreamEvent::Reasoning(_) => {}
         }
     }

@@ -59,7 +59,7 @@ use crate::server::handlers::{
         account_health, create_account, delete_account, get_account, list_accounts, update_account,
     },
     channels::list_channels,
-    chat::chat_handler,
+    chat::{chat_handler, cancel_turn_handler, commit_turn_handler},
     config_api::{
         delete_agent_avatar, get_agent_appearance, get_config, put_config,
         set_agent_avatar, upload_agent_avatar, validate_config,
@@ -77,7 +77,7 @@ use crate::server::handlers::{
     },
     livez_handler, readyz_handler, ReadinessCache, signal_handler, telegram_handler, SignalState, TelegramState,
     logs::{get_log_level, logs_stream, set_log_level},
-    memory::{create_memory, delete_memory, get_memory, list_memory, search_memory, supersede_memory},
+    memory::{create_memory, delete_memory, delete_my_memory, export_memory, get_memory, list_memory, memory_catalog, memory_history, memory_providers_status, restore_memory, search_memory, supersede_memory},
     notifications::notifications_stream,
     onboarding::{
         finalize as onboarding_finalize, get_state as onboarding_state, post_complete_chat,
@@ -140,7 +140,7 @@ pub fn build_router(
     restart_notify:    Arc<tokio::sync::Notify>,
     agent_registry:    Arc<crate::agent::AgentRegistry>,
     supervisor:        Arc<crate::agent::Supervisor>,
-    // D3 — admin-defined policy rules. Optional so tests + minimal
+    // Admin-defined policy rules. Optional so tests + minimal
     // deployments can omit; production wiring opens it in the gateway.
     admin_policy_rules: Option<Arc<crate::policy::AdminRulesStore>>,
     // encrypted skill secrets. Optional; the open-failure
@@ -599,10 +599,25 @@ pub fn build_router(
         // The signup handlers need the live config (open-signup policy).
         let auth_routes = auth_routes.layer(Extension(Arc::clone(&live_cfg)));
 
+        // Process-wide registry of in-flight turns, shared by the
+        // chat handler (registers each turn) and the cancel/commit routes (which
+        // reach a live turn by id). One instance per gateway.
+        let turn_registry = Arc::new(crate::agent::TurnRegistry::new());
+
         // Authenticated API routes.
         let api_routes = Router::new()
             // Chat
             .route("/api/chat", post(chat_handler))
+            // Cancel an in-flight turn (barge-in).
+            .route("/api/chat/{turn_id}/cancel", post(cancel_turn_handler))
+            // Commit (or restart) a speculative turn.
+            .route("/api/chat/{turn_id}/commit", post(commit_turn_handler))
+            // Per-device tokens (self-or-admin).
+            .route("/api/users/{user_id}/device-tokens",
+                   post(crate::server::handlers::device_tokens::create_device_token)
+                   .get(crate::server::handlers::device_tokens::list_device_tokens))
+            .route("/api/users/{user_id}/device-tokens/{token_id}",
+                   delete(crate::server::handlers::device_tokens::revoke_device_token))
             // Conversations
             .route("/api/conversations",              get(list_conversations).post(create_conversation))
             .route("/api/conversations/stats",        get(conversations_stats))
@@ -659,8 +674,13 @@ pub fn build_router(
             // to append a newer memory that replaces an old one.
             .route("/api/memory",        get(list_memory).post(create_memory))
             .route("/api/memory/search", post(search_memory))
+            .route("/api/memory/catalog", get(memory_catalog))
+            .route("/api/memory/mine", delete(delete_my_memory))
+            .route("/api/memory/export", get(export_memory))
             .route("/api/memory/{id}",   get(get_memory).delete(delete_memory))
             .route("/api/memory/{id}/supersede", post(supersede_memory))
+            .route("/api/memory/{id}/restore", post(restore_memory))
+            .route("/api/memory/{id}/history", get(memory_history))
             // Wiki (Slice E) — per-user markdown knowledge base. Page CRUD
             // applies immediately under the user's identity; the review
             // queue is where extractor + agent-tool writes land for the
@@ -957,7 +977,7 @@ pub fn build_router(
                    delete(crate::server::handlers::skills::uninstall_skill))
             .route("/api/skills/{id}/preferences",
                    put(crate::server::handlers::skills::set_skill_enabled))
-            // S6: promote the caller's own user-scoped skill to global
+            // Promote the caller's own user-scoped skill to global
             // (admin / RBAC global-propose; caller-scoped).
             .route("/api/skills/{id}/promote",
                    post(crate::server::handlers::skills::promote_skill))
@@ -975,19 +995,19 @@ pub fn build_router(
             .route("/api/admin/packages/install",
                    post(crate::server::handlers::packages::install_package)
                        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
-            // D1 — install-from-URL: fetch a .mirapkg by URL (SSRF-guarded,
+            // Install-from-URL: fetch a .mirapkg by URL (SSRF-guarded,
             // admin-initiated egress) then the identical preview/install path.
             .route("/api/admin/packages/preview-url",
                    post(crate::server::handlers::packages::preview_package_url))
             .route("/api/admin/packages/install-url",
                    post(crate::server::handlers::packages::install_package_url))
-            // D2 — discovery: configured sources + the merged, signature-
+            // Discovery: configured sources + the merged, signature-
             // verified browse catalog (refreshes enabled sources on GET).
             .route("/api/admin/packages/sources",
                    get(crate::server::handlers::packages::list_package_sources))
             .route("/api/admin/packages/catalog",
                    get(crate::server::handlers::packages::package_catalog))
-            // D4 — installed packages with a semver-newer version in a source.
+            // Installed packages with a semver-newer version in a source.
             .route("/api/admin/packages/updates",
                    get(crate::server::handlers::packages::package_updates))
             .route("/api/admin/packages/{id}",
@@ -1155,6 +1175,7 @@ pub fn build_router(
             // Admin: trigger the sleep-like memory consolidator on-demand
             // (runs Phases C, A, D for every user — same order as nightly).
             .route("/api/admin/consolidator/run-now", post(consolidator_run_now))
+            .route("/api/admin/memory/providers/status", get(memory_providers_status))
             // Q1.7 — admin waitlist read/export/delete.
             .route("/api/admin/waitlist",
                    get(crate::server::handlers::waitlist::list))
@@ -1324,6 +1345,7 @@ pub fn build_router(
             .layer(Extension(Arc::clone(&live_cfg)))
             .layer(Extension(Arc::clone(&notification_bus)))
             .layer(Extension(Arc::clone(&mcp_servers)))
+            .layer(Extension(Arc::clone(&turn_registry)))
             .layer({
                 // Only add the store layer when wired (tests can omit
                 // it). The CRUD handlers expect a populated extension;
@@ -1656,7 +1678,7 @@ mod tests {
             None, // channel_manager (lifecycle endpoints disabled in test)
             None, None, None, None, event_bus, restart,
             agent_registry, supervisor,
-            None, // admin_policy_rules — D3
+            None, // admin_policy_rules
             None, // secrets_store — slice 4
             None, // health_store — 0.107.0
             None, // task_artifacts — 0.111.0

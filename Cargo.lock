@@ -4272,7 +4272,7 @@ dependencies = [
 
 [[package]]
 name = "mira"
-version = "0.359.3"
+version = "0.388.0"
 dependencies = [
  "aes-gcm",
  "ammonia",
@@ -4352,6 +4352,7 @@ dependencies = [
  "tokio-stream",
  "tokio-test",
  "tokio-tungstenite",
+ "tokio-util",
  "toml",
  "toml_edit",
  "tower",

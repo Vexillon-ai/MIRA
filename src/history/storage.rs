@@ -527,6 +527,23 @@ impl HistoryStore {
         })
     }
 
+    /// Replace a message's content + metadata (cancel-after-done):
+    /// trims a completed assistant reply to what was actually spoken. Returns
+    /// true if a row was updated.
+    pub fn update_message_content(
+        &self,
+        message_id: &str,
+        content: &str,
+        metadata: Option<&str>,
+    ) -> Result<bool, MiraError> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE messages SET content = ?2, metadata = ?3 WHERE id = ?1",
+            params![message_id, content, metadata],
+        ).map_err(|e| MiraError::HistoryError(format!("update_message_content: {}", e)))?;
+        Ok(n > 0)
+    }
+
     pub fn get_messages(
         &self,
         conversation_id: &str,

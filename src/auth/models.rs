@@ -144,6 +144,19 @@ pub struct DevicePairingStatus {
     pub device_name: Option<String>,
 }
 
+/// A device token record. Never carries the token or its
+/// hash — only metadata safe to list. Timestamps are unix-millis.
+#[derive(Debug, Clone)]
+pub struct DeviceTokenRecord {
+    pub token_id:     String,
+    pub user_id:      String,
+    pub name:         String,
+    pub scopes:       Vec<String>,
+    pub created_at:   i64,
+    pub expires_at:   Option<i64>,
+    pub last_used_at: Option<i64>,
+}
+
 // ── AuthDb ────────────────────────────────────────────────────────────────────
 
 /// Wraps a single SQLite connection and handles all auth tables.
@@ -334,6 +347,30 @@ impl AuthDb {
             );
             CREATE INDEX IF NOT EXISTS idx_device_pairings_expires
                 ON device_pairings(expires_at);
+
+            -- Long-lived per-device tokens. A headless device
+            -- (e.g. a voice client) authenticates with an opaque `mdt_<hex>`
+            -- bearer token instead of a human login. Only the SHA-256 hash of
+            -- the token is stored; the raw token is shown once at creation.
+            -- `scopes_json` is a JSON array (minimum `["chat","chat.cancel"]`).
+            -- `expires_at` NULL = no expiry. Revocation is a row delete, so it
+            -- takes effect immediately. ON DELETE CASCADE drops a user's tokens
+            -- with the user.
+            CREATE TABLE IF NOT EXISTS device_tokens (
+                token_id     TEXT PRIMARY KEY,
+                token_hash   TEXT NOT NULL,
+                user_id      TEXT NOT NULL,
+                name         TEXT NOT NULL,
+                scopes_json  TEXT NOT NULL,
+                created_at   INTEGER NOT NULL,
+                expires_at   INTEGER,
+                last_used_at INTEGER,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_device_tokens_hash
+                ON device_tokens(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_device_tokens_user
+                ON device_tokens(user_id);
             "#,
         )
         .map_err(|e| MiraError::DatabaseError(format!("Auth DB migration failed: {}", e)))?;
@@ -990,6 +1027,96 @@ impl AuthDb {
             claimed_at,
             device_name,
         }))
+    }
+
+    // ── Device tokens ─────────────────────────────────
+
+    /// Insert a device token. `token_hash` is the SHA-256 hex of the opaque
+    /// `mdt_` token (the raw token is returned to the creator exactly once and
+    /// never persisted). `scopes_json` is a JSON array. `expires_at` is
+    /// unix-millis or `None` for no expiry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_device_token(
+        &self,
+        token_id:    &str,
+        token_hash:  &str,
+        user_id:     &str,
+        name:        &str,
+        scopes_json: &str,
+        expires_at:  Option<i64>,
+    ) -> Result<(), MiraError> {
+        let now  = Self::now_ms();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO device_tokens
+               (token_id, token_hash, user_id, name, scopes_json, created_at, expires_at, last_used_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            params![token_id, token_hash, user_id, name, scopes_json, now, expires_at],
+        ).map_err(|e| MiraError::DatabaseError(format!("create_device_token: {e}")))?;
+        Ok(())
+    }
+
+    /// Resolve a device token by its SHA-256 hash (exact indexed lookup, the
+    /// same pattern as refresh tokens). Returns the record regardless of
+    /// expiry — the caller enforces expiry — or `None` if unknown.
+    pub fn resolve_device_token(&self, token_hash: &str) -> Result<Option<DeviceTokenRecord>, MiraError> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT token_id, user_id, name, scopes_json, created_at, expires_at, last_used_at
+               FROM device_tokens WHERE token_hash = ?1",
+            params![token_hash],
+            Self::map_device_token_row,
+        ).ok();
+        Ok(row)
+    }
+
+    /// Stamp `last_used_at = now` for a token (best-effort; never fails auth).
+    pub fn touch_device_token(&self, token_id: &str) {
+        let now  = Self::now_ms();
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "UPDATE device_tokens SET last_used_at = ?2 WHERE token_id = ?1",
+            params![token_id, now],
+        );
+    }
+
+    /// List a user's device tokens (never exposes the hash). Newest first.
+    pub fn list_device_tokens(&self, user_id: &str) -> Result<Vec<DeviceTokenRecord>, MiraError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT token_id, user_id, name, scopes_json, created_at, expires_at, last_used_at
+               FROM device_tokens WHERE user_id = ?1 ORDER BY created_at DESC",
+        ).map_err(|e| MiraError::DatabaseError(format!("list_device_tokens: {e}")))?;
+        let rows = stmt.query_map(params![user_id], Self::map_device_token_row)
+            .map_err(|e| MiraError::DatabaseError(format!("list_device_tokens: {e}")))?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| MiraError::DatabaseError(format!("list_device_tokens: {e}")))?); }
+        Ok(out)
+    }
+
+    /// Revoke (delete) one device token, scoped to its owner. Returns true if a
+    /// row was removed. Deletion makes revocation take effect immediately.
+    pub fn delete_device_token(&self, token_id: &str, owner_id: &str) -> Result<bool, MiraError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "DELETE FROM device_tokens WHERE token_id = ?1 AND user_id = ?2",
+            params![token_id, owner_id],
+        ).map_err(|e| MiraError::DatabaseError(format!("delete_device_token: {e}")))?;
+        Ok(affected > 0)
+    }
+
+    fn map_device_token_row(r: &rusqlite::Row) -> rusqlite::Result<DeviceTokenRecord> {
+        let scopes_json: String = r.get(3)?;
+        let scopes = serde_json::from_str::<Vec<String>>(&scopes_json).unwrap_or_default();
+        Ok(DeviceTokenRecord {
+            token_id:     r.get(0)?,
+            user_id:      r.get(1)?,
+            name:         r.get(2)?,
+            scopes,
+            created_at:   r.get(4)?,
+            expires_at:   r.get(5)?,
+            last_used_at: r.get(6)?,
+        })
     }
 
     /// (total_failures, top_ip_count) over `since`. The detector uses

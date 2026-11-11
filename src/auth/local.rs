@@ -33,6 +33,32 @@ const REFRESH_GRACE_MS: i64 = 30_000;
 // a schema change.
 pub const GUEST_USERNAME_PREFIX: &str = "guest_";
 
+// Opaque device tokens. The `mdt_` prefix lets the auth
+// extractor route a bearer token to the device-token path (vs a JWT) by a cheap
+// string check before any crypto.
+pub const DEVICE_TOKEN_PREFIX: &str = "mdt_";
+/// Scope that grants a device token the chat endpoint.
+pub const SCOPE_CHAT: &str = "chat";
+/// Scope that grants a device token the cancel endpoint.
+pub const SCOPE_CHAT_CANCEL: &str = "chat.cancel";
+
+/// A device token resolved to its owner. Carries the user it
+/// authenticates as, the token's scopes, and the device name (for attribution).
+#[derive(Debug, Clone)]
+pub struct DeviceAuth {
+    pub user:     User,
+    pub token_id: String,
+    pub name:     String,
+    pub scopes:   Vec<String>,
+}
+
+impl DeviceAuth {
+    /// Does this device token carry `scope`?
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scopes.iter().any(|s| s == scope)
+    }
+}
+
 // Auth service: user management, login, JWT + refresh token lifecycle.
 #[derive(Clone)]
 pub struct LocalAuthService {
@@ -305,6 +331,66 @@ impl LocalAuthService {
         owner_id:   &str,
     ) -> Result<Option<crate::auth::models::DevicePairingStatus>, MiraError> {
         self.db.device_pairing_status(pairing_id, owner_id)
+    }
+
+    // ── Device tokens ─────────────────────────────────────
+
+    /// Mint a long-lived device token for `user_id`. Returns
+    /// `(token_id, raw_token)`; the raw `mdt_…` token is shown to the creator
+    /// exactly once and never persisted (only its SHA-256 hash is stored).
+    /// `ttl_secs = None` means no expiry.
+    pub fn create_device_token(
+        &self,
+        user_id:  &str,
+        name:     &str,
+        scopes:   &[String],
+        ttl_secs: Option<i64>,
+    ) -> Result<(String, String), MiraError> {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let mut raw = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut raw);
+        let token      = format!("{DEVICE_TOKEN_PREFIX}{}", hex::encode(raw));
+        let token_hash = hash_refresh_token(&token);
+        let scopes_json = serde_json::to_string(scopes)
+            .map_err(|e| MiraError::AuthError(format!("device token scopes encode: {e}")))?;
+        let expires_at = ttl_secs.map(|t| chrono::Utc::now().timestamp_millis() + t * 1000);
+        self.db.create_device_token(&token_id, &token_hash, user_id, name, &scopes_json, expires_at)?;
+        Ok((token_id, token))
+    }
+
+    /// Verify a raw `mdt_…` device token: look it up by hash, enforce expiry,
+    /// load the owning user and check it's active, and stamp `last_used_at`.
+    /// Returns the resolved [`DeviceAuth`] (user + scopes + device name) or an
+    /// error that the extractor maps to 401.
+    pub fn verify_device_token(&self, raw: &str) -> Result<DeviceAuth, MiraError> {
+        let hash = hash_refresh_token(raw);
+        let rec = self.db.resolve_device_token(&hash)?
+            .ok_or_else(|| MiraError::AuthError("unknown device token".into()))?;
+        if let Some(exp) = rec.expires_at {
+            if exp < chrono::Utc::now().timestamp_millis() {
+                return Err(MiraError::AuthError("device token expired".into()));
+            }
+        }
+        let user = self.db.find_by_id(&rec.user_id)?
+            .ok_or_else(|| MiraError::AuthError("device token user not found".into()))?;
+        if !user.is_active {
+            return Err(MiraError::AuthError("device token account disabled".into()));
+        }
+        self.db.touch_device_token(&rec.token_id);
+        Ok(DeviceAuth { user, token_id: rec.token_id, name: rec.name, scopes: rec.scopes })
+    }
+
+    /// List a user's device tokens (metadata only).
+    pub fn list_device_tokens(&self, user_id: &str)
+        -> Result<Vec<crate::auth::models::DeviceTokenRecord>, MiraError>
+    {
+        self.db.list_device_tokens(user_id)
+    }
+
+    /// Revoke one device token owned by `owner_id`. Returns true if one was
+    /// removed. Takes effect immediately (the row is deleted).
+    pub fn revoke_device_token(&self, token_id: &str, owner_id: &str) -> Result<bool, MiraError> {
+        self.db.delete_device_token(token_id, owner_id)
     }
 
     // ── SSO / OIDC (Q2 #11) ──────────────────────────────────────────────────
@@ -729,5 +815,88 @@ mod refresh_family_tests {
         assert!(svc.refresh(&a3.refresh_token).await.is_err(), "the reused family should be fully revoked");
         // Device B (a different family) is UNAFFECTED — the whole point.
         assert!(svc.refresh(&dev_b.refresh_token).await.is_ok(), "other devices must keep their session");
+    }
+}
+
+#[cfg(test)]
+mod device_token_tests {
+    use super::*;
+    use crate::auth::{NewUser, Role};
+
+    fn svc_user() -> (tempfile::TempDir, LocalAuthService, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = LocalAuthService::new(&dir.path().join("auth.db"), "jwt-test-secret".into(), 7).unwrap();
+        let u = svc.create_user(NewUser {
+            username: "alice".into(), display_name: None, email: None,
+            password: "test-password-1234".into(), role: Role::User,
+        }).unwrap();
+        (dir, svc, u.id)
+    }
+
+    #[test]
+    fn create_verify_roundtrip_carries_scopes_and_name() {
+        let (_d, svc, uid) = svc_user();
+        let (tid, token) = svc.create_device_token(
+            &uid, "Kitchen speaker",
+            &[SCOPE_CHAT.into(), SCOPE_CHAT_CANCEL.into()], None,
+        ).unwrap();
+        assert!(token.starts_with(DEVICE_TOKEN_PREFIX));
+        let da = svc.verify_device_token(&token).unwrap();
+        assert_eq!(da.user.id, uid);
+        assert_eq!(da.name, "Kitchen speaker");
+        assert!(da.has_scope("chat"));
+        assert!(da.has_scope("chat.cancel"));
+        assert!(!da.has_scope("admin"));
+        let list = svc.list_device_tokens(&uid).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].token_id, tid);
+    }
+
+    #[test]
+    fn storage_is_hashed_wrong_token_fails() {
+        let (_d, svc, uid) = svc_user();
+        let (_tid, token) = svc.create_device_token(&uid, "d", &[SCOPE_CHAT.into()], None).unwrap();
+        // A different token never verifies; only the exact one does. (The row
+        // stores the SHA-256 hash, so the raw token can't be read back out.)
+        assert!(svc.verify_device_token("mdt_deadbeefdeadbeef").is_err());
+        assert!(svc.verify_device_token(&token).is_ok());
+    }
+
+    #[test]
+    fn revocation_takes_effect_immediately() {
+        let (_d, svc, uid) = svc_user();
+        let (tid, token) = svc.create_device_token(&uid, "d", &[SCOPE_CHAT.into()], None).unwrap();
+        assert!(svc.verify_device_token(&token).is_ok());
+        assert!(svc.revoke_device_token(&tid, &uid).unwrap());
+        assert!(svc.verify_device_token(&token).is_err(), "revoked token is rejected at once");
+        assert!(!svc.revoke_device_token(&tid, &uid).unwrap(), "already gone");
+    }
+
+    #[test]
+    fn revoke_requires_ownership() {
+        let (_d, svc, uid) = svc_user();
+        let (tid, _t) = svc.create_device_token(&uid, "d", &[SCOPE_CHAT.into()], None).unwrap();
+        assert!(!svc.revoke_device_token(&tid, "another-user").unwrap(), "non-owner can't revoke");
+        assert!(svc.revoke_device_token(&tid, &uid).unwrap());
+    }
+
+    #[test]
+    fn expired_token_is_rejected() {
+        let (_d, svc, uid) = svc_user();
+        // Insert directly with a past expiry (1ms after the epoch).
+        let token = "mdt_expiredsampletoken";
+        let hash = crate::auth::tokens::hash_refresh_token(token);
+        svc.db.create_device_token("tid-exp", &hash, &uid, "old", "[\"chat\"]", Some(1)).unwrap();
+        assert!(svc.verify_device_token(token).is_err(), "an expired token is rejected");
+    }
+
+    #[test]
+    fn last_used_is_stamped_on_verify() {
+        let (_d, svc, uid) = svc_user();
+        let (_tid, token) = svc.create_device_token(&uid, "d", &[SCOPE_CHAT.into()], None).unwrap();
+        assert!(svc.list_device_tokens(&uid).unwrap()[0].last_used_at.is_none());
+        svc.verify_device_token(&token).unwrap();
+        assert!(svc.list_device_tokens(&uid).unwrap()[0].last_used_at.is_some(),
+            "verify stamps last_used_at (usage attribution)");
     }
 }

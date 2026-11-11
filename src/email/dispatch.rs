@@ -177,6 +177,16 @@ pub async fn dispatch_inbound(
         tools_flow_restricted: true,
         // Use the global tool-round cap.
         max_tool_rounds_override: None,
+        turn_id:           None,
+        cancel_token:      None,
+        spoken_style:      None,
+        reply_language:    None,
+        debug_timings:     false,
+        speculative:       false,
+        commit_notify:     None,
+        restart_slot:      None,
+        restart_notify:    None,
+        context_tokens_override: None,
     };
 
     // ── Run the agent ──────────────────────────────────────────────

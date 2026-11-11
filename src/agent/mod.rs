@@ -47,6 +47,7 @@ pub mod supervisor;
 pub mod tool_loop;
 pub mod tool_select;
 pub mod transport;
+pub mod turn_registry;
 
 pub use core::{AgentCore, DEFAULT_SYSTEM_PROMPT, TurnContext};
 pub use instance::{Agent, AgentBudget, AgentId, AgentRegistry, AgentStatus};
@@ -79,6 +80,10 @@ pub use protocol::{
     Request as AgentRequest, Response as AgentResponse,
 };
 pub use stream::StreamEvent;
+pub use turn_registry::{
+    CancelOutcome, CancelRequest, CommitGate, CommitOutcome, CompletedTurn, SpeculativeHandles,
+    TurnHandle, TurnId, TurnRegistry, TurnState,
+};
 pub use supervisor::{
     NullExecutorResolver, SkillExecutorResolver, SpawnChildError, Supervisor,
     WorkerAssignment, WorkerComplete, WorkerContext, WorkerFailure, WorkerHandle,

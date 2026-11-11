@@ -271,8 +271,8 @@ async fn run_one_question(
                     // so the number reflects capability not a degraded config.
                     stored += memory.auto_extract_llm_and_store(
                         extract_provider, &user_msg, assistant_msg,
-                        BENCH_USER, BENCH_CHANNEL, None, None, &cats, min_conf,
-                    ).await;
+                        BENCH_USER, BENCH_CHANNEL, None, None, &cats, min_conf, false,
+                    ).await.written;
 
                     // Knowledge-graph population — runs alongside flat
                     // extraction so the two can be A/B'd. Off unless the config

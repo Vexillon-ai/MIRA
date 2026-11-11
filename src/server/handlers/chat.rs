@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::Json,
-    http::{HeaderMap, StatusCode},
+    extract::{Json, Path},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Sse},
     Extension,
 };
@@ -16,8 +16,10 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, warn};
 
-use crate::agent::{AgentCore, StreamEvent, TurnContext};
-use crate::auth::{AuthUser, LocalAuthService};
+use crate::agent::{
+    AgentCore, CancelOutcome, CancelRequest, CommitOutcome, StreamEvent, TurnContext, TurnRegistry,
+};
+use crate::auth::{ChatAuth, ChatCancelAuth, LocalAuthService};
 use crate::history::{HistoryStore, NewConversation, NewMessage, MessageRole};
 use crate::notifications::{NotificationBus, Notification, NotificationKind};
 use crate::onboarding::{
@@ -48,6 +50,24 @@ pub struct ChatRequest {
     // `Some(true/false)` overrides the global `agent.disable_reasoning` for this
     // turn; `None` uses the global default. Set by the chat window's toggle.
     pub disable_reasoning: Option<bool>,
+
+    // ── Voice (all optional; absent == today's behaviour) ──────────────
+    // The channel this turn arrives on. When set it wins over the
+    // `X-Mira-Client` header; `"voice"` opts the turn into the voice path
+    // (spoken style, timings, prompt-cache stability). Absent → header logic.
+    pub channel: Option<String>,
+    // Language the spoken reply should be in (item 2). Passed to the turn as a
+    // hint; an unknown value warns rather than fails.
+    pub reply_language: Option<String>,
+    // Delivery style for the reply (item 2), e.g. `"spoken"` — shapes the
+    // reply for text-to-speech (short sentences, no markup).
+    pub style: Option<String>,
+    // Emit per-turn latency `timing` events even off the voice channel (item 4).
+    // Voice turns always get timings; this opts a text turn in for debugging.
+    pub debug_timings: Option<bool>,
+    // Start this turn speculatively, holding tool execution + persistence until
+    // an explicit commit (item 6). Absent/false → a normal committed turn.
+    pub speculative: Option<bool>,
 }
 
 // Payload for the SSE `done` event. `model`/`provider` echo what the server
@@ -66,7 +86,7 @@ struct DonePayload {
 // ── POST /api/chat ────────────────────────────────────────────────────────────
 
 pub async fn chat_handler(
-    AuthUser(user): AuthUser,
+    ChatAuth(user): ChatAuth,
     Extension(agent):    Extension<Arc<AgentCore>>,
     Extension(history):  Extension<Arc<HistoryStore>>,
     Extension(auth):     Extension<Arc<LocalAuthService>>,
@@ -75,26 +95,35 @@ pub async fn chat_handler(
     Extension(preamble): Extension<Arc<ProfilePreambleCache>>,
     Extension(data_dir): Extension<DataDir>,
     Extension(mcp_servers): Extension<Arc<crate::mcp::McpServerRegistry>>,
+    Extension(turn_registry): Extension<Arc<TurnRegistry>>,
     headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> axum::response::Response {
     // ── Resolve or create conversation ────────────────────────────────────────
     let config = live_cfg.get().await;
 
-    // Channel tag for conversations created from this turn. Native clients
-    // send `X-Mira-Client: android` (any non-"web" value is treated as a
-    // mobile/native client); absent → "web" (backward-compatible). Per-
-    // conversation channel, so tagging at creation is sufficient. We honour
-    // the header (what the Android app sends today) rather than a body field.
-    let new_channel: &str = match headers
-        .get("x-mira-client")
-        .and_then(|v| v.to_str().ok())
+    // Channel tag for this turn (and conversations created from it). Resolution
+    // order: an explicit `channel` body field wins — this is how a
+    // voice client opts into the voice path (`"voice"`). Absent, we fall back to
+    // the `X-Mira-Client` header (what the Android app sends): any non-"web"
+    // value is a mobile/native client; absent → "web" (backward-compatible).
+    // Per-conversation channel, so tagging at creation is sufficient.
+    let turn_channel: String = match req.channel.as_deref()
         .map(|s| s.trim().to_ascii_lowercase())
-        .as_deref()
+        .filter(|s| !s.is_empty())
     {
-        None | Some("") | Some("web") => "web",
-        Some(_) => "mobile",
+        Some(c) => c,
+        None => match headers
+            .get("x-mira-client")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            None | Some("") | Some("web") => "web".to_string(),
+            Some(_) => "mobile".to_string(),
+        },
     };
+    let new_channel: &str = &turn_channel;
     let model = req.model_override
         .clone()
         .unwrap_or_else(|| config.default_chat_model().1);
@@ -136,11 +165,20 @@ pub async fn chat_handler(
         None
     };
 
+    // A speculative turn must leave NO
+    // trace until it commits: no conversation created, no user message stored,
+    // no title. We defer all of that to the commit (the Done arm). For a brand
+    // new conversation we run the turn against a provisional id and create the
+    // real row only on commit.
+    let speculative = req.speculative.unwrap_or(false);
+
     // Resolve the conversation up front so we can branch on its `mode`.
-    let (conv_id, conv_mode) = match &req.conversation_id {
+    // `new_conv_pending` = a new conversation whose creation is deferred to
+    // commit (speculative only).
+    let (conv_id, conv_mode, new_conv_pending) = match &req.conversation_id {
         Some(id) => {
             match history.get_conversation(id) {
-                Ok(Some(c)) if c.user_id == user.id => (id.clone(), c.mode),
+                Ok(Some(c)) if c.user_id == user.id => (id.clone(), c.mode, false),
                 Ok(Some(_)) => {
                     return (StatusCode::FORBIDDEN, "Not your conversation").into_response();
                 }
@@ -151,6 +189,10 @@ pub async fn chat_handler(
                     return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
                 }
             }
+        }
+        None if speculative => {
+            // Defer creation until commit — use a provisional id for the turn.
+            (uuid::Uuid::new_v4().to_string(), "chat".to_owned(), true)
         }
         None => {
             // Create a new conversation, titled with the first message.
@@ -164,7 +206,7 @@ pub async fn chat_handler(
                 external_user_id: None,
                 mode:             None,
             }) {
-                Ok(c)  => (c.id, c.mode),
+                Ok(c)  => (c.id, c.mode, false),
                 Err(e) => {
                     return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
                 }
@@ -182,17 +224,21 @@ pub async fn chat_handler(
         .and_then(|att| serde_json::to_string(
             &serde_json::json!({ "attachments": att })
         ).ok());
-    if let Err(e) = history.add_message(NewMessage {
-        conversation_id: conv_id.clone(),
-        role:            MessageRole::User,
-        content:         req.message.clone(),
-        content_type:    "text".to_owned(),
-        token_count:     None,
-        model:           None,
-        tool_calls:      None,
-        metadata:        user_metadata,
-    }) {
-        warn!("Failed to record user message: {}", e);
+    // Addendum-4 item 11 — a speculative turn stores nothing until commit; its
+    // user message is persisted in the Done arm (with the committed transcript).
+    if !speculative {
+        if let Err(e) = history.add_message(NewMessage {
+            conversation_id: conv_id.clone(),
+            role:            MessageRole::User,
+            content:         req.message.clone(),
+            content_type:    "text".to_owned(),
+            token_count:     None,
+            model:           None,
+            tool_calls:      None,
+            metadata:        user_metadata.clone(),
+        }) {
+            warn!("Failed to record user message: {}", e);
+        }
     }
 
     // reset companion missed-check-in counter on any user
@@ -233,6 +279,13 @@ pub async fn chat_handler(
     // picked model actually answers. Handles every provider via the shared
     // factory — not just openrouter/lmstudio, which used to silently fall back
     // to the default chain for Anthropic/DeepSeek/Gemini/etc.
+    // A voice turn uses the voice provider (`voice.provider`)
+    // when the request didn't pick an explicit provider; every other channel is
+    // unchanged. The voice provider fails over to the default chain (a runtime
+    // failure then surfaces as a `warning` event from the tool loop), and carries
+    // its own per-turn context budget. An unresolvable voice provider is logged
+    // and the turn silently uses the default.
+    let mut voice_ctx_budget: Option<usize> = None;
     let turn_provider: Option<Arc<dyn ModelProvider>> = match req.provider_override.as_deref() {
         Some(slug) => {
             let built = crate::gateway::builder::build_single_provider(
@@ -242,6 +295,16 @@ pub async fn chat_handler(
             }
             built
         }
+        None if turn_channel == "voice" && config.voice.provider.is_some() => {
+            match crate::gateway::builder::build_voice_provider(&config, &agent.provider) {
+                Some((p, budget)) => { voice_ctx_budget = budget; Some(p) }
+                None => {
+                    warn!("voice.provider '{}' could not be resolved — using the default provider",
+                          config.voice.provider.as_deref().unwrap_or(""));
+                    None
+                }
+            }
+        }
         None => None, // use the agent's default provider
     };
 
@@ -249,6 +312,12 @@ pub async fn chat_handler(
     let user_id       = user.id.clone();
     let message       = req.message.clone();
     let conv_id_c     = conv_id.clone();
+    // Addendum-4 item 11 — carried into the task so the Done (commit) arm can
+    // create the deferred conversation + persist the user message for a
+    // speculative turn. `channel`/`model` already flow in via other captures.
+    let new_conv_pending_task = new_conv_pending;
+    let spec_user_metadata    = user_metadata.clone();
+    let spec_channel          = new_channel.to_owned();
     // Snapshot attachments for the agent invocation below. Cheap clone
     // these are small base64 strings; provider-side serialisation
     // owns the further translation work.
@@ -257,22 +326,31 @@ pub async fn chat_handler(
     // model/provider attribution + look up pricing without a round-trip.
     let provider_name = req.provider_override.clone()
         .unwrap_or_else(|| agent.provider.name().to_owned());
-    // Snapshot the LLM auto-extract config for this turn. The mode switch
-    // is read once so mid-stream config reloads don't skew behaviour.
-    let auto_extract_cfg = config.memory.auto_extract.clone();
+    // Auto-extract config is read from the BOOT snapshot (`agent.config`), NOT
+    // LiveConfig — the same source the core post-hook uses for every other
+    // channel. Memory settings are restart-required, so reading them from the
+    // live config here made web disagree with core until a restart.
+    let auto_extract_cfg = agent.config.memory.auto_extract.clone();
     // Captured by the spawn alongside `agent`/`history` so the post-turn
     // extractor (onboarding mode only) can run without re-plumbing extensions.
     let auth_for_task = Arc::clone(&auth);
     let mode_for_task = conv_mode.clone();
     // The extractor must use the same model the user picked in the UI for this
-    // turn. Otherwise selecting e.g. gemma in the dropdown but having a
-    // different default provider wired up at startup would cause chats to go
-    // to gemma while the extractor silently hit the default model. Clone the
-    // per-turn provider (if any) for the extractor; fall back to the agent
-    // default when no override was sent.
-    let extractor_provider: Arc<dyn ModelProvider> = turn_provider
-        .clone()
-        .unwrap_or_else(|| Arc::clone(&agent.provider));
+    // A.8: the web turn's LLM extractor uses the fixed `memory_extract`
+    // llm-alias (fallback: primary provider), NOT the per-turn model the user
+    // picked — so a turn routed to a grounded/remote model can't pull
+    // conversation content into the extractor. If the alias can't be resolved,
+    // fall back to the per-turn/agent provider so web extraction still runs
+    // rather than silently dropping.
+    let extractor_provider: Arc<dyn ModelProvider> =
+        crate::agent::named_agent::build_provider_for_llm_alias(&agent.config, "memory_extract")
+            .unwrap_or_else(|e| {
+                // A.8: NEVER fall back to the per-turn model the user picked (it may
+                // be a grounded/remote model that must not see conversation content
+                // pulled into the extractor). Use the instance PRIMARY provider.
+                warn!("web extractor: memory_extract alias resolve failed ({e}); using the primary provider");
+                Arc::clone(&agent.provider)
+            });
 
     // Build a per-turn context. Default empty context = normal chat; if the
     // conversation is in onboarding mode, swap in the onboarding prompt,
@@ -350,6 +428,60 @@ pub async fn chat_handler(
         .and_then(|p| p.onboarded_at)
         .is_some();
 
+    // Mint this turn's stable id and register it so a later
+    // request can cancel/commit it. The id is echoed in the
+    // `X-Mira-Turn-Id` response header and opens the stream as `turn_started`.
+    // `register` returns the cancellation token (threaded into the turn);
+    // for now we only need the registration to exist + be cleaned up on end.
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    let cancel_token = turn_registry.register(
+        &turn_id, &user_id, &turn_channel, speculative, &req.message);
+    turn_ctx.turn_id = Some(turn_id.clone());
+    // Hand the turn its cancellation token. Firing it — via the cancel
+    // route or an SSE disconnect — stops the turn and makes it emit `Cancelled`.
+    turn_ctx.cancel_token = Some(cancel_token.clone());
+    // Spoken style + reply language steer for this turn.
+    // Unknown values surface as `warning` events from the turn, never errors.
+    turn_ctx.spoken_style = req.style.clone();
+    turn_ctx.reply_language = req.reply_language.clone();
+    // Per-turn timing events (always on for voice; core ORs
+    // the channel in, so this only needs to carry the explicit debug opt-in).
+    turn_ctx.debug_timings = req.debug_timings.unwrap_or(false);
+    // The voice provider's per-provider context budget.
+    turn_ctx.context_tokens_override = voice_ctx_budget;
+    // Speculative turn: thread the commit notifier + restart
+    // slot from the registry handle so the turn's commit barrier + restart path
+    // see the same shared state the commit route writes. Spawn the auto-discard
+    // timeout timer (stands down once committed).
+    turn_ctx.speculative = speculative;
+    if speculative {
+        if let Some(h) = turn_registry.speculative_handles(&turn_id) {
+            turn_ctx.commit_notify  = Some(Arc::clone(&h.commit_notify));
+            turn_ctx.restart_slot   = Some(Arc::clone(&h.restart_slot));
+            turn_ctx.restart_notify = Some(Arc::clone(&h.restart_notify));
+            let reg = Arc::clone(&turn_registry);
+            let tid = turn_id.clone();
+            let committed = Arc::clone(&h.committed);
+            let window = config.voice.speculative_timeout_secs;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(window)).await;
+                if !committed.load(std::sync::atomic::Ordering::Relaxed) {
+                    reg.discard_on_timeout(&tid);
+                }
+            });
+        }
+    }
+    let channel_for_task = turn_channel.clone();
+    let registry_for_task = Arc::clone(&turn_registry);
+    let turn_id_for_task = turn_id.clone();
+    // Implicit cancel on disconnect is voice-only (a hang-up = barge-in); other
+    // channels always run to completion on a dropped stream, exactly as before.
+    let implicit_cancel_on_disconnect =
+        config.voice.implicit_cancel_on_disconnect && turn_channel == "voice";
+    let disconnect_cancel = cancel_token.clone();
+    // How long after `done` a cancel may still truncate.
+    let cancel_window_secs = config.voice.cancel_window_secs;
+
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
 
     // Skill self-authoring: captured for the post-turn auto-approve hook.
@@ -375,8 +507,29 @@ pub async fn chat_handler(
         // Hold the Restricted Mode concurrency slot for the whole turn; dropping
         // it here (task end) frees the global permit. `None` when unrestricted.
         let _turn_slot = turn_slot;
+        // Mutable because a speculative turn creates its deferred conversation on
+        // commit and rebinds this to the real id.
+        let mut conv_id_c = conv_id_c;
+        // Drop this turn's registry entry whenever the task ends — success,
+        // error, or cancellation. A lookup miss then means "already done".
+        let _registry_guard = TurnRegistryGuard {
+            registry: Arc::clone(&registry_for_task),
+            turn_id:  turn_id_for_task.clone(),
+        };
+        // Implicit cancel on disconnect (voice only). A
+        // `Sender::closed()` future resolves when the SSE receiver is dropped,
+        // i.e. the client hung up. Firing the token then stops the turn as a
+        // barge-in. After a normal finish the receiver also drops, firing this a
+        // beat late — a harmless no-op on an already-finished turn.
+        if implicit_cancel_on_disconnect {
+            let dtx = tx.clone();
+            tokio::spawn(async move {
+                dtx.closed().await;
+                disconnect_cancel.cancel();
+            });
+        }
         match agent.process_with_context(
-            &session_id, &user_id, "web", &message, turn_provider, turn_ctx,
+            &session_id, &user_id, &channel_for_task, &message, turn_provider, turn_ctx,
         ).await {
             Err(e) => {
                 let _ = tx.send(Ok(Event::default().event("error").data(e.to_string()))).await;
@@ -399,6 +552,17 @@ pub async fn chat_handler(
                 loop {
                     match stream_rx.recv().await {
                         None => break,
+                        Some(StreamEvent::TurnStarted { turn_id, channel }) => {
+                            // First event of the stream. Lets a
+                            // client learn the id it can cancel/commit. Older
+                            // clients ignore the unknown event name.
+                            let payload = serde_json::json!({
+                                "turn_id": turn_id, "channel": channel,
+                            });
+                            let _ = tx.send(Ok(
+                                Event::default().event("turn_started").data(payload.to_string())
+                            )).await;
+                        }
                         Some(StreamEvent::Token(t)) => {
                             full_response.push_str(&t);
                             let _ = tx.send(Ok(
@@ -406,6 +570,43 @@ pub async fn chat_handler(
                             )).await;
                         }
                         Some(StreamEvent::Done { usage }) => {
+                            // Addendum-4 item 11 — a speculative turn committed:
+                            // NOW create the deferred conversation (if new) and
+                            // persist the user message, using the FINAL transcript
+                            // (the corrected message on a restart, else original).
+                            // A discarded speculative turn never reaches Done, so
+                            // it leaves nothing behind.
+                            if speculative {
+                                let final_msg = registry_for_task
+                                    .committed_message(&turn_id_for_task)
+                                    .unwrap_or_else(|| message.clone());
+                                if new_conv_pending_task {
+                                    match history.create_conversation(NewConversation {
+                                        user_id:          user_id.clone(),
+                                        channel:          spec_channel.clone(),
+                                        title:            Some(derive_title_from_message(&final_msg)),
+                                        model:            Some(model.clone()),
+                                        provider:         None,
+                                        external_user_id: None,
+                                        mode:             None,
+                                    }) {
+                                        Ok(c)  => conv_id_c = c.id,
+                                        Err(e) => warn!("Failed to create speculative conversation: {}", e),
+                                    }
+                                }
+                                if let Err(e) = history.add_message(NewMessage {
+                                    conversation_id: conv_id_c.clone(),
+                                    role:            MessageRole::User,
+                                    content:         final_msg,
+                                    content_type:    "text".to_owned(),
+                                    token_count:     None,
+                                    model:           None,
+                                    tool_calls:      None,
+                                    metadata:        spec_user_metadata.clone(),
+                                }) {
+                                    warn!("Failed to record speculative user message: {}", e);
+                                }
+                            }
                             // Persist assistant response.
                             let tool_calls_json = if tool_events.is_empty() {
                                 None
@@ -435,7 +636,7 @@ pub async fn chat_handler(
                                 serde_json::to_string(&meta).ok()
                             };
 
-                            if let Err(e) = history.add_message(NewMessage {
+                            match history.add_message(NewMessage {
                                 conversation_id: conv_id_c.clone(),
                                 role:            MessageRole::Assistant,
                                 // Repair any artifact URL the model mangled into
@@ -449,7 +650,17 @@ pub async fn chat_handler(
                                 tool_calls:      tool_calls_json,
                                 metadata:        metadata_json,
                             }) {
-                                warn!("Failed to persist assistant message: {}", e);
+                                Ok(m) => {
+                                    // Remember this completed
+                                    // turn briefly so a cancel arriving AFTER done
+                                    // (the user interrupts while it's still being
+                                    // spoken) can still truncate the stored reply.
+                                    registry_for_task.record_completed(
+                                        &turn_id_for_task, &user_id, &conv_id_c, &m.id,
+                                        cancel_window_secs,
+                                    );
+                                }
+                                Err(e) => warn!("Failed to persist assistant message: {}", e),
                             }
                             let _ = history.touch_conversation(&conv_id_c);
 
@@ -561,6 +772,10 @@ pub async fn chat_handler(
                                 // web handler owns web's LLM extraction, so it must
                                 // check consent here too (the core post-hook can't).
                                 && !crate::memory::auto_extract::is_no_store_request(&message)
+                                // An explicit "remember this" is handled by the core
+                                // post-hook for every channel (deterministic store);
+                                // skip here so we don't double-extract it.
+                                && !crate::memory::auto_extract::is_explicit_remember(&message)
                             {
                                 // LLM auto-extract runs only outside onboarding
                                 // mode, post-stream, as fire-and-forget. The
@@ -589,14 +804,104 @@ pub async fn chat_handler(
                                         None,
                                         &cats,
                                         min_conf,
+                                        false, // explicit "remember" handled by the core post-hook
                                     ).await;
                                 });
                             }
                             break;
                         }
+                        Some(StreamEvent::Timing(t)) => {
+                            // Forward per-turn latency as a
+                            // `timing` SSE event. Only present fields are sent.
+                            let mut obj = serde_json::Map::new();
+                            obj.insert("phase".into(), serde_json::json!(t.phase));
+                            let mut put = |k: &str, v: Option<u64>| {
+                                if let Some(n) = v { obj.insert(k.into(), serde_json::json!(n)); }
+                            };
+                            put("memory_recall_ms", t.memory_recall_ms);
+                            put("wiki_ms", t.wiki_ms);
+                            put("tool_selection_ms", t.tool_selection_ms);
+                            put("prompt_build_ms", t.prompt_build_ms);
+                            put("llm_request_to_first_token_ms", t.llm_request_to_first_token_ms);
+                            put("total_to_first_token_ms", t.total_to_first_token_ms);
+                            put("total_ms", t.total_ms);
+                            if let Some(n) = t.tool_rounds { obj.insert("tool_rounds".into(), serde_json::json!(n)); }
+                            if let Some(n) = t.llm_tokens_out { obj.insert("llm_tokens_out".into(), serde_json::json!(n)); }
+                            if let Some(n) = t.prompt_tokens { obj.insert("prompt_tokens".into(), serde_json::json!(n)); }
+                            if let Some(n) = t.cached_tokens { obj.insert("cached_tokens".into(), serde_json::json!(n)); }
+                            let _ = tx.send(Ok(Event::default()
+                                .event("timing")
+                                .data(serde_json::Value::Object(obj).to_string()))).await;
+                        }
+                        Some(StreamEvent::Restarted { turn_id: tid }) => {
+                            // A speculative turn was committed
+                            // with a changed message: discard what we streamed and
+                            // forward `restarted`; fresh events for the restarted
+                            // turn follow on this same stream.
+                            full_response.clear();
+                            tool_events.clear();
+                            thinking_events.clear();
+                            warnings.clear();
+                            let _ = tx.send(Ok(Event::default()
+                                .event("restarted")
+                                .data(serde_json::json!({ "turn_id": tid }).to_string()))).await;
+                        }
+                        Some(StreamEvent::Cancelled { turn_id: tid }) => {
+                            // The turn was cancelled (barge-in
+                            // or explicit cancel). Persist what was actually
+                            // delivered, never the unspoken remainder: the cancel
+                            // payload's `spoken_text` wins; absent (implicit
+                            // disconnect) we fall back to what streamed so far.
+                            // `discard` persists nothing. We deliberately do NOT
+                            // run auto-extraction on a cancelled turn — the
+                            // generated text past the barge-in point was never
+                            // seen, so mining it would record things never said.
+                            let req = registry_for_task
+                                .take_cancel_request(&turn_id_for_task)
+                                .unwrap_or_default();
+                            // A Cancelled on a speculative turn
+                            // is always an uncommitted abort (a committed turn
+                            // finishes with Done), so persist NOTHING regardless
+                            // of the payload.
+                            if !req.discard && !speculative {
+                                let spoken = req.spoken_text
+                                    .unwrap_or_else(|| full_response.clone());
+                                if !spoken.trim().is_empty() {
+                                    let meta = serde_json::json!({
+                                        "interrupted":   true,
+                                        "spoken_offset": spoken.chars().count(),
+                                    });
+                                    if let Err(e) = history.add_message(NewMessage {
+                                        conversation_id: conv_id_c.clone(),
+                                        role:            MessageRole::Assistant,
+                                        content:         crate::artifacts::normalize_artifact_urls(&spoken),
+                                        content_type:    "text".to_owned(),
+                                        token_count:     None,
+                                        model:           Some(model.clone()),
+                                        tool_calls:      None,
+                                        metadata:        Some(meta.to_string()),
+                                    }) {
+                                        warn!("Failed to persist cancelled assistant message: {}", e);
+                                    }
+                                    let _ = history.touch_conversation(&conv_id_c);
+                                }
+                            }
+                            let _ = tx.send(Ok(Event::default()
+                                .event("cancelled")
+                                .data(serde_json::json!({ "turn_id": tid }).to_string()))).await;
+                            break;
+                        }
                         Some(StreamEvent::Error(e)) => {
                             let _ = tx.send(Ok(Event::default().event("error").data(e))).await;
                             break;
+                        }
+                        Some(StreamEvent::ToolCapReached { rounds_used }) => {
+                            // The voice tool-round cap was
+                            // hit; MIRA is answering from what it has. A distinct
+                            // event so the client can show a holding phrase.
+                            let _ = tx.send(Ok(Event::default()
+                                .event("voice_tool_cap_reached")
+                                .data(serde_json::json!({ "rounds_used": rounds_used }).to_string()))).await;
                         }
                         Some(StreamEvent::Warning(w)) => {
                             warnings.push(w.clone());
@@ -654,6 +959,21 @@ pub async fn chat_handler(
                             }));
                             let _ = tx.send(Ok(
                                 Event::default().event("wiki_context")
+                                    .data(payload.to_string())
+                            )).await;
+                        }
+                        Some(StreamEvent::MemoryContext { served, unavailable }) => {
+                            // Forward as SSE so the chat UI can render per-source
+                            // memory pills + a "store unavailable" badge (B2d).
+                            let payload = serde_json::json!({
+                                "served": served, "unavailable": unavailable,
+                            });
+                            thinking_events.push(serde_json::json!({
+                                "type": "memory_context",
+                                "served": served, "unavailable": unavailable,
+                            }));
+                            let _ = tx.send(Ok(
+                                Event::default().event("memory_context")
                                     .data(payload.to_string())
                             )).await;
                         }
@@ -717,10 +1037,119 @@ pub async fn chat_handler(
         }
     });
 
-    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()).into_response()
+    let mut response = Sse::new(ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::default())
+        .into_response();
+    // Surface the turn id in a header too, so a client can
+    // cancel/commit without first parsing the SSE body. Infallible: the id is a
+    // UUID, always a valid header value.
+    if let Ok(hv) = HeaderValue::from_str(&turn_id) {
+        response.headers_mut().insert("x-mira-turn-id", hv);
+    }
+    response
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// RAII cleanup for a turn's registry entry: removing on drop covers every exit
+// path of the turn task (normal end, early `break`, error, or a future
+// cancellation) without duplicating the `remove` call at each one.
+struct TurnRegistryGuard {
+    registry: Arc<TurnRegistry>,
+    turn_id:  String,
+}
+
+impl Drop for TurnRegistryGuard {
+    fn drop(&mut self) {
+        self.registry.remove(&self.turn_id);
+    }
+}
+
+// Body for POST /api/chat/{turn_id}/cancel. Both fields optional, so an empty
+// `{}` (or no body) is a plain cancel that keeps whatever was already delivered.
+#[derive(Deserialize, Default)]
+pub struct CancelTurnBody {
+    // What the client actually delivered before barging in (e.g. the text TTS
+    // had spoken). Persisted as the assistant turn; absent → keep what streamed.
+    pub spoken_text: Option<String>,
+    // Drop the turn entirely — persist nothing.
+    #[serde(default)]
+    pub discard: bool,
+}
+
+// ── POST /api/chat/{turn_id}/cancel ─────────────────────────────────────────
+//
+// Cancel an in-flight turn (barge-in). Idempotent; a cancel
+// for an unknown turn is 404 (already finished / never existed), another user's
+// turn is 403, and a turn older than `voice.cancel_window_secs` is 409. On
+// success the turn stops at its next checkpoint and streams a `cancelled` event
+// on its own SSE connection.
+pub async fn cancel_turn_handler(
+    ChatCancelAuth(user):     ChatCancelAuth,
+    Extension(turn_registry): Extension<Arc<TurnRegistry>>,
+    Extension(history):       Extension<Arc<HistoryStore>>,
+    Extension(live_cfg):      Extension<Arc<LiveConfig>>,
+    Path(turn_id):            Path<String>,
+    body:                     Option<Json<CancelTurnBody>>,
+) -> axum::response::Response {
+    let window_secs = live_cfg.get().await.voice.cancel_window_secs;
+    let Json(body) = body.unwrap_or_default();
+    let req = CancelRequest { spoken_text: body.spoken_text.clone(), discard: body.discard };
+    match turn_registry.request_cancel(&turn_id, &user.id, window_secs, req) {
+        CancelOutcome::Accepted  => StatusCode::ACCEPTED.into_response(),
+        CancelOutcome::Forbidden => (StatusCode::FORBIDDEN, "not your turn").into_response(),
+        CancelOutcome::Stale     => (StatusCode::CONFLICT, "turn is too old to cancel").into_response(),
+        // The turn may have already finished (the voice
+        // engine was still speaking it). If it completed recently, truncate the
+        // stored reply to what was actually spoken + mark it interrupted.
+        CancelOutcome::NotFound  => {
+            match turn_registry.take_completed_for_cancel(&turn_id, &user.id, window_secs) {
+                Some(c) => {
+                    let spoken = if body.discard { String::new() } else { body.spoken_text.unwrap_or_default() };
+                    let meta = serde_json::json!({
+                        "interrupted":   true,
+                        "spoken_offset": spoken.chars().count(),
+                    });
+                    let content = crate::artifacts::normalize_artifact_urls(&spoken);
+                    match history.update_message_content(&c.message_id, &content, Some(&meta.to_string())) {
+                        Ok(true) => StatusCode::ACCEPTED.into_response(),
+                        _ => (StatusCode::NOT_FOUND, "turn finished; stored reply not found").into_response(),
+                    }
+                }
+                None => (StatusCode::NOT_FOUND, "no such in-flight turn").into_response(),
+            }
+        }
+    }
+}
+
+// Body for POST /api/chat/{turn_id}/commit. An unchanged (or absent) message
+// proceeds; a changed message restarts the turn under the same id.
+#[derive(Deserialize, Default)]
+pub struct CommitTurnBody {
+    pub message: Option<String>,
+}
+
+// ── POST /api/chat/{turn_id}/commit ─────────────────────────────────────────
+//
+// Commit a speculative turn. No body (or an unchanged
+// `message`) releases the turn's commit barrier: held tool calls execute and
+// history is written. A changed `message` discards the speculative work and
+// restarts the turn under the same id (a `restarted` event is streamed). 404 for
+// an unknown turn, 403 for another user's, 409 for a non-speculative turn.
+pub async fn commit_turn_handler(
+    ChatAuth(user):           ChatAuth,
+    Extension(turn_registry): Extension<Arc<TurnRegistry>>,
+    Path(turn_id):            Path<String>,
+    body:                     Option<Json<CommitTurnBody>>,
+) -> axum::response::Response {
+    let Json(body) = body.unwrap_or_default();
+    match turn_registry.commit(&turn_id, &user.id, body.message) {
+        CommitOutcome::Accepted       => StatusCode::ACCEPTED.into_response(),
+        CommitOutcome::NotFound       => (StatusCode::NOT_FOUND, "no such in-flight turn").into_response(),
+        CommitOutcome::Forbidden      => (StatusCode::FORBIDDEN, "not your turn").into_response(),
+        CommitOutcome::NotSpeculative => (StatusCode::CONFLICT, "turn is not speculative").into_response(),
+    }
+}
 
 // Stream a single canned assistant message over SSE, in the exact happy-path
 // shape (`token` events + a `done` event), so a Restricted Mode cap trip renders
@@ -860,6 +1289,19 @@ fn build_onboarding_turn_context(
         suppress_time_context:  false,
         // Use the global tool-round cap.
         max_tool_rounds_override: None,
+        // The onboarding path runs inside the chat handler, which mints + sets
+        // the real turn id + cancel token after this context is built.
+        turn_id:                  None,
+        cancel_token:             None,
+        // Onboarding is text-only; the voice steer + timings don't apply.
+        spoken_style:             None,
+        reply_language:           None,
+        debug_timings:            false,
+        speculative:              false,
+        commit_notify:            None,
+        restart_slot:             None,
+        restart_notify:           None,
+        context_tokens_override:  None,
     }
 }
 
@@ -1306,6 +1748,73 @@ fn clean_title_line(line: &str) -> Option<String> {
     if echoes.iter().any(|p| lower.contains(p)) { return None; }
 
     Some(stripped)
+}
+
+#[cfg(test)]
+mod voice_v1_request_tests {
+    use super::ChatRequest;
+
+    // Backward-compat: a pre-voice client sends only the old fields. All new
+    // voice fields must default to None (today's behaviour) and nothing breaks.
+    #[test]
+    fn minimal_legacy_payload_leaves_voice_fields_none() {
+        let req: ChatRequest = serde_json::from_str(r#"{"message":"hi"}"#).unwrap();
+        assert_eq!(req.message, "hi");
+        assert!(req.channel.is_none());
+        assert!(req.reply_language.is_none());
+        assert!(req.style.is_none());
+        assert!(req.debug_timings.is_none());
+        assert!(req.speculative.is_none());
+    }
+
+    // A voice client opts in via the body fields.
+    #[test]
+    fn voice_payload_parses_all_fields() {
+        let req: ChatRequest = serde_json::from_str(
+            r#"{"message":"hi","channel":"voice","reply_language":"es",
+                "style":"spoken","debug_timings":true,"speculative":true}"#,
+        ).unwrap();
+        assert_eq!(req.channel.as_deref(), Some("voice"));
+        assert_eq!(req.reply_language.as_deref(), Some("es"));
+        assert_eq!(req.style.as_deref(), Some("spoken"));
+        assert_eq!(req.debug_timings, Some(true));
+        assert_eq!(req.speculative, Some(true));
+    }
+
+    // Forward-compat: an unknown field from a newer client is ignored, not a
+    // 422 (ChatRequest intentionally does not deny unknown fields).
+    #[test]
+    fn unknown_field_is_ignored() {
+        let req: ChatRequest =
+            serde_json::from_str(r#"{"message":"hi","some_future_field":42}"#).unwrap();
+        assert_eq!(req.message, "hi");
+    }
+
+    // Cancel body: empty `{}` is a plain cancel (keep what was delivered);
+    // fields parse when present.
+    #[test]
+    fn cancel_body_parses_empty_and_full() {
+        use super::CancelTurnBody;
+        let empty: CancelTurnBody = serde_json::from_str("{}").unwrap();
+        assert!(empty.spoken_text.is_none());
+        assert!(!empty.discard);
+
+        let full: CancelTurnBody =
+            serde_json::from_str(r#"{"spoken_text":"so far","discard":true}"#).unwrap();
+        assert_eq!(full.spoken_text.as_deref(), Some("so far"));
+        assert!(full.discard);
+    }
+
+    // Commit body: empty `{}` proceeds (no message); a message restarts.
+    #[test]
+    fn commit_body_parses_empty_and_message() {
+        use super::CommitTurnBody;
+        let empty: CommitTurnBody = serde_json::from_str("{}").unwrap();
+        assert!(empty.message.is_none());
+        let full: CommitTurnBody =
+            serde_json::from_str(r#"{"message":"final transcript"}"#).unwrap();
+        assert_eq!(full.message.as_deref(), Some("final transcript"));
+    }
 }
 
 #[cfg(test)]

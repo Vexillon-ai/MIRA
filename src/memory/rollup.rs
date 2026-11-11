@@ -254,14 +254,16 @@ async fn rollup_user_day(
             ],
             &GenerationOptions {
                 temperature: 0.2,
-                max_tokens:  Some(400),
+                // Headroom so a reasoning model's <think> block doesn't crowd out
+                // the actual summary (or the `none` sentinel) before the cap.
+                max_tokens:  Some(1000),
                 ..Default::default()
             },
         ),
     ).await;
 
-    let summary = match response {
-        Ok(Ok(r))  => r.content.trim().to_owned(),
+    let raw = match response {
+        Ok(Ok(r))  => r.content,
         Ok(Err(e)) => {
             warn!("rollup: provider call failed for {}: {}", user_id, e);
             return Ok(false);
@@ -272,8 +274,17 @@ async fn rollup_user_day(
         }
     };
 
-    if summary.is_empty() || summary.eq_ignore_ascii_case("none") {
-        debug!("rollup: empty/none summary for {} on {} — skipping", user_id, target_date);
+    let summary = match clean_rollup_summary(&raw) {
+        Some(s) => s,
+        None => {
+            debug!("rollup: empty/none summary for {} on {} — skipping", user_id, target_date);
+            return Ok(false);
+        }
+    };
+    // R2: a day summary can repeat a credential the user mentioned — don't persist
+    // it. Rollups are coarse and regenerable, so dropping one is acceptable.
+    if crate::memory::auto_extract::looks_like_secret(&summary) {
+        warn!("rollup: summary for {} on {} looks to contain a credential — skipping", user_id, target_date);
         return Ok(false);
     }
 
@@ -299,6 +310,22 @@ async fn rollup_user_day(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Clean a rollup model response: strip any reasoning that leaked into the
+/// OUTPUT (reasoning models emit `<think>`/`<thinking>`; with a token cap the
+/// block can truncate before the `none` sentinel), then treat the `none`
+/// sentinel and its punctuation/quote variants — or an empty result — as
+/// "nothing memorable". Returns the summary to store, or `None` to skip.
+fn clean_rollup_summary(raw: &str) -> Option<String> {
+    let summary = crate::memory::authorship::strip_reasoning_blocks(raw).trim().to_owned();
+    let sentinel = summary
+        .trim_matches(|c: char| c == '`' || c == '"' || c == '\'' || c == '.' || c.is_whitespace());
+    if sentinel.is_empty() || sentinel.eq_ignore_ascii_case("none") {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
 const ROLLUP_SYSTEM_PROMPT: &str = r#"You produce terse day-summary memories for a personal assistant.
 Given one day of conversation between USER and ASSISTANT, output ONE short paragraph
 (≤3 sentences) summarising what the USER was doing, thinking about, or working on
@@ -311,6 +338,9 @@ Do NOT:
 - Quote the assistant's answers back
 - Invent details not in the transcript
 - Include meta-commentary ("the user asked…")
+- Record the assistant's or system's own state as if it were a fact about the user
+  (e.g. pending-approval counts, queue sizes, tool results) — summarise only what the
+  USER did, said, decided, or planned
 
 If the day has nothing memorable, output exactly: none"#;
 
@@ -329,7 +359,13 @@ fn build_transcript(msgs: &[crate::history::Message], max_chars_per_msg: usize) 
             crate::history::MessageRole::Assistant => "ASSISTANT",
             _                                      => continue,
         };
-        let content = truncate_chars(&m.content, max_chars_per_msg);
+        // A.4: strip reasoning markup before it reaches the rollup prompt. An
+        // assistant `<thinking>` block (or a truncated, unclosed one) is private
+        // scratch work, not day-summary material — this was the second route by
+        // which reasoning text leaked into stored memories.
+        let cleaned = crate::memory::authorship::strip_reasoning_blocks(&m.content);
+        let content = truncate_chars(cleaned.trim(), max_chars_per_msg);
+        if content.is_empty() { continue; }
         out.push_str(role);
         out.push_str(": ");
         out.push_str(&content);
@@ -363,6 +399,25 @@ fn target_day_bounds(lag_days: u64) -> Option<(NaiveDate, i64, i64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_rollup_summary_handles_reasoning_and_none_variants() {
+        // Reasoning leaked into the output + a `none` verdict after it → skip,
+        // and the <thinking> block never reaches storage (the id-4491 bug).
+        assert_eq!(clean_rollup_summary("<thinking>Thinking Process: the day had nothing…</thinking>none"), None);
+        // Truncated/unterminated reasoning (token cap hit mid-think) → stripped → empty → skip.
+        assert_eq!(clean_rollup_summary("<think>Thinking Process: long analysis that never closes"), None);
+        // `none` sentinel variants.
+        for v in ["none", "none.", "`none`", "\"none\"", "None", "  none  "] {
+            assert_eq!(clean_rollup_summary(v), None, "variant {v:?} must be treated as nothing");
+        }
+        // A real summary with a reasoning preamble keeps only the summary.
+        let got = clean_rollup_summary("<think>deciding…</think>Tarek shipped the memory SPI today.").unwrap();
+        assert_eq!(got, "Tarek shipped the memory SPI today.");
+        assert!(!got.contains("<think"), "no reasoning markup stored");
+        // A plain summary passes through.
+        assert_eq!(clean_rollup_summary("Worked on the garden.").as_deref(), Some("Worked on the garden."));
+    }
 
     #[test]
     fn target_day_bounds_is_utc_midnight_and_24h_wide() {
@@ -424,5 +479,25 @@ mod tests {
         assert!(t.contains("ASSISTANT: hi there"));
         assert!(!t.contains("hidden"));
         assert!(!t.contains("tool-output"));
+    }
+
+    #[test]
+    fn build_transcript_strips_assistant_reasoning_blocks() {
+        // A.4: a `<thinking>` block in an assistant turn must not reach the
+        // rollup prompt (the leak route), while the real answer survives.
+        use crate::history::{Message, MessageRole};
+        let msgs = vec![
+            Message {
+                id: "1".into(), conversation_id: "c".into(),
+                role: MessageRole::Assistant,
+                content: "<thinking>they have 19 pending edits</thinking>Sure, done.".into(),
+                content_type: "text".into(), token_count: None, model: None,
+                tool_calls: None, created_at: 0, metadata: None,
+            },
+        ];
+        let t = build_transcript(&msgs, 1000);
+        assert!(t.contains("Sure, done."), "answer kept: {t:?}");
+        assert!(!t.contains("19 pending"), "reasoning stripped: {t:?}");
+        assert!(!t.contains("thinking"), "no markup: {t:?}");
     }
 }

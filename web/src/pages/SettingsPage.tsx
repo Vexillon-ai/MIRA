@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Save, Check, Palette, Cpu, Bot, Radio, Database, Server, Code2, Upload, Trash2, Wrench, RotateCcw, Loader2, Calendar as CalendarIcon, RefreshCw, Shield, ShieldAlert, Volume2, ChevronDown, Image as ImageIcon, BookText, Lock, Boxes } from 'lucide-react'
@@ -88,11 +88,8 @@ interface Config {
     }
   }
   memory?: {
-    vector_backend?: string
     similarity_threshold?: number
-    per_user_isolation?: boolean
-    share_across_channels?: boolean
-    qdrant_url?: string
+    context_top_k?: number
     embedding_dim?: number
     embedding_cache_size?: number
     embedding?: {
@@ -121,6 +118,15 @@ interface Config {
       max_messages?:          number
       max_chars_per_message?: number
     }
+    graph?: { enabled?: boolean }
+    consolidation?: {
+      contradictions_enabled?:   boolean
+      entity_dedup_enabled?:     boolean
+      entity_dedup_ratio?:       number
+      importance_enabled?:       boolean
+      importance_half_life_days?: number
+    }
+    providers?: Array<MemoryProviderCfg>
   }
   wiki?: {
     auto_extract?: {
@@ -2881,6 +2887,162 @@ function ChannelsTab({
 
 // ── Memory tab ────────────────────────────────────────────────────────────────
 
+type MemoryProviderCfg = {
+  id: string
+  enabled?: boolean
+  transport?: 'in_process' | 'mcp' | 'http'
+  mode?: 'harness' | 'agent' | 'both'
+  read_only?: boolean
+  allow_non_loopback?: boolean
+  base_url?: string
+  api_key_file?: string
+  tls_ca_file?: string
+  user_id_field?: 'id' | 'username' | 'email'
+  root?: string
+  command?: string
+  mapping?: string
+}
+
+// Admin editor for `memory.providers` — add/enable/configure the pluggable
+// memory backends (built-in, files, MCP, or an HTTP service).
+function MemoryProvidersEditor({ providers, set }: {
+  providers: MemoryProviderCfg[]
+  set: (p: string, v: unknown) => void
+}) {
+  const update  = (next: MemoryProviderCfg[]) => set('memory.providers', next)
+  const patchAt = (i: number, patch: Partial<MemoryProviderCfg>) =>
+    update(providers.map((p, j) => (j === i ? { ...p, ...patch } : p)))
+  const removeAt = (i: number) => update(providers.filter((_, j) => j !== i))
+  const add = (preset: Partial<MemoryProviderCfg>) =>
+    update([...providers, { id: '', enabled: true, transport: 'in_process', ...preset }])
+
+  const card = {
+    border: '1px solid var(--border)', borderRadius: 8, padding: 'var(--space-3)',
+  } as const
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+      {providers.length === 0 && (
+        <p className={styles.sectionDesc}>
+          No providers configured — the built-in SQLite store is used on its own (today's
+          behaviour). Add one to layer in a plain-text files store, or an external HTTP memory
+          service that speaks MIRA's memory SPI.
+        </p>
+      )}
+      {providers.map((p, i) => {
+        const transport = p.transport ?? 'in_process'
+        // L1: the built-in store is always present and can't be removed or
+        // reconfigured here (it's configured by the Embeddings/Recall sections),
+        // so render it as a fixed, non-editable row — no Remove, no toggles.
+        if (p.id === 'builtin') {
+          return (
+            <div key={i} style={{ ...card, display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+              <strong>builtin</strong>
+              <span className={styles.sectionDesc} style={{ margin: 0 }}>
+                Built-in SQLite store — always on, can't be removed. Configured by the
+                Embeddings &amp; Recall sections below.
+              </span>
+            </div>
+          )
+        }
+        return (
+          <div key={i} style={card}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-2)' }}>
+              <strong>{p.id || '(unnamed provider)'}</strong>
+              <button type="button" className={styles.button} onClick={() => removeAt(i)}>Remove</button>
+            </div>
+            <Field label="Provider id" desc="Stable id — a name like 'files', 'mem0', 'home-memory'.">
+              <TextInput value={p.id} onChange={(v) => patchAt(i, { id: v })} placeholder="e.g. home-memory" mono />
+            </Field>
+            <Field label="Enabled" desc="Include this provider in recall (and ingest, if it's writable and capture is on).">
+              <Toggle value={p.enabled ?? true} onChange={(v) => patchAt(i, { enabled: v })} />
+            </Field>
+            <Field label="Transport" desc="In-process = a plain-text files store; HTTP = an external memory service that speaks MIRA's SPI.">
+              <SelectInput value={transport} onChange={(v) => patchAt(i, { transport: v as MemoryProviderCfg['transport'] })}
+                options={[{ value: 'in_process', label: 'In-process (files store)' }, { value: 'http', label: 'HTTP service' }]} />
+            </Field>
+            {transport === 'in_process' && (
+              <Field label="Files root" desc="Directory for the plain-text files store (one note per file).">
+                <TextInput value={p.root ?? ''} onChange={(v) => patchAt(i, { root: v })} placeholder="~/.mira/data/memfiles" mono />
+              </Field>
+            )}
+            {transport === 'http' && (<>
+              <Field label="Base URL" desc="HTTP endpoint of the memory service.">
+                <TextInput value={p.base_url ?? ''} onChange={(v) => patchAt(i, { base_url: v })} placeholder="http://127.0.0.1:____/v1" mono />
+              </Field>
+              <Field label="API key file" desc="Path to a file holding the service's API key (sent as X-Api-Key / Bearer).">
+                <TextInput value={p.api_key_file ?? ''} onChange={(v) => patchAt(i, { api_key_file: v })} placeholder="/path/to/key.txt" mono />
+              </Field>
+              <Field label="TLS CA file" desc="Optional: a PEM CA/cert to additionally trust, for a service behind a self-signed or private-CA certificate. MIRA trusts a bundled root set, not your OS store.">
+                <TextInput value={p.tls_ca_file ?? ''} onChange={(v) => patchAt(i, { tls_ca_file: v })} placeholder="/path/to/ca.pem" mono />
+              </Field>
+              <Field label="Identity field" desc="Which identity MIRA sends as the service's user key: the account id (default), the username, or the email. Use username/email if the service is keyed on those.">
+                <SelectInput value={p.user_id_field ?? 'id'} onChange={(v) => patchAt(i, { user_id_field: v as MemoryProviderCfg['user_id_field'] })}
+                  options={[{ value: 'id', label: 'Account id (default)' }, { value: 'username', label: 'Username' }, { value: 'email', label: 'Email' }]} />
+              </Field>
+            </>)}
+            <Field label="Read-only" desc="Never write to this provider even if it supports writes.">
+              <Toggle value={p.read_only ?? false} onChange={(v) => patchAt(i, { read_only: v })} />
+            </Field>
+            {transport !== 'in_process' && (
+              <Field label="Allow remote endpoint" desc="Fail-closed: a LAN/remote (non-loopback) endpoint is refused on startup unless this is on. A remote store receives the user's query text and may return their private facts.">
+                <Toggle value={p.allow_non_loopback ?? false} onChange={(v) => patchAt(i, { allow_non_loopback: v })} />
+              </Field>
+            )}
+          </div>
+        )
+      })}
+      <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+        <button type="button" className={styles.button}
+          onClick={() => add({ id: 'files', transport: 'in_process', mode: 'both', root: '~/.mira/data/memfiles' })}>+ Files store</button>
+        <button type="button" className={styles.button}
+          onClick={() => add({ id: 'external', transport: 'http', mode: 'harness', read_only: true, allow_non_loopback: false, base_url: 'https://memory.example.com/v1', api_key_file: '' })}>+ External memory service (HTTP)</button>
+      </div>
+      <p className={styles.sectionDesc}>
+        <strong>External memory service (HTTP):</strong> any service that speaks MIRA's
+        provider-neutral memory SPI — add it as an HTTP provider with its base URL and an
+        API-key file. It serves facts with a trust level (verified / reported / unverified);
+        mark it read-only if MIRA shouldn't write to it. The built-in store always stays in
+        the read set. See the memory-provider SPI guide for the contract and setup.
+      </p>
+    </div>
+  )
+}
+
+// Per-source load state + live health, with a Test-connection button (admin —
+// the endpoint 403s otherwise and this renders nothing).
+function MemorySourceStatus() {
+  const { data: statuses = [], refetch, isFetching } = useQuery({
+    queryKey: ['memory-provider-status'],
+    queryFn:  memoryApi.providersStatus,
+    retry:    false,
+  })
+  if (statuses.length === 0) return null
+  const dot = (h: string) =>
+    h === 'ready' ? '#22d3a0' : h === 'warming' ? '#d8b365' : '#f25c5c'
+  return (
+    <div style={{ marginTop: 'var(--space-3)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: '10px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+        <strong style={{ fontSize: '13px' }}>Source status</strong>
+        <button type="button" className={styles.button} onClick={() => refetch()} disabled={isFetching}>
+          {isFetching ? 'Testing…' : 'Test connection'}
+        </button>
+      </div>
+      {statuses.map((s) => (
+        <div key={s.id} style={{ display: 'flex', gap: '8px', alignItems: 'center', fontSize: '12px', padding: '3px 0' }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: dot(s.health), flexShrink: 0 }} title={s.health} />
+          <strong>{s.id}</strong>
+          <span style={{ color: 'var(--text-muted)' }}>
+            {s.health === 'error'
+              ? `${s.transport ?? ''} · not loaded`
+              : `${s.locality}${s.read ? ' · read' : ''}${s.write ? ' · write' : ''}${s.catalog ? ' · catalog' : ''}`}
+          </span>
+          <span style={{ color: 'var(--text-muted)', marginLeft: 'auto', textAlign: 'right' }}>{s.reason ?? s.health}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function MemoryTab({
   set, str, num, bool, draft,
 }: {
@@ -2898,6 +3060,22 @@ function MemoryTab({
     const items = raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
     set(path, items)
   }
+  // Capture controls: checkbox-list membership helpers.
+  const CAPTURE_CATS = ['fact', 'preference', 'skill', 'relationship', 'project'] as const
+  const CAPTURE_CHANNELS = ['web', 'telegram', 'signal', 'discord', 'slack', 'matrix', 'whatsapp', 'email'] as const
+  const CHANNEL_LABELS: Record<string, string> = {
+    web: 'Web', telegram: 'Telegram', signal: 'Signal', discord: 'Discord',
+    slack: 'Slack', matrix: 'Matrix', whatsapp: 'WhatsApp', email: 'Email',
+  }
+  const toggleIn = (path: string, item: string) => {
+    const cur = arrVal(path)
+    set(path, cur.includes(item) ? cur.filter((x) => x !== item) : [...cur, item])
+  }
+  const catLabel = (c: string) =>
+    c === 'relationship' ? 'People & pets' : c.charAt(0).toUpperCase() + c.slice(1)
+  const captureMode = str('memory.auto_extract.mode', 'off')
+  const checkRow: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 'var(--space-3)' }
+  const checkItem: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: 'var(--font-size-sm)' }
   // Sleep-like consolidator manual trigger (admin-only endpoint). Local state.
   // The button calls /api/admin/consolidator/run-now which runs all three
   // phases for every user regardless of the per-phase config flags below —
@@ -2926,25 +3104,119 @@ function MemoryTab({
       setConsRunning(false)
     }
   }
+  const providers: MemoryProviderCfg[] = Array.isArray(getPath(draft, 'memory.providers'))
+    ? (getPath(draft, 'memory.providers') as MemoryProviderCfg[])
+    : []
   return (
     <div className={styles.tabBody}>
-      <Section title="Storage">
-        <Field label="Vector backend" desc="Where semantic memory vectors are stored. 'sqlite' is built-in; 'qdrant' connects to an external Qdrant instance.">
+      <p className={styles.sectionDesc}>
+        How MIRA stores and recalls durable facts about each user. <strong>Providers</strong>
+        {' '}are the memory backends (the built-in store, a plain-text files store, or an
+        external HTTP memory service); <strong>Capture</strong> controls what gets written;
+        <strong> Recall</strong> tunes how it's found. The built-in store is configured by the
+        Embeddings / Recall sections below.
+      </p>
+
+      <Section title="What MIRA remembers (automatic capture) · restart required">
+        <p className={styles.sectionDesc}>
+          Whether MIRA automatically records durable facts about each user after a turn.
+          <strong> Off by default</strong> — a fresh install records nothing automatically,
+          including to a Files or external store, until you opt in. An explicit
+          <em> “remember this”</em> in chat is <strong>always</strong> saved regardless of this
+          setting — and because it distils the fact to store, it runs a brief model pass even
+          when Mode is Off or Basic. When on, automatic capture only stores the <strong>categories</strong> you
+          pick below (on both the Basic and Smart extractors), only facts the user actually
+          {' '}stated (not questions, and not the assistant's own words), avoids re-storing a
+          fact it just recalled, and won't resurrect one you recently deleted. Changing these
+          takes effect after a restart.
+        </p>
+        <Field label="Mode" desc="Off = record nothing automatically. Basic = on-device extractor (free, no model call). Smart = a model pass after each turn (more accurate, uses tokens).">
           <SelectInput
-            value={str('memory.vector_backend', 'sqlite')}
-            onChange={(v) => set('memory.vector_backend', v)}
+            value={captureMode}
+            onChange={(v) => set('memory.auto_extract.mode', v)}
             options={[
-              { value: 'sqlite', label: 'SQLite (built-in)' },
-              { value: 'qdrant', label: 'Qdrant' },
+              { value: 'off',       label: 'Off — record nothing automatically (default)' },
+              { value: 'heuristic', label: 'Basic — on-device, free' },
+              { value: 'llm',       label: 'Smart — uses your model, costs tokens' },
             ]}
           />
         </Field>
-        <Field label="Qdrant URL" desc="Base URL for your Qdrant instance (only used when backend is 'qdrant').">
-          <TextInput value={str('memory.qdrant_url', 'http://localhost:6333')} onChange={(v) => set('memory.qdrant_url', v)} placeholder="http://localhost:6333" mono />
+        {captureMode === 'llm' && (
+          <Field label="Minimum confidence" desc="Lowest confidence the Smart extractor will store a candidate at.">
+            <SelectInput
+              value={str('memory.auto_extract.min_confidence', 'medium')}
+              onChange={(v) => set('memory.auto_extract.min_confidence', v)}
+              options={[
+                { value: 'low',    label: 'Low (more memories, more noise)' },
+                { value: 'medium', label: 'Medium (recommended)' },
+                { value: 'high',   label: 'High (only confident facts)' },
+              ]}
+            />
+          </Field>
+        )}
+        {captureMode !== 'off' && (
+          <Field label="Categories to capture" desc="Which kinds of fact automatic capture may store. People & pets is off by default because it can name third parties who haven't consented — an explicit “remember” still saves them.">
+            <div style={checkRow}>
+              {CAPTURE_CATS.map((c) => (
+                <label key={c} style={checkItem}>
+                  <input
+                    type="checkbox"
+                    checked={arrVal('memory.auto_extract.allowed_categories').includes(c)}
+                    onChange={() => toggleIn('memory.auto_extract.allowed_categories', c)}
+                  />
+                  {catLabel(c)}
+                </label>
+              ))}
+            </div>
+            {/* L4: an empty selection reads as "all" server-side — make that
+                explicit so the user isn't surprised; to capture nothing, use Off. */}
+            {arrVal('memory.auto_extract.allowed_categories').length === 0 && (
+              <p className={styles.sectionDesc} style={{ color: 'var(--danger, #c0392b)', marginTop: '6px' }}>
+                Nothing selected means automatic capture stores <strong>every</strong> category.
+                To capture nothing, set Mode to <strong>Off</strong> above.
+              </p>
+            )}
+          </Field>
+        )}
+        {captureMode === 'llm' && (
+          <Field label="Smart extractor channels" desc="Channels that use the Smart extractor; others use Basic. None selected = Mode decides for every channel. Only your enabled channels are listed.">
+            <div style={checkRow}>
+              {CAPTURE_CHANNELS
+                // L9: show only channels that are actually enabled (web is always
+                // on); listing every id, including disabled ones, was noise.
+                .filter((ch) => ch === 'web' || bool(`channels.${ch}.enabled`, false))
+                .map((ch) => (
+                  <label key={ch} style={checkItem}>
+                    <input
+                      type="checkbox"
+                      checked={arrVal('memory.auto_extract.llm_channels').includes(ch)}
+                      onChange={() => toggleIn('memory.auto_extract.llm_channels', ch)}
+                    />
+                    {CHANNEL_LABELS[ch] ?? ch}
+                  </label>
+                ))}
+            </div>
+          </Field>
+        )}
+        <Field label="Deleted-memory retention (days) · restart required" desc="How long a deleted memory is kept (hidden from recall) before it is permanently purged from the built-in store. A purge runs at startup and every few hours. 0 = keep indefinitely for audit. Default 30.">
+          <NumberInput value={num('memory.retention_days', 30)} onChange={(v) => set('memory.retention_days', v)} min={0} max={3650} />
         </Field>
       </Section>
 
-      <Section title="Embeddings">
+      <Section title="Memory sources · restart required">
+        <p className={styles.sectionDesc}>
+          Pluggable memory backends. The <strong>built-in SQLite store</strong> is always
+          present (it can't be removed); add sources to fan recall across additional stores or
+          to serve memory from an external HTTP service that speaks MIRA's memory SPI. Recall
+          merges results from every enabled source (tagged by source). A remote (non-loopback)
+          source is refused unless you explicitly allow it, since it receives the user's query
+          text. Changes take effect after a restart.
+        </p>
+        <MemoryProvidersEditor providers={providers} set={set} />
+        <MemorySourceStatus />
+      </Section>
+
+      <Section title="Embeddings (built-in store) · restart required">
         <Field label="Embedding provider" desc="Which service generates vector embeddings for semantic search.">
           <SelectInput
             value={str('memory.embedding.provider', 'internal')}
@@ -3022,24 +3294,21 @@ function MemoryTab({
         </Field>
       </Section>
 
-      <Section title="Behaviour">
-        <Field label="Similarity threshold" desc="Minimum cosine similarity (0–1) for a memory to appear in semantic search results.">
+      <Section title="Recall (how MIRA finds memories) · restart required">
+        <Field label="Similarity threshold" desc="Minimum cosine similarity (0–1) for a memory to appear in semantic search results. Lower = broader recall; higher = only close matches.">
           <div className={styles.rangeRow}>
             <input
               type="range"
               className={styles.range}
               min={0} max={1} step={0.01}
-              value={num('memory.similarity_threshold', 0.7)}
+              value={num('memory.similarity_threshold', 0.6)}
               onChange={(e) => set('memory.similarity_threshold', Number(e.target.value))}
             />
-            <span className={styles.rangeValue}>{num('memory.similarity_threshold', 0.7).toFixed(2)}</span>
+            <span className={styles.rangeValue}>{num('memory.similarity_threshold', 0.6).toFixed(2)}</span>
           </div>
         </Field>
-        <Field label="Per-user isolation" desc="Each user gets a separate memory database. Recommended for multi-user deployments.">
-          <Toggle value={bool('memory.per_user_isolation', true)} onChange={(v) => set('memory.per_user_isolation', v)} />
-        </Field>
-        <Field label="Share across channels" desc="Allow memories created in one channel (e.g. Telegram) to surface in others (e.g. web).">
-          <Toggle value={bool('memory.share_across_channels', true)} onChange={(v) => set('memory.share_across_channels', v)} />
+        <Field label="Context facts per turn" desc="How many memories the per-turn hook retrieves and injects. Higher helps aggregation / 'how many' / multi-session questions at the cost of a larger prompt.">
+          <NumberInput value={num('memory.context_top_k', 15)} onChange={(v) => set('memory.context_top_k', v)} min={1} max={100} />
         </Field>
         <Field label="Recency weight" desc="How much a memory's freshness boosts its recall ranking, blended with semantic similarity. 0 = rank purely by similarity (older but frequently-used facts can dominate); higher surfaces recently-formed facts. 0.25 recommended.">
           <div className={styles.rangeRow}>
@@ -3058,7 +3327,7 @@ function MemoryTab({
         </Field>
       </Section>
 
-      <CollapsibleSection title="Background indexer (advanced)">
+      <CollapsibleSection title="Background indexer (advanced) · restart required">
         <p className={styles.sectionDesc}>
           Embeds historical chat messages into the vector store so semantic recall can reach past conversations. Disabling it stops new inserts but leaves existing vectors intact.
         </p>
@@ -3081,51 +3350,7 @@ function MemoryTab({
         </Field>
       </CollapsibleSection>
 
-      <CollapsibleSection title="Auto-extract (post-turn memory writes)">
-        <p className={styles.sectionDesc}>
-          Decides how MIRA proactively persists facts about the user after each turn. The <strong>onboarding flow</strong> drives the LLM extractor — switch this off and onboarding stops collecting structured facts. The heuristic mode keeps the bundled regex-based extractor.
-        </p>
-        <Field label="Mode" desc="off = no auto-extract; heuristic = bundled regex extractor; llm = structured pass through the model with confidence gating.">
-          <SelectInput
-            value={str('memory.auto_extract.mode', 'heuristic')}
-            onChange={(v) => set('memory.auto_extract.mode', v)}
-            options={[
-              { value: 'off',       label: 'Off — no auto-extraction' },
-              { value: 'heuristic', label: 'Heuristic (regex, free)' },
-              { value: 'llm',       label: 'LLM (structured, costs tokens)' },
-            ]}
-          />
-        </Field>
-        <Field label="Minimum confidence (LLM mode)" desc="Lowest confidence tier accepted from the LLM extractor. Only applied when mode = LLM.">
-          <SelectInput
-            value={str('memory.auto_extract.min_confidence', 'medium')}
-            onChange={(v) => set('memory.auto_extract.min_confidence', v)}
-            options={[
-              { value: 'low',    label: 'Low (more memories, more noise)' },
-              { value: 'medium', label: 'Medium (recommended)' },
-              { value: 'high',   label: 'High (only confident facts)' },
-            ]}
-          />
-        </Field>
-        <Field label="Allowed categories" desc="Comma-separated. 'relationship' is off by default because it can name third parties who haven't consented.">
-          <TextInput
-            value={arrVal('memory.auto_extract.allowed_categories').join(', ')}
-            onChange={(v) => setArr('memory.auto_extract.allowed_categories', v)}
-            placeholder="fact, preference, skill, project"
-            mono
-          />
-        </Field>
-        <Field label="LLM extractor channels" desc="Comma-separated channels that use the richer LLM extractor regardless of the mode above (unless mode = off). Channel ids: web, telegram, signal, discord, slack, matrix, whatsapp, email. Leave blank to let Mode decide for every channel. Example: 'telegram' runs the LLM extractor on Telegram while everything else stays heuristic.">
-          <TextInput
-            value={arrVal('memory.auto_extract.llm_channels').join(', ')}
-            onChange={(v) => setArr('memory.auto_extract.llm_channels', v)}
-            placeholder="(blank — Mode decides)"
-            mono
-          />
-        </Field>
-      </CollapsibleSection>
-
-      <CollapsibleSection title="Daily rollup">
+      <CollapsibleSection title="Daily rollup · restart required">
         <p className={styles.sectionDesc}>
           Background job that consolidates each user's previous UTC day of conversation into a single summary memory tagged <code>rollup</code>. Off by default — costs one extra LLM call per active user per day.
         </p>
@@ -3146,18 +3371,27 @@ function MemoryTab({
         </Field>
       </CollapsibleSection>
 
-      <CollapsibleSection title="Knowledge graph (experimental)">
+      <CollapsibleSection title="Knowledge graph (experimental — not yet active)">
         <p className={styles.sectionDesc}>
-          Temporal knowledge-graph memory — facts stored as typed, timestamped triples (subject → predicate → object|value) so aggregation/counting questions ("how many plants?", "total bike spend?") resolve against exact set membership instead of fuzzy top-k retrieval. See <a href="https://vexillon.ai/docs/concepts/memory-and-wiki" target="_blank" rel="noopener noreferrer">Memory &amp; the wiki</a>. Adds an extra LLM call per turn for triple extraction when on. Off by default.
+          Temporal knowledge-graph memory — facts as typed, timestamped triples (subject →
+          predicate → object|value) so aggregation/counting questions resolve against exact
+          set membership instead of fuzzy top-k retrieval. <strong>Designed but not yet wired
+          to a live per-turn writer</strong>, so enabling it currently has no effect outside
+          the benchmark (nothing populates the graph during normal turns). Kept here so the
+          setting is ready when the writer lands. Off by default.
         </p>
-        <Field label="Enabled" desc="Turn on the graph layer (extraction + retrieval). Required for any of the consolidation passes below to do anything.">
+        <Field label="Enabled" desc="Turn on the graph layer. No effect today — there is no live per-turn writer yet; the per-turn graph read and its completeness claim are disabled until one exists.">
           <Toggle value={bool('memory.graph.enabled', false)} onChange={(v) => set('memory.graph.enabled', v)} />
         </Field>
       </CollapsibleSection>
 
-      <CollapsibleSection title="Sleep-like consolidation">
+      <CollapsibleSection title="Sleep-like consolidation (inert until the graph writer lands)">
         <p className={styles.sectionDesc}>
-          Phased nightly clean-up of the knowledge graph — deterministic, MIRA-side, no LLM-as-policy. Runs per active user inside the existing daily memory.rollup tick. Each phase independently togglable. All require <strong>Knowledge graph (above) enabled</strong>; otherwise they're no-ops. See <a href="https://vexillon.ai/docs/concepts/memory-and-wiki" target="_blank" rel="noopener noreferrer">Memory &amp; the wiki</a>.
+          Phased nightly clean-up of the knowledge graph — deterministic, MIRA-side. Each phase
+          independently togglable. <strong>These operate on the knowledge graph, which has no
+          live per-turn writer yet, so they are currently no-ops outside the benchmark.</strong>
+          The "Run now" button below still works against whatever is in the graph (nothing, in
+          normal operation).
         </p>
         <Field label="Contradictions (Phase C)" desc="Resolve single-valued-predicate contradictions (works_at, lives_in, married_to, …). When multiple live edges share (subject, predicate), keep the newest and close older edges' valid_to. Pure SQL + curated predicate list. Audit-preserving — older facts are time-bounded, not deleted.">
           <Toggle value={bool('memory.consolidation.contradictions_enabled', false)} onChange={(v) => set('memory.consolidation.contradictions_enabled', v)} />

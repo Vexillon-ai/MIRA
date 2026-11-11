@@ -2554,6 +2554,7 @@ async fn run_simple_cli(
                         created_at: chrono::Utc::now(), relevance_score: score,
                         scope: mira::memory::storage::Scope::User,
                         scope_id: None, created_by: None,
+                        source_speaker: "user".into(),
                         supersedes: None, superseded_by: None,
                         strength: 1.0, effective_strength: score,
                         access_count: 0, last_reinforced: 0,

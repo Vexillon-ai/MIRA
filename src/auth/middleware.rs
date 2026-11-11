@@ -12,8 +12,26 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::auth::local::LocalAuthService;
+use crate::auth::local::{LocalAuthService, DEVICE_TOKEN_PREFIX, SCOPE_CHAT, SCOPE_CHAT_CANCEL};
 use crate::auth::models::{Role, User};
+
+// How a request authenticated: a normal JWT session (full scopes), or a device
+// token carrying a specific scope allow-list.
+enum AuthKind {
+    Jwt,
+    Device { scopes: Vec<String> },
+}
+
+impl AuthKind {
+    // A JWT has every scope; a device token only the scopes it was granted.
+    fn has_scope(&self, scope: &str) -> bool {
+        match self {
+            AuthKind::Jwt => true,
+            AuthKind::Device { scopes } => scopes.iter().any(|s| s == scope),
+        }
+    }
+    fn is_device(&self) -> bool { matches!(self, AuthKind::Device { .. }) }
+}
 
 // ── Error response ────────────────────────────────────────────────────────────
 
@@ -46,6 +64,15 @@ where
 }
 
 fn extract_auth_user(parts: &mut Parts) -> Result<AuthUser, Response> {
+    let (user, _kind) = resolve_auth(parts)?;
+    Ok(AuthUser(user))
+}
+
+// Shared resolution for every auth extractor: resolves a Bearer token to its
+// user, by either the device-token path (`mdt_` prefix) or the
+// JWT path. Returns how the request authenticated so scope-gated extractors can
+// enforce device-token scopes.
+fn resolve_auth(parts: &mut Parts) -> Result<(User, AuthKind), Response> {
     let auth_service = parts
         .extensions
         .get::<Arc<LocalAuthService>>()
@@ -59,6 +86,22 @@ fn extract_auth_user(parts: &mut Parts) -> Result<AuthUser, Response> {
         AuthError(StatusCode::UNAUTHORIZED, "Missing or invalid Authorization header")
             .into_response()
     })?;
+
+    // Device-token path. An opaque `mdt_` bearer resolves to
+    // its owner via a hashed lookup — never more than the user has, because it
+    // IS the user. Expiry/active checks live in `verify_device_token`.
+    if token.starts_with(DEVICE_TOKEN_PREFIX) {
+        let da = auth_service
+            .verify_device_token(token)
+            .map_err(|_| AuthError(StatusCode::UNAUTHORIZED, "Invalid or expired device token").into_response())?;
+        // Attribution: a structured log line ties the authenticated request to
+        // the named device (the device token's audit trail).
+        tracing::info!(
+            "device-token auth: user={} device={:?} token_id={}",
+            da.user.id, da.name, da.token_id,
+        );
+        return Ok((da.user, AuthKind::Device { scopes: da.scopes }));
+    }
 
     let claims = auth_service
         .verify_token(token)
@@ -83,7 +126,7 @@ fn extract_auth_user(parts: &mut Parts) -> Result<AuthUser, Response> {
         return Err(AuthError(StatusCode::UNAUTHORIZED, "Session revoked").into_response());
     }
 
-    Ok(AuthUser(user))
+    Ok((user, AuthKind::Jwt))
 }
 
 // ── AdminUser extractor ───────────────────────────────────────────────────────
@@ -107,13 +150,61 @@ where
 }
 
 fn extract_admin_user(parts: &mut Parts) -> Result<AdminUser, Response> {
-    let AuthUser(user) = extract_auth_user(parts)?;
+    let (user, kind) = resolve_auth(parts)?;
 
+    // Device tokens are scoped to chat; they never reach admin endpoints even
+    // for an admin's own device (defence in depth — the minimum scopes are
+    // chat/chat.cancel, and admin actions should require a real session).
+    if kind.is_device() {
+        return Err(AuthError(StatusCode::FORBIDDEN, "Device tokens cannot access admin endpoints").into_response());
+    }
     if user.role != Role::Admin {
         return Err(AuthError(StatusCode::FORBIDDEN, "Admin access required").into_response());
     }
 
     Ok(AdminUser(user))
+}
+
+// ── Scope-gated extractors ──────────────────────────────────
+
+/// Authenticates a request for the chat endpoint. A JWT passes; a device token
+/// must carry the `chat` scope, else 403.
+pub struct ChatAuth(pub User);
+
+impl<S> FromRequestParts<S> for ChatAuth
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+    fn from_request_parts(parts: &mut Parts, _state: &S)
+        -> impl Future<Output = Result<Self, Self::Rejection>> + Send
+    {
+        std::future::ready(extract_scoped(parts, SCOPE_CHAT).map(ChatAuth))
+    }
+}
+
+/// Authenticates a request for the cancel endpoint. A JWT passes; a device
+/// token must carry the `chat.cancel` scope, else 403.
+pub struct ChatCancelAuth(pub User);
+
+impl<S> FromRequestParts<S> for ChatCancelAuth
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+    fn from_request_parts(parts: &mut Parts, _state: &S)
+        -> impl Future<Output = Result<Self, Self::Rejection>> + Send
+    {
+        std::future::ready(extract_scoped(parts, SCOPE_CHAT_CANCEL).map(ChatCancelAuth))
+    }
+}
+
+fn extract_scoped(parts: &mut Parts, scope: &'static str) -> Result<User, Response> {
+    let (user, kind) = resolve_auth(parts)?;
+    if !kind.has_scope(scope) {
+        return Err(AuthError(StatusCode::FORBIDDEN, "Device token lacks the required scope").into_response());
+    }
+    Ok(user)
 }
 
 // ── Helper ────────────────────────────────────────────────────────────────────

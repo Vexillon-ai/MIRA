@@ -1,0 +1,13 @@
+{
+  "server": "mem0",
+  "verbs": {
+    "search": {
+      "tool": "search_memories",
+      "args": { "query": "$query", "user_id": "$user_id", "limit": "$k" },
+      "result": { "list_at": "results", "content_at": "memory", "id_at": "id", "score_at": "score" }
+    },
+    "add":    { "tool": "add_memory",    "args": { "data": "$content", "user_id": "$user_id" } },
+    "forget": { "tool": "delete_memory", "args": { "memory_id": "$id" } }
+  },
+  "capabilities": { "read": true, "write": true, "forget": true }
+}

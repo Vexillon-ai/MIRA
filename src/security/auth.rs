@@ -182,8 +182,18 @@ where
             (Some(svc), Some(tok)) => svc.verify_token(tok).is_ok(),
             _ => false,
         };
+        // A long-lived `mdt_` device token is a valid
+        // credential too. Accept it here so the request reaches the handler; the
+        // per-handler `ChatAuth`/`ChatCancelAuth` extractor then enforces the
+        // token's scopes. Only verified for the `mdt_` prefix, so a normal JWT
+        // path is untouched.
+        let device_ok = !static_ok && !jwt_ok && match (&self.auth_service, &provided) {
+            (Some(svc), Some(tok)) if tok.starts_with(crate::auth::DEVICE_TOKEN_PREFIX) =>
+                svc.verify_device_token(tok).is_ok(),
+            _ => false,
+        };
 
-        if !static_ok && !jwt_ok {
+        if !static_ok && !jwt_ok && !device_ok {
             // These two lines are routine for a JWT-auth deployment:
             //   - "invalid Bearer token" fires every ~15 minutes per
             //     active client when the access token's TTL expires
@@ -328,6 +338,33 @@ mod tests {
         let (_dir, svc, _jwt) = auth_with_one_user().await;
         let layer = AuthLayer::new(None, vec![]).with_auth_service(svc);
         let req = Request::builder().uri("/api/chat").body(Body::empty()).unwrap();
+        assert_eq!(run(layer, req).await, 401);
+    }
+
+    // A valid device token passes the layer (the handler then
+    // enforces its scopes); a bogus `mdt_` token is still rejected.
+    #[tokio::test]
+    async fn device_token_passes_the_layer() {
+        let (_dir, svc, _jwt) = auth_with_one_user().await;
+        let alice = svc.find_by_username("alice").unwrap().unwrap();
+        let (_id, token) = svc.create_device_token(
+            &alice.id, "dev", &["chat".to_string()], None).unwrap();
+        let layer = AuthLayer::new(None, vec![]).with_auth_service(svc);
+        let req = Request::builder()
+            .uri("/api/chat")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty()).unwrap();
+        assert_eq!(run(layer, req).await, 200);
+    }
+
+    #[tokio::test]
+    async fn bogus_device_token_is_rejected() {
+        let (_dir, svc, _jwt) = auth_with_one_user().await;
+        let layer = AuthLayer::new(None, vec![]).with_auth_service(svc);
+        let req = Request::builder()
+            .uri("/api/chat")
+            .header(AUTHORIZATION, "Bearer mdt_deadbeefdeadbeef")
+            .body(Body::empty()).unwrap();
         assert_eq!(run(layer, req).await, 401);
     }
 

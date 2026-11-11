@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useState, useMemo } from 'react'
-import { ChevronRight, ChevronDown, Wrench, BookOpen, Brain, Loader2 } from 'lucide-react'
+import { ChevronRight, ChevronDown, Wrench, BookOpen, Brain, Loader2, Database } from 'lucide-react'
 import type { ThinkingEntry } from '@/api/types'
 import styles from './ThinkingPanel.module.css'
 
@@ -112,6 +112,24 @@ function ThinkingRow({ entry }: { entry: ThinkingEntry }) {
           <BookOpen size={11} className={styles.iconWiki} />
           <span className={styles.label}>wiki context</span>
           <span className={styles.args}>{entry.pages.join(', ')}</span>
+        </div>
+      )
+    }
+    case 'memory_context': {
+      if (entry.served.length === 0 && entry.unavailable.length === 0) return null
+      return (
+        <div className={styles.row}>
+          <Database size={11} className={styles.iconWiki} />
+          <span className={styles.label}>memory</span>
+          <span className={styles.args}>
+            {entry.served.join(', ')}
+            {entry.unavailable.length > 0 && (
+              <span className={styles.memUnavailable}>
+                {entry.served.length > 0 ? ' · ' : ''}
+                {entry.unavailable.map((s) => `${s} unavailable`).join(', ')}
+              </span>
+            )}
+          </span>
         </div>
       )
     }

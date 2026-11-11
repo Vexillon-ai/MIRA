@@ -78,6 +78,9 @@
   flex: 1;
   min-width: 0;
 }
+.memUnavailable {
+  color: var(--danger, #c0392b);
+}
 .output {
   color: var(--text-muted);
   word-break: break-word;

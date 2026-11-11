@@ -107,11 +107,18 @@ impl Tool for MemorySupersedeTool {
         if content.is_empty() {
             return Ok(ToolResult::failure("memory_supersede: `content` is required"));
         }
+        // W3: refuse credential-like content here too (this tool bypasses
+        // remember_fact's choke-point guard).
+        if crate::memory::auto_extract::looks_like_secret(content) {
+            return Ok(ToolResult::failure(
+                "memory_supersede: refusing to store what looks like a credential. Don't save secrets to memory.",
+            ));
+        }
 
         let category_override = args.get("category").and_then(|v| v.as_str())
             .map(parse_category);
 
-        let tags: Vec<String> = args.get("tags")
+        let provided_tags: Vec<String> = args.get("tags")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter()
                 .filter_map(|e| e.as_str().map(|s| s.trim().to_owned()))
@@ -150,6 +157,78 @@ impl Tool for MemorySupersedeTool {
         }
 
         let category = category_override.unwrap_or_else(|| existing.category.clone());
+        // Inherit the old row's tags when the model gives none. When it DOES give
+        // tags, still carry over the conflict `key:…` (and `entity:…`) so the new
+        // row stays correctable — dropping the key would orphan the chain.
+        let tags = if provided_tags.is_empty() {
+            existing.tags.clone()
+        } else {
+            // A `key:`/`entity:` conflict key is derived server-side — never trust
+            // one the model supplied (it could hijack another fact). Drop any from
+            // the model's tags and carry over the OLD row's instead.
+            let mut t: Vec<String> = provided_tags.into_iter()
+                .filter(|x| !x.starts_with("key:") && !x.starts_with("entity:"))
+                .collect();
+            for inherited in existing.tags.iter()
+                .filter(|x| x.starts_with("key:") || x.starts_with("entity:"))
+            {
+                if !t.iter().any(|x| x == inherited) { t.push(inherited.clone()); }
+            }
+            t
+        };
+
+        // SUPERSEDE SAFETY GATE. Overwriting a live row is the one
+        // irreversible-looking memory op, and the model reaches for this tool a
+        // lot, so it must pass the SAME three checks every other write path does —
+        // otherwise KEEP BOTH (add the new fact alongside, overwrite nothing):
+        //   1. CARDINALITY — the old row must carry a SINGLE-valued conflict key.
+        //      A multi-valued key (languages, skills, hobbies) accumulates, so
+        //      "speaks French" must never be overwritten by "speaks Arabic" (the
+        //      data loss, still reachable through this tool). A row with
+        //      no conflict key at all is treated as not-single → keep both.
+        //   2. GROUNDING — the new fact's subject must be grounded in the turn's
+        //      user message (injected as `_user_message`), so a mis-attributed
+        //      third-party fact can't overwrite the user's own.
+        //   3. VALUE — the new content must actually CONTRADICT the old one.
+        use crate::memory::auto_extract as ax;
+        let old_key: Option<String> = existing.tags.iter()
+            .find(|t| t.starts_with("key:"))
+            .map(|t| t.trim_start_matches("key:").to_string());
+        let per_thing     = old_key.as_deref().map(ax::is_per_thing_key).unwrap_or(false);
+        let single_valued = old_key.as_deref().map(ax::key_is_single_valued).unwrap_or(false);
+        let grounded = match (old_key.as_deref(), args.get("_user_message").and_then(|v| v.as_str())) {
+            (Some(k), Some(msg)) => {
+                let subj = k.split('.').next().unwrap_or("user");
+                if subj == "user" { ax::user_fact_grounded(msg, content) }
+                else                { ax::subject_grounded(subj, msg) }
+            }
+            // No key subject to ground against, or a non-chat caller with no turn
+            // message: can't verify grounding, so don't block on it here — the
+            // cardinality + value checks still apply.
+            _ => true,
+        };
+        let contradicts = ax::value_verdict(&existing.content, content, per_thing)
+            == ax::ValueVerdict::Contradicts;
+        if !(single_valued && grounded && contradicts) {
+            // Keep both: store the new fact as its own memory, don't replace.
+            let add_tags: Vec<String> = tags.iter()
+                .filter(|t| !t.starts_with("key:") && !t.starts_with("entity:")).cloned().collect();
+            let new_id = self.memory.store_scoped(
+                content.to_owned(), category.clone(), add_tags, None,
+                existing.scope.clone(), existing.scope_id.as_deref(), &user_id,
+                &[user_id.clone()], None, None, None,
+            ).await?;
+            let note = if !single_valued {
+                "that memory holds a list of values (e.g. languages/skills), so the new fact was added alongside it rather than replacing it — nothing was overwritten"
+            } else if !grounded {
+                "the new statement isn't grounded as being about that memory's subject, so both were kept — nothing was overwritten"
+            } else {
+                "the new statement didn't clearly contradict the old one, so both were kept — nothing was overwritten"
+            };
+            return Ok(ToolResult::success(json!({
+                "old_id": old_id, "new_id": new_id, "superseded": false, "note": note,
+            }).to_string()));
+        }
 
         debug!(
             "memory_supersede: user={} old_id={} scope={:?} new_category={}",
@@ -202,9 +281,87 @@ mod tests {
         assert!(matches!(parse_category("unknown"),      Category::Fact));
     }
 
-    // Integration-style execute() tests would need a wired MemorySystem +
-    // LocalAuthService, which pulls in SQLite fixtures. The HTTP handler at
-    // `src/server/handlers/memory.rs::supersede_memory` already exercises
-    // the same MemorySystem::supersede path end-to-end; this tool is a thin
-    // wrapper that delegates the work.
+    // ── The supersede safety gate, end-to-end through the tool ───────────
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use crate::memory::{MemorySystem, MemorySource, WriteOutcome, ListSort};
+
+    fn wired() -> (Arc<MemorySystem>, Arc<LocalAuthService>) {
+        let dir = tempdir().unwrap();
+        let mpath = dir.path().join("m.db");
+        let apath = dir.path().join("auth.db");
+        std::mem::forget(dir);
+        let mem  = Arc::new(MemorySystem::new(mpath).unwrap());
+        let auth = Arc::new(LocalAuthService::new(&apath, "jwt-test-secret".into(), 7).unwrap());
+        (mem, auth)
+    }
+
+    // Store a keyed fact the way the extractor would, return its id.
+    async fn keyed(mem: &Arc<MemorySystem>, user: &str, subj: &str, attr: &str, card: &str, content: &str, g: &str) -> u64 {
+        match mem.remember_fact(
+            user, content.to_string(), Category::Fact, Some(subj), Some(attr), card,
+            Some(g), &["tool".to_owned()], true, MemorySource::UserExplicit("t".into()), None, None, None,
+        ).await.unwrap() {
+            WriteOutcome::Added(id) => id,
+            WriteOutcome::Updated { new_id, .. } => new_id,
+            o => panic!("unexpected write outcome: {o:?}"),
+        }
+    }
+
+    fn live_contents(mem: &Arc<MemorySystem>, user: &str) -> Vec<String> {
+        let (rows, _) = mem.list_visible_filtered(user, &[], None, None, None, None, None, 100, 0, ListSort::Recent).unwrap();
+        rows.iter().map(|m| m.content.clone()).collect()
+    }
+
+    #[tokio::test]
+    async fn supersede_tool_keeps_both_on_a_multi_valued_key() {
+        // "speaks French" is MULTI (languages accumulate). The model calling this
+        // tool to "replace" it with "speaks Arabic" must KEEP BOTH — the
+        // data loss, still reachable through the tool the model reaches for most.
+        let (mem, auth) = wired();
+        let fr = keyed(&mem, "alice", "user", "language", "multi", "User speaks French", "I speak French").await;
+        let tool = MemorySupersedeTool::new(Arc::clone(&mem), Arc::clone(&auth));
+        let r = tool.execute(json!({
+            "_user_id": "alice", "memory_id": fr, "content": "User speaks Arabic",
+            "_user_message": "actually I speak Arabic too",
+        })).await.unwrap();
+        assert!(r.success, "{:?}", r.error);
+        assert!(r.output.contains("\"superseded\":false"), "must keep both: {}", r.output);
+        let live = live_contents(&mem, "alice");
+        assert!(live.iter().any(|c| c.contains("French")), "French lost: {live:?}");
+        assert!(live.iter().any(|c| c.contains("Arabic")), "Arabic missing: {live:?}");
+    }
+
+    #[tokio::test]
+    async fn supersede_tool_overwrites_single_valued_grounded_contradiction() {
+        let (mem, auth) = wired();
+        let id = keyed(&mem, "alice", "user", "location", "single", "User lives in Perth", "I live in Perth").await;
+        let tool = MemorySupersedeTool::new(Arc::clone(&mem), Arc::clone(&auth));
+        let r = tool.execute(json!({
+            "_user_id": "alice", "memory_id": id, "content": "User lives in Sydney",
+            "_user_message": "I live in Sydney now",
+        })).await.unwrap();
+        assert!(r.success, "{:?}", r.error);
+        assert!(!r.output.contains("\"superseded\":false"), "a grounded single-valued correction should supersede: {}", r.output);
+        let live = live_contents(&mem, "alice");
+        assert!(live.iter().any(|c| c.contains("Sydney")), "Sydney missing: {live:?}");
+        assert!(!live.iter().any(|c| c.contains("Perth")), "Perth should be gone: {live:?}");
+    }
+
+    #[tokio::test]
+    async fn supersede_tool_keeps_both_when_misgrounded() {
+        // The turn is about someone else ("I heard Sara…"): even a single-valued,
+        // contradicting value must not overwrite the user's own fact.
+        let (mem, auth) = wired();
+        let id = keyed(&mem, "alice", "user", "location", "single", "User lives in Sydney", "I live in Sydney").await;
+        let tool = MemorySupersedeTool::new(Arc::clone(&mem), Arc::clone(&auth));
+        let r = tool.execute(json!({
+            "_user_id": "alice", "memory_id": id, "content": "User lives in Doha",
+            "_user_message": "I heard Sara moved to Doha",
+        })).await.unwrap();
+        assert!(r.success, "{:?}", r.error);
+        assert!(r.output.contains("\"superseded\":false"), "mis-grounded overwrite must keep both: {}", r.output);
+        let live = live_contents(&mem, "alice");
+        assert!(live.iter().any(|c| c.contains("Sydney")), "Sydney lost: {live:?}");
+    }
 }

@@ -194,7 +194,18 @@ pub async fn extract_wiki_ops_with_context(
         }
         let confidence = cand.confidence;
         match candidate_to_op(cand) {
-            Ok(op) => ops.push((op, confidence)),
+            Ok(op) => {
+                // W1: personal facts about people live in MEMORY, not the wiki —
+                // a wiki shadow copy isn't reached by memory delete/correct/export,
+                // so "delete" wouldn't make MIRA forget. Drop any op that files a
+                // personal-person page; narrative/project pages are unaffected.
+                if is_personal_person_page(&op.target_path()) {
+                    debug!("wiki extractor: dropping personal-person page op (path='{}') — personal facts belong to memory",
+                           op.target_path().as_str());
+                    continue;
+                }
+                ops.push((op, confidence));
+            }
             Err(e) => debug!("wiki extractor: dropping candidate: {}", e),
         }
         if ops.len() >= max_ops {
@@ -203,6 +214,13 @@ pub async fn extract_wiki_ops_with_context(
     }
     debug!("wiki extractor: emitted {} ops (cap {})", ops.len(), max_ops);
     ops
+}
+
+/// A `pages/people/…` page (a dossier about a specific person). Personal facts
+/// about people are memory's job; the wiki must not shadow-copy them (W1).
+fn is_personal_person_page(path: &WikiPath) -> bool {
+    let p = path.as_str();
+    p.starts_with("pages/people/") || p.starts_with("people/")
 }
 
 // ── Prompt building ──────────────────────────────────────────────────────────
@@ -223,13 +241,17 @@ fn build_system_prompt(existing_pages: &[WikiPath]) -> String {
 Output ONLY a JSON object, no prose, no reasoning, no code fences:
 {{"wiki_ops":[{{"kind":"<append_section|write_page|log_entry>","path":"<wiki path>","section":"<heading>","title":"<page title>","body":"<markdown body>","summary":"<short>","tags":["<tag>"],"confidence":<0.0-1.0>}}]}}
 
-What to extract:
+What to extract (NARRATIVE and PROJECT knowledge only):
 - Multi-turn observations or projects the user is working on
-- Synthesized insights or plans worth referencing later
-- New entities (people, projects, tools) worth a dedicated page
+- Synthesized insights, plans, or how-tos worth referencing later
+- New PROJECTS or TOOLS worth a dedicated page
 
 What NOT to extract:
 - Atomic facts ("user lives in Melbourne") — those go to memory, not the wiki
+- ANY personal facts about PEOPLE (the user, their family, friends, contacts) —
+  where someone lives, their pets, relationships, contact details, preferences.
+  Those are stored in MEMORY, which is where the user corrects and deletes them.
+  NEVER create a `pages/people/...` page or a person dossier.
 - Things the assistant said — only user-facing observations
 - Trivia the user wouldn't want filed
 
@@ -353,6 +375,16 @@ fn candidate_to_op(c: RawCandidate) -> Result<WikiOp, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn personal_person_pages_are_filtered() {
+        // W1: personal facts about people belong to memory, not a wiki dossier.
+        assert!(is_personal_person_page(&WikiPath::from_trusted("pages/people/leila.md".into())));
+        assert!(is_personal_person_page(&WikiPath::from_trusted("people/omar.md".into())));
+        // Narrative / project pages are unaffected.
+        assert!(!is_personal_person_page(&WikiPath::from_trusted("pages/projects/mira.md".into())));
+        assert!(!is_personal_person_page(&WikiPath::from_trusted("pages/notes/trip.md".into())));
+    }
 
     #[test]
     fn parses_well_formed_response() {

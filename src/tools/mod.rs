@@ -10,6 +10,7 @@
 pub mod backup;
 pub mod shell;
 pub mod filesystem;
+pub mod memory_tools;
 pub mod onboarding;
 pub mod recall;
 pub mod datetime;

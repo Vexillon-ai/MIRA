@@ -115,6 +115,56 @@ pub struct TurnContext {
     // search→fetch→write rounds than a chat turn — without this, a long task
     // spends the global cap on searches and never reaches its wiki-write call.
     pub max_tool_rounds_override: Option<usize>,
+    // The caller-supplied turn id. When set, it's used
+    // verbatim as the turn's identity (matching the `X-Mira-Turn-Id` header and
+    // the registry entry the caller registered); when `None`, `process_with_context`
+    // mints one so every turn still opens with a `TurnStarted` event. Callers
+    // that don't track turns (channels, automations) leave it `None`.
+    pub turn_id: Option<String>,
+    // Cooperative cancellation for this turn. When set (the
+    // chat handler supplies the registry's token), `run_turn` races the tool
+    // loop against it; firing it (the cancel route, or an SSE disconnect) stops
+    // the turn at its next checkpoint and emits `Cancelled` in place of `Done`.
+    // `None` (channels, automations, tests) → the turn simply can't be cancelled.
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    // Spoken delivery style for this turn (e.g. `"spoken"`).
+    // When recognised it adds a TTS-friendly formatting instruction to the
+    // system prompt; an unrecognised value is ignored with a `Warning` (never an
+    // error). `None` → today's behaviour.
+    pub spoken_style: Option<String>,
+    // BCP-47 tag the reply should be written in. A plausible
+    // tag is honoured; an implausible one is ignored with a `Warning`.
+    pub reply_language: Option<String>,
+    // Emit per-turn `timing` events for this turn. Always on
+    // for the voice channel; this opts a non-voice turn in for debugging.
+    pub debug_timings: bool,
+    // Run this turn speculatively: stream tokens as usual but
+    // hold all tool execution + history/memory writes at a commit barrier until
+    // the turn is committed (or discarded/restarted). `false` → a normal turn.
+    pub speculative: bool,
+    // Notified by the commit route to release the speculative
+    // commit barrier. `Some` only on a speculative turn.
+    pub commit_notify: Option<std::sync::Arc<tokio::sync::Notify>>,
+    // A changed-message commit leaves the corrected transcript
+    // here and fires `restart_notify`; `run_turn` reads it to restart the turn.
+    pub restart_slot: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    // Notified (separately from the cancel token, which a
+    // restart must NOT fire) to interrupt a speculative turn for a restart.
+    pub restart_notify: Option<std::sync::Arc<tokio::sync::Notify>>,
+    // Per-turn effective context budget (tokens), set from
+    // the turn's provider entry (e.g. the voice router's 11264). Overrides the
+    // instance default for history fitting + the RAG cap. `None` → the default.
+    pub context_tokens_override: Option<usize>,
+}
+
+/// How a `run_turn` attempt ended. A normal turn is always
+/// `Done`; a speculative turn can also be `Restart` (committed with a changed
+/// message → re-run with it) or `Aborted` (discarded / timed out).
+#[derive(Debug)]
+pub enum RunOutcome {
+    Done,
+    Restart(String),
+    Aborted,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -133,6 +183,10 @@ pub struct AgentCore {
     pub config:        Arc<MiraConfig>,
     pub provider:      Arc<dyn ModelProvider>,
     pub memory:        Arc<MemorySystem>,
+    // B2d: the configured memory providers — the read list (fanned by the
+    // recall router) and the harness writers (ingested post-turn). Built from
+    // `memory.providers`; an empty config is built-in read only (today's shape).
+    memory_providers:  Arc<crate::memory::provider::set::ProviderSet>,
     pub tools:         Arc<ToolRegistry>,
     pub sessions:      Arc<SessionStore>,
     // System prompt template. Wrapped in an `RwLock` so admins can hot-
@@ -235,6 +289,23 @@ impl AgentCore {
         tools:    Arc<ToolRegistry>,
         sessions: Arc<SessionStore>,
     ) -> Self {
+        let memory_providers = Arc::new(
+            crate::memory::provider::set::ProviderSet::build(&config, Arc::clone(&memory)),
+        );
+        Self::with_providers(config, provider, memory, tools, sessions, memory_providers)
+    }
+
+    /// Like [`new`](Self::new) but with a pre-built [`ProviderSet`], so the
+    /// gateway can share ONE set between the agent and the `memory_catalog`
+    /// tool (avoiding a second HTTP client to the same memory service).
+    pub fn with_providers(
+        config:   Arc<MiraConfig>,
+        provider: Arc<dyn ModelProvider>,
+        memory:   Arc<MemorySystem>,
+        tools:    Arc<ToolRegistry>,
+        sessions: Arc<SessionStore>,
+        memory_providers: Arc<crate::memory::provider::set::ProviderSet>,
+    ) -> Self {
         let system_prompt = load_system_prompt(&config);
         let tool_mode     = ToolMode::from_str(&config.agent.tool_mode);
         let max_rounds    = config.agent.max_tool_rounds;
@@ -249,6 +320,7 @@ impl AgentCore {
             config,
             provider,
             memory,
+            memory_providers,
             tools,
             sessions,
             system_prompt: std::sync::RwLock::new(system_prompt),
@@ -267,6 +339,215 @@ impl AgentCore {
             classifier_provider: OnceLock::new(),
             history: OnceLock::new(),
             live_config: OnceLock::new(),
+        }
+    }
+
+    /// The asking user's own memory catalog (WHAT IS HELD), from the first
+    /// configured catalog-capable read provider. `None` when no provider
+    /// advertises `catalog` — the caller then reports the surface as unavailable
+    /// rather than an error. Always **owner-scoped**: the identity is the asking
+    /// user's, resolved to the provider's configured `user_id` field via auth,
+    /// so one user can never read another's catalog.
+    pub async fn memory_catalog(
+        &self,
+        user_id:  &str,
+        subject:  Option<String>,
+        prefix:   Option<String>,
+        contains: Option<String>,
+        page:     u32,
+        per_page: u32,
+    ) -> Option<Result<crate::memory::provider::CatalogResult, crate::memory::provider::MemoryError>> {
+        let provider = self.memory_providers.read.iter()
+            .find(|p| p.capabilities().catalog)?;
+        let (username, email) = self.auth.get()
+            .and_then(|a| a.get_user(user_id).ok().flatten())
+            .map(|u| (Some(u.username), u.email))
+            .unwrap_or((None, None));
+        let mut params = crate::memory::provider::CatalogParams::new(user_id);
+        params.username = username;
+        params.email    = email;
+        params.subject  = subject;
+        params.prefix   = prefix;
+        params.contains = contains;
+        params.page     = page;
+        params.per_page = per_page;
+        Some(provider.catalog(&params).await)
+    }
+
+    /// Id of the provider serving the catalog (for the UI header), if any.
+    pub fn memory_catalog_source(&self) -> Option<String> {
+        self.memory_providers.read.iter()
+            .find(|p| p.capabilities().catalog)
+            .map(|p| p.id().to_string())
+    }
+
+    /// Per-source status for the admin Memory settings: which read providers
+    /// loaded, their locality + capabilities, and a live health probe (the HTTP
+    /// provider's hits `/health`). Drives the status pills + "Test connection".
+    pub async fn memory_provider_status(&self) -> Vec<serde_json::Value> {
+        use crate::memory::provider::MemoryHealth;
+        // Probe health in PARALLEL with a per-provider cap (L7) — a slow/dead
+        // remote store must not serialise the whole panel behind the 10s HTTP
+        // timeout, one provider at a time.
+        const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+        let probes = self.memory_providers.read.iter().map(|p| async move {
+            let caps = p.capabilities();
+            let health = match tokio::time::timeout(PROBE_TIMEOUT, p.health()).await {
+                Ok(h)  => h,
+                Err(_) => MemoryHealth::Unavailable { reason: "health probe timed out".into() },
+            };
+            let (health, reason) = match health {
+                MemoryHealth::Ready                  => ("ready", None),
+                MemoryHealth::Warming { detail }     => ("warming", Some(detail)),
+                MemoryHealth::Unavailable { reason } => ("unavailable", Some(reason)),
+            };
+            serde_json::json!({
+                "id":        p.id(),
+                "locality":  format!("{:?}", p.locality()).to_lowercase(),
+                "read":      caps.read,
+                "write":     caps.write,
+                "forget":    caps.forget,
+                "catalog":   caps.catalog,
+                "citations": caps.citations,
+                "health":    health,
+                "reason":    reason,
+            })
+        });
+        let mut out = futures::future::join_all(probes).await;
+        // Append the providers that failed to BUILD (refused non-loopback,
+        // missing key/base_url, TLS error, MCP not wired). These never loaded, so
+        // they're the main reason to open the panel — show them as `error` rows.
+        for f in &self.memory_providers.build_failures {
+            out.push(serde_json::json!({
+                "id":        f.id,
+                "transport": f.transport,
+                "locality":  "n/a",
+                "read":      false,
+                "write":     false,
+                "forget":    false,
+                "catalog":   false,
+                "citations": false,
+                "health":    "error",
+                "reason":    f.reason,
+            }));
+        }
+        out
+    }
+
+    /// Deterministic capture for an explicit "remember this" request. Runs on
+    /// every channel and every capture mode (including Off). Tries the LLM
+    /// extractor with widened gates (via the `memory_extract` alias — never the
+    /// turn's model, A.8); if that resolves nothing, stores the user's sentence
+    /// VERBATIM as `user_explicit` so the request is never silently dropped.
+    fn spawn_explicit_capture(
+        &self,
+        user_id: &str,
+        channel: &str,
+        input: &str,
+        assistant: &str,
+        conv: Option<String>,
+    ) {
+        let memory   = Arc::clone(&self.memory);
+        let provider = crate::agent::named_agent::build_provider_for_llm_alias(
+            &self.config, "memory_extract",
+        ).ok();
+        let uid  = user_id.to_string();
+        let chan = channel.to_string();
+        let umsg = input.to_string();
+        let amsg = assistant.to_string();
+        tokio::spawn(async move {
+            let cats: Vec<String> = crate::memory::auto_extract::ALL_CATEGORIES
+                .iter().map(|s| s.to_string()).collect();
+            // The extractor drives the primary store. The verbatim fallback is a
+            // LAST resort for when it distilled NOTHING (no provider, or zero
+            // candidates) — NOT when it produced candidates that merely deduped
+            // against an existing/just-written row (e.g. the model already
+            // superseded via a tool). Gating on `candidates`, not writes, stops a
+            // duplicate verbatim save (N3).
+            let distilled = if let Some(p) = provider {
+                memory.auto_extract_llm_and_store(
+                    &p, &umsg, &amsg, &uid, &chan, conv.as_deref(), None,
+                    &cats, crate::memory::auto_extract::ConfidenceTier::Low, true,
+                ).await.candidates
+            } else {
+                0
+            };
+            if distilled == 0 {
+                // Verbatim fallback — never drop an explicit request (fresh install
+                // with capture Off, or the extractor found nothing to distil). Strip
+                // the opener so we store the fact ("my dog is Pixel"), not the whole
+                // request, and route through the conflict-aware path so it dedups
+                // against a same-turn `memory_add` write and supersedes a correction
+                // instead of piling up (N3). Refuse credential-like content.
+                let content = crate::memory::auto_extract::strip_remember_opener(&umsg);
+                if content.is_empty() {
+                    // nothing left to store
+                } else if crate::memory::auto_extract::looks_like_secret(&content) {
+                    warn!("explicit capture: refusing verbatim store of credential-like content");
+                } else if let Err(e) = memory.remember_fact(
+                    &uid, content, crate::memory::Category::Fact,
+                    None, None, "", Some(&umsg), &[], true,
+                    crate::memory::MemorySource::UserExplicit("remember".into()),
+                    Some(&chan), conv.as_deref(), None,
+                ).await {
+                    warn!("explicit capture: verbatim store failed: {e}");
+                }
+            }
+        });
+    }
+
+    /// SYNCHRONOUS explicit-remember capture (R6): does the write BEFORE the reply
+    /// is generated and returns a short, truthful summary of what actually changed
+    /// ("saved …", "updated …", "already in memory", "did NOT save — looks like a
+    /// credential", "nothing to save"), which the caller injects into the prompt
+    /// so the model can only confirm a real write. Mirrors `spawn_explicit_capture`
+    /// but awaited and summarised. Non-fatal: any failure returns a neutral note.
+    async fn run_explicit_capture(
+        &self, user_id: &str, channel: &str, input: &str, conv: Option<String>,
+    ) -> String {
+        use crate::memory::WriteOutcome;
+        // A credential is refused by the writer, but the extractor would still
+        // DISTIL a candidate (candidates>0, written=0), which the stats path below
+        // mislabels "already in memory". Catch it up front so the note is truthful.
+        if crate::memory::auto_extract::looks_like_secret(input) {
+            return "did NOT save it — it looks like a credential, which is never stored".into();
+        }
+        let provider = crate::agent::named_agent::build_provider_for_llm_alias(
+            &self.config, "memory_extract",
+        ).ok();
+        let cats: Vec<String> = crate::memory::auto_extract::ALL_CATEGORIES
+            .iter().map(|s| s.to_string()).collect();
+        // The extractor distils + writes (conflict-aware). Explicit → gates widened.
+        let stats = if let Some(p) = &provider {
+            self.memory.auto_extract_llm_and_store(
+                p, input, "", user_id, channel, conv.as_deref(), None,
+                &cats, crate::memory::auto_extract::ConfidenceTier::Low, true,
+            ).await
+        } else {
+            crate::memory::ExtractStats::default()
+        };
+        if stats.written > 0 {
+            return format!("saved {} fact{} to memory", stats.written, if stats.written == 1 { "" } else { "s" });
+        }
+        if stats.candidates > 0 {
+            return "that is already in memory (no change)".into();
+        }
+        // Verbatim fallback — the extractor distilled nothing; store the clause.
+        let content = crate::memory::auto_extract::strip_remember_opener(input);
+        if content.trim().is_empty() {
+            return "nothing specific to save".into();
+        }
+        match self.memory.remember_fact(
+            user_id, content, crate::memory::Category::Fact, None, None, "", Some(input), &[], true,
+            crate::memory::MemorySource::UserExplicit("remember".into()),
+            Some(channel), conv.as_deref(), None,
+        ).await {
+            Ok(WriteOutcome::Added(_))        => "saved it to memory".into(),
+            Ok(WriteOutcome::Updated { .. })  => "updated the memory".into(),
+            Ok(WriteOutcome::Duplicate(_))    => "that is already in memory".into(),
+            Ok(WriteOutcome::Skipped("secret")) =>
+                "did NOT save it — it looks like a credential, which is never stored".into(),
+            _ => "nothing was saved".into(),
         }
     }
 
@@ -693,12 +974,28 @@ impl AgentCore {
                 .entry("_conversation_id".to_string())
                 .or_insert_with(|| serde_json::Value::String(session_id.to_string()));
         }
+        // Memory-tool grounding: the model-callable memory tools
+        // (`memory_add`, `memory_supersede`) must run the SAME subject-grounding
+        // check as the auto-extractor, so a mis-attributed fact ("I heard Sara
+        // moved to Doha") can't overwrite the user's own via a tool call. Give
+        // them the turn's user message to ground against. Overwrites any value
+        // the model tries to pass (it must not forge the grounding text).
+        if !input.is_empty() {
+            context.inject_tool_args.insert(
+                "_user_message".to_string(),
+                serde_json::Value::String(input.to_string()),
+            );
+        }
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(512);
 
-        let session = self
-            .session_for_turn(session_id, user_id, channel, input, &context)
-            .await;
+        // Open every turn with a `TurnStarted` carrying the
+        // stable turn id + resolved channel, before any other event. The web
+        // handler supplies the id it registered + echoed in `X-Mira-Turn-Id`;
+        // other callers get a minted one. Clients that don't know the event
+        // ignore it, so this is backward-compatible on every surface.
+        let turn_id = context.turn_id.clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let core         = Arc::clone(self);
         let input_s      = input.to_string();
@@ -745,13 +1042,41 @@ impl AgentCore {
         }
 
         tokio::spawn(async move {
-            let result = core
-                .run_turn(session, &input_s, &user_id_s, &channel_s, &session_id_s,
-                          &effective_provider, &tx, &context)
-                .await;
+            // First event of the turn — the client reads it (or ignores it) and
+            // learns the id it can cancel/commit. Emitted here, before `run_turn`,
+            // so it always precedes the first token.
+            let _ = tx.send(StreamEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                channel: channel_s.clone(),
+            }).await;
 
-            if let Err(e) = result {
-                let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+            // A speculative turn committed with a CHANGED
+            // message restarts under the same id with the corrected transcript.
+            // The restart runs normally (no longer speculative). A fresh session
+            // is built per attempt so the new input seeds it correctly.
+            let mut input = input_s;
+            let mut ctx   = context;
+            loop {
+                let session = core
+                    .session_for_turn(&session_id_s, &user_id_s, &channel_s, &input, &ctx)
+                    .await;
+                match core
+                    .run_turn(session, &input, &user_id_s, &channel_s, &session_id_s,
+                              &effective_provider, &tx, &ctx)
+                    .await
+                {
+                    Ok(RunOutcome::Done) | Ok(RunOutcome::Aborted) => break,
+                    Ok(RunOutcome::Restart(new)) => {
+                        let _ = tx.send(StreamEvent::Restarted { turn_id: turn_id.clone() }).await;
+                        ctx.speculative = false;
+                        input = new;
+                        continue;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                        break;
+                    }
+                }
             }
         });
 
@@ -833,6 +1158,27 @@ impl AgentCore {
         Some((summary.render(), summary.covered_messages))
     }
 
+    // Resolve an aborted turn (the cancel token fired). A
+    // changed-message commit left a transcript in `restart_slot` → restart with
+    // it (no `Cancelled`). Otherwise (barge-in / discard / timeout) emit the
+    // terminal `Cancelled` and report `Aborted`.
+    async fn resolve_cancel(&self, context: &TurnContext, tx: &mpsc::Sender<StreamEvent>) -> RunOutcome {
+        // A restart fires its own signal (never the cancel token), but check the
+        // slot anyway in case both fired — restart wins.
+        if let Some(new) = Self::take_restart_message(context) {
+            return RunOutcome::Restart(new);
+        }
+        let tid = context.turn_id.clone().unwrap_or_default();
+        let _ = tx.send(StreamEvent::Cancelled { turn_id: tid }).await;
+        RunOutcome::Aborted
+    }
+
+    // The corrected transcript a changed-message commit left
+    // for a restart, if any (consumes it).
+    fn take_restart_message(context: &TurnContext) -> Option<String> {
+        context.restart_slot.as_ref().and_then(|s| s.lock().unwrap().take())
+    }
+
     // Run the full reasoning turn synchronously (called from within the
     // spawned task). Sends all events to `tx`.
     async fn run_turn(
@@ -845,7 +1191,32 @@ impl AgentCore {
         provider:   &Arc<dyn ModelProvider>,
         tx:         &mpsc::Sender<StreamEvent>,
         context:    &TurnContext,
-    ) -> Result<(), MiraError> {
+    ) -> Result<RunOutcome, MiraError> {
+
+        // The commit barrier for a speculative turn. Built
+        // from the commit notifier; the tool loop awaits it before executing a
+        // tool, and `run_turn` awaits it before finalising a pure-answer turn.
+        // `None` for a normal turn (no barrier). Shared `released` state means a
+        // turn that committed at its first tool doesn't wait again later.
+        let commit_gate: Option<crate::agent::turn_registry::CommitGate> =
+            if context.speculative {
+                context.commit_notify.clone().map(crate::agent::turn_registry::CommitGate::new)
+            } else {
+                None
+            };
+
+        // The voice channel gets a byte-stable prompt so the
+        // engine's planner keeps its prompt cache warm: force the prompt-cache
+        // layout (wiki/memory fold into the user message, stable system prefix)
+        // and the cacheable core+find_tools tool set, per-channel, without
+        // changing the global defaults for text chat.
+        let voice = channel.eq_ignore_ascii_case("voice");
+
+        // Per-turn latency stopwatch. `timings_on` for the
+        // voice channel or an explicit `debug_timings`. Capturing a few Instants
+        // is negligible, so we time unconditionally and only build/emit when on.
+        let t_turn_start = std::time::Instant::now();
+        let timings_on = voice || context.debug_timings;
 
         // ── 1. Memory + identity pre-hook ─────────────────────────────────────
         //
@@ -864,8 +1235,69 @@ impl AgentCore {
             String::new()
         } else {
             let groups = self.resolve_groups(user_id);
-            memory_hook::pre_hook(&self.memory, user_id, &groups, input, self.config.memory.context_top_k).await
+            // B2d: recall across the CONFIGURED read providers (builtin by
+            // default; builtin + files/external when memory.providers is set).
+            let router = crate::memory::router::MemoryRouter::new(
+                self.memory_providers.read.clone(),
+            );
+            // On the voice channel, don't announce a down
+            // memory store in the prompt unless the user actually asked about
+            // memory; a voice reply should just answer. Other channels always
+            // get the explicit "unavailable" notice (never read "down" as "absent").
+            let include_unavailable = !voice || memory_hook::mentions_memory(input);
+            // The account's username + email, so a provider configured with
+            // `user_id_field = username|email` can be keyed on that (e.g. an
+            // external service keyed on the username, not MIRA's UUID).
+            let (acct_username, acct_email) = self.auth.get()
+                .and_then(|a| a.get_user(user_id).ok().flatten())
+                .map(|u| (Some(u.username), u.email))
+                .unwrap_or((None, None));
+            let mem = memory_hook::pre_hook_via_router(
+                &router, user_id, &groups, input, self.config.memory.context_top_k,
+                include_unavailable, acct_username.as_deref(), acct_email.as_deref(),
+            ).await;
+            // B2d: one-shot event so the UI can render per-source memory pills +
+            // a "store unavailable" badge, before any tokens arrive.
+            if !mem.served.is_empty() || !mem.unavailable.is_empty() {
+                let _ = tx.send(StreamEvent::MemoryContext {
+                    served: mem.served.clone(),
+                    unavailable: mem.unavailable.clone(),
+                }).await;
+            }
+            mem.block
         };
+        // R6: an explicit "remember this" is captured SYNCHRONOUSLY here — before
+        // the reply — so the model is told exactly what changed and can only
+        // confirm a real write (ending the false "I've updated my memory" claims).
+        // The post-turn hook then skips its own explicit capture.
+        let mut memory_context = memory_context;
+        let mut explicit_handled = false;
+        if !context.skip_memory_hooks
+            && !crate::memory::auto_extract::is_no_store_request(input)
+            && crate::memory::auto_extract::is_explicit_remember(input)
+        {
+            // Cap the synchronous capture so a slow/hung extractor can't
+            // freeze the reply (the extractor's own timeout is 180s, sized for
+            // background use). On timeout, fall back to the post-turn background
+            // capture and tell the model the save is happening after the reply.
+            const SYNC_CAPTURE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+            let summary = match tokio::time::timeout(
+                SYNC_CAPTURE_BUDGET,
+                self.run_explicit_capture(user_id, channel, input, context.conversation_id.clone()),
+            ).await {
+                Ok(s) => { explicit_handled = true; s }
+                Err(_) => {
+                    // Not handled synchronously → the post-turn hook will capture it.
+                    "saving it right after this reply".to_string()
+                }
+            };
+            memory_context.push_str(&format!(
+                "\n\n[Memory update THIS turn: {summary}. In your reply, say ONLY this about \
+                 memory — e.g. confirm you've noted it if it was saved/updated, or that you \
+                 did not store it if it was refused. Do not claim any other memory change.]\n"
+            ));
+        }
+        let t_after_memory = std::time::Instant::now();
         // Wiki context — runs after the memory hook so narrative pages anchor
         // the conversation *before* atomic facts are injected. Failures here
         // are always non-fatal; a missing or empty wiki yields an empty
@@ -884,6 +1316,7 @@ impl AgentCore {
                 None => wiki_hook::WikiContextResult::default(),
             }
         };
+        let t_after_wiki = std::time::Instant::now();
         // Slice H — emit a one-shot event so the chat UI can render
         // pills for the pages that fed this turn, before any tokens
         // arrive.
@@ -973,16 +1406,32 @@ impl AgentCore {
         // system prefix stays byte-stable turn to turn (cacheable by cloud
         // providers + local KV cache). It's folded into the current user
         // message instead (below).
-        let cache_prefix = self.config.agent.prompt_cache_enabled;
+        // Voice forces the cacheable prefix on, regardless of the
+        // global default, so a voice conversation's prompt stays byte-stable.
+        let cache_prefix = self.config.agent.prompt_cache_enabled || voice;
+        // The effective context window for this turn: a
+        // per-turn provider budget (e.g. the voice router's 11264) overrides the
+        // instance default, so a turn routed to a provider reached by IP (not
+        // treated as "local") still budgets history against a sane window.
+        let base_ctx = context.context_tokens_override
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| self.effective_context_tokens());
         // b#4: cap the injected RAG (memory + wiki) to a fraction of the context
         // window, so retrieval can't dominate the prompt (top_k memories + topic
         // expansion + wiki can be large). Curated wiki keeps priority over
         // auto-extracted memory when trimming. 0 window (legacy) → no cap.
         let (wiki_context, memory_context) =
-            cap_rag_context(wiki_context, memory_context, self.effective_context_tokens());
+            cap_rag_context(wiki_context, memory_context, base_ctx);
         let volatile_context = format!("{wiki_context}{memory_context}");
         let sys_wiki:   &str = if cache_prefix { "" } else { wiki_context.as_str() };
         let sys_memory: &str = if cache_prefix { "" } else { memory_context.as_str() };
+        // Non-negotiable memory-truthfulness rule: appended by the harness on
+        // every normal user turn, independent of persona source, so a wiki-persona
+        // instance still gets it. Skipped only for internal override turns
+        // (onboarding/guardian) which don't drive the user's memory tools.
+        let mem_rule: &str = if context.system_prompt_override.is_none() {
+            crate::system_prompt::MEMORY_TRUTHFULNESS_ADDENDUM
+        } else { "" };
         let effective_system = if profile_block.is_empty()
             && sys_wiki.is_empty()
             && sys_memory.is_empty()
@@ -990,13 +1439,14 @@ impl AgentCore {
             && tone_addendum.is_empty()
             && easter_egg_addendum.is_empty()
             && safety_addendum.is_empty()
+            && mem_rule.is_empty()
         {
             base_prompt.to_string()
         } else {
             format!(
-                "{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}",
                 base_prompt, profile_block, sys_wiki, sys_memory,
-                companion_addendum, tone_addendum, easter_egg_addendum, safety_addendum,
+                companion_addendum, tone_addendum, easter_egg_addendum, safety_addendum, mem_rule,
             )
         };
 
@@ -1044,6 +1494,27 @@ impl AgentCore {
             effective_system
         } else {
             format!("{effective_system}{identity_hint}")
+        };
+
+        // Spoken-style / reply-language steer. The spoken STYLE
+        // is conversation-constant, so it's appended to the SYSTEM prompt
+        // UNCONDITIONALLY (like the safety floor — the web/voice path always sets
+        // `system_prompt_override` and skips the override-gated hints above),
+        // keeping the byte-stable prefix. The reply LANGUAGE can change
+        // within a conversation, so it rides the USER message after the history
+        // instead — `voice_language` is folded in below.
+        // Unknown values surface as `Warning`s, never errors.
+        let (voice_style, voice_language, voice_warnings) = build_voice_addendum(
+            context.spoken_style.as_deref(),
+            context.reply_language.as_deref(),
+        );
+        for w in voice_warnings {
+            let _ = tx.send(StreamEvent::Warning(w)).await;
+        }
+        let effective_system = if voice_style.is_empty() {
+            effective_system
+        } else {
+            format!("{effective_system}{voice_style}")
         };
 
         // Skill self-authoring: when enabled, tell MIRA it can save a
@@ -1105,7 +1576,7 @@ impl AgentCore {
         // model can't recall it. This keeps the prompt in the reliable-recall zone
         // AND turns compaction on for the overflow. Cloud providers left unset keep
         // the legacy fixed-turn window. See effective-vs-advertised-context.md.
-        let mut effective_ctx = self.effective_context_tokens();
+        let mut effective_ctx = base_ctx;
         // Restricted Mode per-turn caps (Slice 2). When a profile is active, shrink
         // the context window and the response-token budget to the configured caps
         // (each no-ops at 0). `restricted_response_cap` is also applied to the
@@ -1131,12 +1602,24 @@ impl AgentCore {
         // find_tools ships the full set. Must mirror the adaptive-selection gate
         // below, or the reserve mis-prices the tools and the est/budget drift
         // (the full set over-reserves; the narrowed set under-reserves).
-        let adaptive_narrows = acfg.tool_selection.mode == "adaptive"
+        // The effective tool-selection config for this turn.
+        // Voice forces adaptive + find_tools so it ships the stable, cacheable
+        // core set. Computed once (from live config) and used for BOTH the
+        // reserve estimate here and the selection below, so they can't drift.
+        let ts_cfg = {
+            let mut t = self.tool_selection_config().await;
+            if voice {
+                t.mode = "adaptive".to_string();
+                t.expose_find_tools = true;
+            }
+            t
+        };
+        let adaptive_narrows = ts_cfg.mode == "adaptive"
             && !context.tools_flow_restricted
-            && (!cache_prefix || acfg.tool_selection.expose_find_tools);
+            && (!cache_prefix || ts_cfg.expose_find_tools);
         let tool_reserve = if effective_ctx > 0 && self.tool_mode != ToolMode::Disabled {
             crate::agent::tool_loop::estimate_tool_reserve_tokens(
-                &self.tools, &acfg.tool_selection, context.allowed_tool_names.as_deref(), adaptive_narrows)
+                &self.tools, &ts_cfg, context.allowed_tool_names.as_deref(), adaptive_narrows)
         } else {
             0
         };
@@ -1246,6 +1729,12 @@ impl AgentCore {
                 if !p.is_empty() { p.push_str("\n\n"); }
                 p.push_str(&folded_context);
             }
+            // The reply-language line rides the user
+            // message (it can change per turn), keeping the system prefix stable.
+            if !voice_language.is_empty() {
+                if !p.is_empty() { p.push_str("\n\n"); }
+                p.push_str(voice_language.trim());
+            }
             p
         };
         let mut user_msg = if !user_prefix.is_empty() {
@@ -1314,11 +1803,13 @@ impl AgentCore {
         // tools when nothing restricts them). Flow-restricted turns (the
         // onboarding flow pins a tiny toolset) are left untouched. `find_tools`
         // may later pull more tools, but only from this same pool.
-        let ts_cfg = self.tool_selection_config().await;
+        let t_before_tool_select = std::time::Instant::now();
+        // `ts_cfg` was resolved once above (with the voice override) and is used
+        // here for the actual selection, so reserve + selection can't diverge.
         let pool: Vec<String> = context.allowed_tool_names.clone()
             .unwrap_or_else(|| self.tools.list_tools())
             .into_iter()
-            // S2 (skill self-authoring): never OFFER another user's private
+            // Skill self-authoring: never OFFER another user's private
             // (user-scoped) skill. `skill_owner()` is None for global tools/
             // skills (keep), Some(caller) for the caller's own (keep), Some(other)
             // for a different user's private skill (drop). The SkillTool execution
@@ -1358,6 +1849,7 @@ impl AgentCore {
             } else {
                 None
             };
+        let t_after_tool_select = std::time::Instant::now();
         // The adaptive subset when it ran, else the security allow-list as-is.
         let allowed_for_turn: Option<&[String]> = adaptive_allowed
             .as_deref()
@@ -1411,14 +1903,78 @@ impl AgentCore {
             .unwrap_or_else(|| crate::providers::ProviderRequestContext {
                 session_id: Some(session_id.to_string()),
             });
-        let (response_text, usage) = tool_loop::run_tool_loop_with_provider_context(
+        // Race the tool loop against the turn's cancellation
+        // token. The loop is the long pole (tool rounds + streamed answer); a
+        // barge-in should stop it fast. Dropping the loop future aborts whatever
+        // provider await it was in (reqwest cancels on drop), so token streaming
+        // stops immediately. Any tokens already streamed stand — the chat handler
+        // accumulates them and persists the truncated/spoken turn. A cancel that
+        // fired during the (fast) pre-hooks is honoured here too: `cancelled()`
+        // is already ready, so `select!` takes it at once. Known limitation: a
+        // tool mid-execution when cancel fires is dropped mid-flight; the
+        // controlled commit barrier is for speculative turns.
+        let t_before_loop = std::time::Instant::now();
+        // Count tool-loop rounds for the final timing.
+        let round_counter = std::sync::atomic::AtomicUsize::new(0);
+
+        // When timings are on, route the loop's events through
+        // a proxy channel so we can slip the `first_token` timing snapshot in
+        // immediately before the first streamed Token. The pre-token phase
+        // breakdown is known now; time-to-first-token is filled when that token
+        // appears. When off, the loop writes straight to `tx` (no overhead).
+        let (loop_tx, timing_forwarder) = if timings_on {
+            let (ptx, mut prx) = mpsc::channel::<StreamEvent>(512);
+            let real_tx  = tx.clone();
+            let mem_ms   = (t_after_memory - t_turn_start).as_millis() as u64;
+            let wiki_ms  = (t_after_wiki - t_after_memory).as_millis() as u64;
+            let sel_ms   = (t_after_tool_select - t_before_tool_select).as_millis() as u64;
+            // Prompt build = everything between wiki and the loop, minus selection.
+            let build_ms = ((t_before_loop - t_after_wiki).as_millis() as u64).saturating_sub(sel_ms);
+            let start    = t_turn_start;
+            let req      = t_before_loop;
+            let h = tokio::spawn(async move {
+                let mut first = true;
+                while let Some(ev) = prx.recv().await {
+                    if first {
+                        if let StreamEvent::Token(_) = &ev {
+                            first = false;
+                            let now = std::time::Instant::now();
+                            let _ = real_tx.send(StreamEvent::Timing(crate::agent::stream::TurnTimings {
+                                phase: "first_token",
+                                memory_recall_ms: Some(mem_ms),
+                                wiki_ms: Some(wiki_ms),
+                                tool_selection_ms: Some(sel_ms),
+                                prompt_build_ms: Some(build_ms),
+                                llm_request_to_first_token_ms: Some((now - req).as_millis() as u64),
+                                total_to_first_token_ms: Some((now - start).as_millis() as u64),
+                                ..Default::default()
+                            })).await;
+                        }
+                    }
+                    if real_tx.send(ev).await.is_err() { break; }
+                }
+            });
+            (ptx, Some(h))
+        } else {
+            (tx.clone(), None)
+        };
+
+        // The voice channel caps tool rounds low
+        // (a spoken reply can't wait for many rounds); other channels keep the
+        // global cap. An explicit per-turn override still wins on either path.
+        let max_rounds = match context.max_tool_rounds_override {
+            Some(n) => n,
+            None if voice => self.config.voice.max_tool_rounds,
+            None => self.max_tool_rounds,
+        };
+        let loop_fut = tool_loop::run_tool_loop_with_provider_context(
             provider,
             &self.tools,
             &mut messages,
             &options,
             &self.tool_mode,
-            context.max_tool_rounds_override.unwrap_or(self.max_tool_rounds),
-            tx,
+            max_rounds,
+            &loop_tx,
             allowed_for_turn,
             &context.inject_tool_args,
             event_ctx,
@@ -1426,7 +1982,65 @@ impl AgentCore {
             expand_pool,
             tool_result_cap_bytes,
             &provider_request_context,
-        ).await?;
+            Some(&round_counter),
+            commit_gate.as_ref(),
+            voice,
+        );
+        // A future that resolves when a restart is signalled (speculative turns
+        // only); never resolves otherwise, so it's inert for a normal turn.
+        let restart_signal = || async {
+            match &context.restart_notify {
+                Some(n) => n.notified().await,
+                None    => std::future::pending::<()>().await,
+            }
+        };
+        let (response_text, usage) = match &context.cancel_token {
+            Some(cancel) => tokio::select! {
+                biased;
+                _ = restart_signal() => {
+                    // Changed-message commit → restart with the new transcript.
+                    return Ok(RunOutcome::Restart(
+                        Self::take_restart_message(context).unwrap_or_default()));
+                }
+                _ = cancel.cancelled() => {
+                    // Barge-in / discard / timeout → emit `Cancelled` and stop;
+                    // the handler owns any truncated/spoken persistence. Dropping
+                    // `loop_tx` ends the timing forwarder.
+                    return Ok(self.resolve_cancel(context, tx).await);
+                }
+                r = loop_fut => r?,
+            },
+            None => loop_fut.await?,
+        };
+
+        // Pure-answer speculative turn: the loop streamed an
+        // answer with no tool (so the in-loop gate never fired). Hold the final
+        // Done + persistence until the turn is committed (or aborted).
+        if let (Some(gate), Some(cancel)) = (&commit_gate, &context.cancel_token) {
+            if !gate.is_released() {
+                tokio::select! {
+                    biased;
+                    _ = restart_signal() => {
+                        drop(loop_tx);
+                        if let Some(h) = timing_forwarder { let _ = h.await; }
+                        return Ok(RunOutcome::Restart(
+                            Self::take_restart_message(context).unwrap_or_default()));
+                    }
+                    _ = cancel.cancelled() => {
+                        drop(loop_tx);
+                        if let Some(h) = timing_forwarder { let _ = h.await; }
+                        return Ok(self.resolve_cancel(context, tx).await);
+                    }
+                    _ = gate.wait() => {}
+                }
+            }
+        }
+
+        // Close the proxy so the forwarder drains the last events and ends,
+        // keeping order: every loop event is flushed before the final timing
+        // + Done below. A no-op when timings were off (loop_tx is a tx clone).
+        drop(loop_tx);
+        if let Some(h) = timing_forwarder { let _ = h.await; }
 
         // ── 4. Emit Done ──────────────────────────────────────────────────────
         // Per-turn summary at INFO so a single grep-able line shows the shape of
@@ -1448,6 +2062,28 @@ impl AgentCore {
         // ceiling reflects real spend (prompt + completion).
         if let Some(rc) = restricted_caps.as_ref() {
             rc.record_tokens(usage.total_tokens as u64);
+        }
+        // Final timing snapshot at done (total, rounds,
+        // tokens out) plus the provider's prompt + cached token counts, so the
+        // engine can confirm its prompt cache is being hit.
+        // Also logged at debug.
+        if timings_on {
+            let total_ms = (std::time::Instant::now() - t_turn_start).as_millis() as u64;
+            let tool_rounds = round_counter.load(std::sync::atomic::Ordering::Relaxed) as u32;
+            debug!(
+                "turn timings: total_ms={total_ms} tool_rounds={tool_rounds} \
+                 tokens_out={} prompt_tokens={} cached_tokens={}",
+                usage.completion_tokens, usage.prompt_tokens, usage.cache_read_tokens,
+            );
+            let _ = tx.send(StreamEvent::Timing(crate::agent::stream::TurnTimings {
+                phase: "final",
+                total_ms: Some(total_ms),
+                tool_rounds: Some(tool_rounds),
+                llm_tokens_out: Some(usage.completion_tokens as u32),
+                prompt_tokens: Some(usage.prompt_tokens as u32),
+                cached_tokens: Some(usage.cache_read_tokens as u32),
+                ..Default::default()
+            })).await;
         }
         let _ = tx.send(StreamEvent::Done { usage }).await;
 
@@ -1484,6 +2120,11 @@ impl AgentCore {
         // mined into long-term memory. (Web's own post-stream extractor honours
         // the same signal in the chat handler.)
         let no_store = crate::memory::auto_extract::is_no_store_request(input);
+        // An explicit "remember this" is stored deterministically (gates bypassed,
+        // recorded as user_explicit). It runs even on the web channel — which
+        // otherwise defers LLM extraction to the chat handler — so the chat
+        // handler skips its own extractor when this is set (no double-store).
+        let explicit = crate::memory::auto_extract::is_explicit_remember(input);
         if no_store {
             info!("consent: user asked not to record this turn — skipping memory + wiki extraction");
             // Make the "the skip is audit-logged" guarantee real: an immutable,
@@ -1506,27 +2147,52 @@ impl AgentCore {
             use crate::config::ExtractorKind;
             let ax     = &self.config.memory.auto_extract;
             let is_web = channel.eq_ignore_ascii_case("web");
+            if explicit {
+                // Already handled SYNCHRONOUSLY before the reply (R6) — the
+                // outcome was injected into the prompt. Skip the post-turn
+                // capture so we don't write twice. (Guard in case the pre-reply
+                // path was somehow bypassed.)
+                if !explicit_handled {
+                    self.spawn_explicit_capture(
+                        user_id, channel, input, &response_text, context.conversation_id.clone(),
+                    );
+                }
+            } else {
             match ax.effective_extractor(channel) {
                 ExtractorKind::Off => {}
-                ExtractorKind::Llm if is_web => {} // web handler owns LLM extraction
+                // Web's NORMAL LLM extraction is owned by the chat handler.
+                ExtractorKind::Llm if is_web => {}
                 ExtractorKind::Llm => {
-                    let memory   = Arc::clone(&self.memory);
-                    let provider = Arc::clone(provider);
-                    let cats     = ax.allowed_categories.clone();
-                    let min_conf = crate::memory::auto_extract::ConfidenceTier::parse(
-                        &ax.min_confidence,
-                    );
-                    let uid  = user_id.to_string();
-                    let chan = channel.to_string();
-                    let conv = context.conversation_id.clone();
-                    let umsg = input.to_string();
-                    let amsg = response_text.clone();
-                    tokio::spawn(async move {
-                        memory.auto_extract_llm_and_store(
-                            &provider, &umsg, &amsg, &uid, &chan,
-                            conv.as_deref(), None, &cats, min_conf,
-                        ).await;
-                    });
+                    // A.8: resolve the `memory_extract` llm-alias (fallback:
+                    // primary provider), NEVER the turn's own provider — so a
+                    // turn routed to a grounded/remote model can't pull
+                    // conversation content into the extractor. Skip (don't abort
+                    // the turn) if resolution fails.
+                    match crate::agent::named_agent::build_provider_for_llm_alias(
+                        &self.config, "memory_extract",
+                    ) {
+                        Ok(provider) => {
+                            let memory   = Arc::clone(&self.memory);
+                            let cats     = ax.allowed_categories.clone();
+                            let min_conf = crate::memory::auto_extract::ConfidenceTier::parse(
+                                &ax.min_confidence,
+                            );
+                            let uid  = user_id.to_string();
+                            let chan = channel.to_string();
+                            let conv = context.conversation_id.clone();
+                            let umsg = input.to_string();
+                            let amsg = response_text.clone();
+                            tokio::spawn(async move {
+                                memory.auto_extract_llm_and_store(
+                                    &provider, &umsg, &amsg, &uid, &chan,
+                                    conv.as_deref(), None, &cats, min_conf, false,
+                                ).await;
+                            });
+                        }
+                        Err(e) => warn!(
+                            "memory extractor: could not resolve memory_extract provider ({e}); skipping"
+                        ),
+                    }
                 }
                 ExtractorKind::Heuristic => {
                     memory_hook::post_hook(
@@ -1535,7 +2201,48 @@ impl AgentCore {
                         channel.to_string(),
                         input.to_string(),
                         response_text.clone(),
+                        ax.allowed_categories.clone(),
+                        false, // explicit handled above
                     );
+                }
+            }
+            }
+
+            // B2d: harness-mode ingest — hand the completed turn to every
+            // configured non-builtin write provider (files, future external).
+            // Builtin is NOT here (its write is the LLM extraction above), so
+            // this never double-extracts. Fire-and-forget; a provider failure
+            // never affects the turn. Shares the consent (`no_store`) + skip gate.
+            // Capture mode gate: when auto-capture is OFF, harness ingest must not
+            // ship raw turns to external stores either — the UI promises "records
+            // nothing until you opt in". (A matching `mode` is set per channel.)
+            let capture_on = ax.effective_extractor(channel) != ExtractorKind::Off;
+            // R2: never ship a credential-bearing turn to a Files store or a
+            // (possibly remote) HTTP memory service. The built-in store's guard
+            // is `remember_fact`; this is the matching guard for harness ingest.
+            let secret_turn = crate::memory::auto_extract::looks_like_secret(input)
+                || crate::memory::auto_extract::looks_like_secret(&response_text);
+            if capture_on && secret_turn {
+                info!("harness ingest: skipping a turn that looks to contain a credential (not sent to external stores)");
+            }
+            if capture_on && !secret_turn && !self.memory_providers.harness_writers.is_empty() {
+                let turn = crate::memory::provider::TurnRecord {
+                    user_id: user_id.to_string(),
+                    agent_id: None,
+                    thread_id: context.conversation_id.clone(),
+                    channel: channel.to_string(),
+                    user_msg: input.to_string(),
+                    assistant_msg: response_text.clone(),
+                    conversation_id: context.conversation_id.clone(),
+                };
+                for w in &self.memory_providers.harness_writers {
+                    let w = Arc::clone(w);
+                    let turn = turn.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = w.ingest(&turn).await {
+                            warn!("memory provider '{}' ingest failed (non-fatal): {}", w.id(), e);
+                        }
+                    });
                 }
             }
         }
@@ -1612,9 +2319,18 @@ impl AgentCore {
         {
             if let Some(registry) = self.wiki.get() {
                 let turn_id = uuid::Uuid::now_v7().to_string();
+                // A.8: wiki extraction uses the `wiki_extract` llm-alias
+                // (fallback: primary provider), not the turn's provider; fall
+                // back to the turn provider only if the alias can't resolve.
+                let wiki_provider = crate::agent::named_agent::build_provider_for_llm_alias(
+                    &self.config, "wiki_extract",
+                ).unwrap_or_else(|e| {
+                    warn!("wiki extractor: wiki_extract alias resolve failed ({e}); using turn provider");
+                    Arc::clone(provider)
+                });
                 wiki_hook::post_hook_with_context(
                     Arc::clone(registry),
-                    Arc::clone(provider),
+                    wiki_provider,
                     user_id.to_string(),
                     session_id.to_string(),
                     turn_id,
@@ -1626,7 +2342,7 @@ impl AgentCore {
             }
         }
 
-        Ok(())
+        Ok(RunOutcome::Done)
     }
 
     // ── Utilities ────────────────────────────────────────────────────────────
@@ -1799,6 +2515,76 @@ fn runtime_identity_hint(config: &MiraConfig) -> String {
     )
 }
 
+// A loose BCP-47 sanity check (not a full validator): a
+// primary subtag of 2–3 ASCII letters, then optional alphanumeric subtags of
+// 1–8 chars. Good enough to reject obvious garbage ("klingon", "en_US") while
+// accepting real tags ("fi", "en-GB", "zh-Hant", "es-419").
+fn looks_like_bcp47(tag: &str) -> bool {
+    let mut parts = tag.split('-');
+    let Some(primary) = parts.next() else { return false };
+    if !(2..=3).contains(&primary.len()) || !primary.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    parts.all(|p| (1..=8).contains(&p.len()) && p.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+// Build the spoken-style / reply-language system addendum for
+// a turn. Returns the text to append (byte-stable across a conversation, so it
+// stays in the cacheable prefix) plus any warnings for unrecognised values
+// (surfaced as `Warning` events, never errors — per spec, unknown values are
+// ignored). An empty return means "no voice steer" (today's behaviour).
+/// Build the voice steer. Returns `(system_style, user_language, warnings)`:
+/// the spoken-STYLE block is conversation-constant → it goes in the byte-stable
+/// SYSTEM prefix; the reply-LANGUAGE line can change within a conversation (a
+/// bilingual user switches), so it rides the USER message AFTER the history to
+/// keep the system prefix identical across languages. Unknown values
+/// warn, never error.
+fn build_voice_addendum(
+    spoken_style:   Option<&str>,
+    reply_language: Option<&str>,
+) -> (String, String, Vec<String>) {
+    let mut style = String::new();
+    let mut language = String::new();
+    let mut warnings = Vec::new();
+
+    if let Some(lang) = reply_language.map(str::trim).filter(|s| !s.is_empty()) {
+        if looks_like_bcp47(lang) {
+            language.push_str(&format!(
+                "\n\n[Reply language: write your reply in the language identified by the \
+                 BCP-47 tag `{lang}`, regardless of the language the user wrote in.]"
+            ));
+        } else {
+            warnings.push(format!(
+                "ignored reply_language {lang:?}: not a recognisable BCP-47 language tag"
+            ));
+        }
+    }
+
+    if let Some(s) = spoken_style.map(str::trim).filter(|s| !s.is_empty()) {
+        match s.to_ascii_lowercase().as_str() {
+            "spoken" => style.push_str(
+                "\n\n## Spoken reply style\n\
+                 Your reply will be read aloud by a voice engine. Speak in plain spoken \
+                 sentences. Do not use markdown, lists, tables, headings, URLs, code \
+                 blocks or emoji. Keep replies short — two or three sentences — unless \
+                 the user asks for more. If a request is ambiguous, ask one brief \
+                 clarifying question rather than guess. Keep digits as digits for times, \
+                 dates, prices and phone numbers; do not spell them out — the voice \
+                 engine reads them aloud in the user's language. \
+                 Answer general-knowledge questions directly from your own knowledge; \
+                 use tools only for the user's personal data (calendar, memory, \
+                 reminders), live data (time, weather, news), or an explicit request to \
+                 look something up."
+            ),
+            other => warnings.push(format!(
+                "ignored style {other:?}: the only supported voice style is \"spoken\""
+            )),
+        }
+    }
+
+    (style, language, warnings)
+}
+
 fn load_system_prompt(config: &MiraConfig) -> String {
     if config.agent.system_prompt_file.is_empty() {
         return DEFAULT_SYSTEM_PROMPT.to_string();
@@ -1881,6 +2667,482 @@ mod tests {
         }
 
         async fn health_check(&self) -> bool { true }
+    }
+
+    // Streams one token, then blocks "forever" — so a turn using it stays
+    // in-flight long enough for a test to cancel it.
+    struct SlowProvider;
+
+    #[async_trait]
+    impl ModelProvider for SlowProvider {
+        fn name(&self) -> &str { "slow" }
+        async fn generate(&self, _m: &[ChatMessage], _o: &GenerationOptions)
+            -> Result<GenerationResponse, MiraError>
+        {
+            Ok(GenerationResponse {
+                content: "unused".into(), tool_calls: None, reasoning: None,
+                usage: TokenUsage::default(), provider_id: ProviderId::Local("slow".into()),
+                model_name: "slow".into(), fallback: None,
+            })
+        }
+        async fn generate_stream_with_context(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &GenerationOptions,
+            on_token: &mut (dyn FnMut(String) + Send),
+            _context: &crate::providers::ProviderRequestContext,
+        ) -> Result<GenerationResponse, MiraError> {
+            on_token("partial ".to_string());
+            // Longer than any test waits; cancellation drops this future.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok(GenerationResponse {
+                content: "partial and the unspoken rest".into(), tool_calls: None,
+                reasoning: None, usage: TokenUsage::default(),
+                provider_id: ProviderId::Local("slow".into()),
+                model_name: "slow".into(), fallback: None,
+            })
+        }
+        async fn health_check(&self) -> bool { true }
+    }
+
+    // Captures the concatenated prompt the provider was handed, so a test can
+    // assert the voice steer actually reached the system prompt.
+    struct PromptCapturingProvider {
+        seen: std::sync::Arc<std::sync::Mutex<String>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for PromptCapturingProvider {
+        fn name(&self) -> &str { "prompt-capture" }
+        async fn generate(&self, _m: &[ChatMessage], _o: &GenerationOptions)
+            -> Result<GenerationResponse, MiraError>
+        {
+            Ok(GenerationResponse {
+                content: "ok".into(), tool_calls: None, reasoning: None,
+                usage: TokenUsage::default(), provider_id: ProviderId::Local("prompt-capture".into()),
+                model_name: "prompt-capture".into(), fallback: None,
+            })
+        }
+        async fn generate_stream_with_context(
+            &self,
+            messages: &[ChatMessage],
+            _options: &GenerationOptions,
+            on_token: &mut (dyn FnMut(String) + Send),
+            _context: &crate::providers::ProviderRequestContext,
+        ) -> Result<GenerationResponse, MiraError> {
+            *self.seen.lock().unwrap() =
+                messages.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
+            on_token("ok".to_string());
+            Ok(GenerationResponse {
+                content: "ok".into(), tool_calls: None, reasoning: None,
+                usage: TokenUsage::default(), provider_id: ProviderId::Local("prompt-capture".into()),
+                model_name: "prompt-capture".into(), fallback: None,
+            })
+        }
+        async fn health_check(&self) -> bool { true }
+    }
+
+    // The spoken-style steer must reach the system prompt even
+    // when the caller supplied a `system_prompt_override` (the web/voice path
+    // always does), i.e. it is appended unconditionally like the safety floor.
+    #[tokio::test]
+    async fn voice_style_reaches_prompt_despite_override() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let core = make_core_with(
+            Arc::new(PromptCapturingProvider { seen: seen.clone() })
+        ).await;
+        let context = TurnContext {
+            system_prompt_override: Some("Persona override: be terse.".into()),
+            spoken_style: Some("spoken".into()),
+            reply_language: Some("fi".into()),
+            ..TurnContext::default()
+        };
+        let rx = core
+            .process_with_context("conv-v", "alice", "voice", "hi", None, context)
+            .await
+            .unwrap();
+        let _ = AgentCore::collect_response(rx).await;
+        let prompt = seen.lock().unwrap().clone();
+        assert!(prompt.contains("Persona override"), "override kept");
+        assert!(prompt.contains("read aloud"), "spoken steer appended despite override");
+        assert!(prompt.contains("`fi`"), "reply language appended despite override");
+    }
+
+    // A voice turn emits a `first_token` timing BEFORE the
+    // first token, and a `final` timing; a plain web turn emits none by default.
+    #[tokio::test]
+    async fn voice_turn_emits_timing_before_first_token_and_at_done() {
+        let core = make_core_with(Arc::new(EchoProvider("hello world".into()))).await;
+        let mut rx = core
+            .process_with_context("c-t", "alice", "voice", "hi", None, TurnContext::default())
+            .await
+            .unwrap();
+        let mut events = Vec::new();
+        while let Some(ev) = rx.recv().await { events.push(ev); }
+
+        let first_token = events.iter().position(|e| matches!(e, StreamEvent::Token(_)));
+        let first_timing = events.iter().position(
+            |e| matches!(e, StreamEvent::Timing(t) if t.phase == "first_token"));
+        assert!(first_timing.is_some(), "a first_token timing is emitted");
+        assert!(first_token.is_some(), "a token is emitted");
+        assert!(first_timing < first_token, "timing comes immediately before the first token");
+
+        let ft = events.iter().find_map(|e| match e {
+            StreamEvent::Timing(t) if t.phase == "first_token" => Some(t.clone()),
+            _ => None,
+        }).unwrap();
+        assert!(ft.total_to_first_token_ms.is_some());
+        assert!(ft.llm_request_to_first_token_ms.is_some());
+        assert!(ft.memory_recall_ms.is_some());
+
+        let final_t = events.iter().find_map(|e| match e {
+            StreamEvent::Timing(t) if t.phase == "final" => Some(t.clone()),
+            _ => None,
+        }).expect("a final timing is emitted at done");
+        // The final snapshot carries the provider's prompt +
+        // cached token counts so the engine can confirm its prompt cache.
+        assert!(final_t.prompt_tokens.is_some(), "final timing reports prompt_tokens");
+        assert!(final_t.cached_tokens.is_some(), "final timing reports cached_tokens");
+        assert!(final_t.total_ms.is_some());
+    }
+
+    // Captures the leading system message of each call so a test can assert the
+    // voice prompt prefix stays byte-identical across a conversation's turns.
+    struct SystemCapturingProvider {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for SystemCapturingProvider {
+        fn name(&self) -> &str { "sys-capture" }
+        async fn generate(&self, _m: &[ChatMessage], _o: &GenerationOptions)
+            -> Result<GenerationResponse, MiraError>
+        {
+            Ok(GenerationResponse {
+                content: "ok".into(), tool_calls: None, reasoning: None,
+                usage: TokenUsage::default(), provider_id: ProviderId::Local("sys-capture".into()),
+                model_name: "sys-capture".into(), fallback: None,
+            })
+        }
+        async fn generate_stream_with_context(
+            &self,
+            messages: &[ChatMessage],
+            _options: &GenerationOptions,
+            on_token: &mut (dyn FnMut(String) + Send),
+            _context: &crate::providers::ProviderRequestContext,
+        ) -> Result<GenerationResponse, MiraError> {
+            let sys = messages.iter()
+                .find(|m| m.role == crate::types::MessageRole::System)
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            self.seen.lock().unwrap().push(sys);
+            on_token("ok".to_string());
+            Ok(GenerationResponse {
+                content: "ok".into(), tool_calls: None, reasoning: None,
+                usage: TokenUsage::default(), provider_id: ProviderId::Local("sys-capture".into()),
+                model_name: "sys-capture".into(), fallback: None,
+            })
+        }
+        async fn health_check(&self) -> bool { true }
+    }
+
+    // A voice conversation's system prompt prefix
+    // is byte-identical across turns, so the engine's planner prompt cache stays
+    // warm. (Volatile content — time, memory, wiki — rides the user message on
+    // the voice/cache path, never the system prefix.)
+    #[tokio::test]
+    async fn voice_prompt_prefix_is_byte_stable_across_turns() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let core = make_core_with(
+            Arc::new(SystemCapturingProvider { seen: std::sync::Arc::clone(&seen) })
+        ).await;
+        // The two turns are in DIFFERENT languages (fi, then
+        // es). The system prefix must stay byte-identical across the switch (the
+        // reply-language line rides the user message, not the system prompt).
+        let mk = |lang: &str| TurnContext {
+            system_prompt_override: Some("Persona: be helpful.".into()),
+            spoken_style: Some("spoken".into()),
+            reply_language: Some(lang.to_string()),
+            ..TurnContext::default()
+        };
+        let rx1 = core.process_with_context("conv-bs", "alice", "voice", "hello", None, mk("fi"))
+            .await.unwrap();
+        let _ = AgentCore::collect_response(rx1).await;
+        let rx2 = core.process_with_context("conv-bs", "alice", "voice", "and again", None, mk("es"))
+            .await.unwrap();
+        let _ = AgentCore::collect_response(rx2).await;
+
+        let sys = seen.lock().unwrap();
+        assert_eq!(sys.len(), 2, "two turns captured");
+        assert_eq!(sys[0], sys[1], "voice system prefix is byte-stable even across a language switch");
+        assert!(sys[0].contains("read aloud"), "spoken steer is in the (stable) prefix");
+        assert!(!sys[0].contains("`fi`") && !sys[0].contains("`es`"),
+            "the reply-language line is NOT in the system prefix");
+    }
+
+    #[tokio::test]
+    async fn web_turn_has_no_timings_unless_debug() {
+        let core = make_core_with(Arc::new(EchoProvider("hi".into()))).await;
+        let mut rx = core
+            .process_with_context("c-nt", "alice", "web", "hi", None, TurnContext::default())
+            .await
+            .unwrap();
+        while let Some(ev) = rx.recv().await {
+            assert!(!matches!(ev, StreamEvent::Timing(_)),
+                "a web turn emits no timing without debug_timings");
+        }
+
+        // …but debug_timings opts a web turn in.
+        let ctx = TurnContext { debug_timings: true, ..TurnContext::default() };
+        let mut rx2 = core
+            .process_with_context("c-dbg", "alice", "web", "hi", None, ctx)
+            .await
+            .unwrap();
+        let mut saw = false;
+        while let Some(ev) = rx2.recv().await {
+            if matches!(ev, StreamEvent::Timing(_)) { saw = true; }
+        }
+        assert!(saw, "debug_timings emits timing on a web turn");
+    }
+
+    // A speculative turn streams tokens but holds `Done`
+    // (and thus history/memory writes) until committed.
+    #[tokio::test]
+    async fn speculative_turn_holds_done_until_commit() {
+        use std::time::Duration;
+        let core = make_core_with(Arc::new(EchoProvider("hello world".into()))).await;
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let ctx = TurnContext {
+            speculative: true,
+            commit_notify: Some(std::sync::Arc::clone(&notify)),
+            restart_slot: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
+            cancel_token: Some(tokio_util::sync::CancellationToken::new()),
+            turn_id: Some("spec".into()),
+            ..TurnContext::default()
+        };
+        let mut rx = core
+            .process_with_context("c-spec", "alice", "web", "hi", None, ctx)
+            .await
+            .unwrap();
+
+        // Drain everything that streams before the barrier (blocks after).
+        let mut pre = Vec::new();
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(150), rx.recv()).await {
+            pre.push(ev);
+        }
+        assert!(pre.iter().any(|e| matches!(e, StreamEvent::Token(_))), "tokens stream speculatively");
+        assert!(!pre.iter().any(|e| matches!(e, StreamEvent::Done { .. })), "Done held until commit");
+
+        // Commit (proceed) → the turn finalises.
+        notify.notify_one();
+        let mut saw_done = false;
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            if matches!(ev, StreamEvent::Done { .. }) { saw_done = true; break; }
+        }
+        assert!(saw_done, "Done arrives after commit");
+    }
+
+    #[tokio::test]
+    async fn speculative_discard_yields_cancelled_not_done() {
+        use std::time::Duration;
+        let core = make_core_with(Arc::new(EchoProvider("hi there".into()))).await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = TurnContext {
+            speculative: true,
+            commit_notify: Some(std::sync::Arc::new(tokio::sync::Notify::new())),
+            restart_slot: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
+            cancel_token: Some(cancel.clone()),
+            turn_id: Some("spec-d".into()),
+            ..TurnContext::default()
+        };
+        let mut rx = core
+            .process_with_context("c-spec-d", "alice", "web", "hi", None, ctx)
+            .await
+            .unwrap();
+        // Let it stream + reach the barrier, then discard.
+        let _ = tokio::time::timeout(Duration::from_millis(120), rx.recv()).await;
+        cancel.cancel();
+        let mut events = Vec::new();
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            events.push(ev);
+        }
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::Cancelled { .. })), "discard → Cancelled");
+        assert!(!events.iter().any(|e| matches!(e, StreamEvent::Done { .. })), "discard → no Done");
+    }
+
+    #[tokio::test]
+    async fn speculative_changed_commit_restarts_then_finishes() {
+        use std::time::Duration;
+        let core = make_core_with(Arc::new(EchoProvider("answer".into()))).await;
+        let restart = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let restart_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let ctx = TurnContext {
+            speculative: true,
+            commit_notify: Some(std::sync::Arc::new(tokio::sync::Notify::new())),
+            restart_slot: Some(std::sync::Arc::clone(&restart)),
+            restart_notify: Some(std::sync::Arc::clone(&restart_notify)),
+            cancel_token: Some(tokio_util::sync::CancellationToken::new()),
+            turn_id: Some("spec-r".into()),
+            ..TurnContext::default()
+        };
+        let mut rx = core
+            .process_with_context("c-spec-r", "alice", "web", "hi", None, ctx)
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_millis(120), rx.recv()).await;
+        // Changed-message commit: set the new transcript + fire the restart
+        // signal (what the registry's `commit` does for a changed message —
+        // crucially NOT the cancel token, so the restarted turn stays live).
+        *restart.lock().unwrap() = Some("corrected transcript".into());
+        restart_notify.notify_one();
+
+        let (mut restarted, mut done) = (false, false);
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            match ev {
+                StreamEvent::Restarted { .. } => restarted = true,
+                StreamEvent::Done { .. } => { done = true; break; }
+                _ => {}
+            }
+        }
+        assert!(restarted, "a changed-message commit restarts");
+        assert!(done, "the restarted (non-speculative) turn finishes with Done");
+    }
+
+    async fn make_core_with(provider: Arc<dyn ModelProvider>) -> Arc<AgentCore> {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let mut cfg = MiraConfig::default();
+        cfg.agent.tool_mode = "disabled".to_string();
+        cfg.memory.embedding.provider = "lmstudio".to_string();
+        cfg.data_dir = dir.path().to_string_lossy().to_string();
+        std::mem::forget(dir);
+        let memory = Arc::new(
+            MemorySystem::new_keyword_only(std::path::PathBuf::from(&cfg.data_dir).join("memory.db")).unwrap()
+        );
+        Arc::new(AgentCore::new(
+            Arc::new(cfg), provider, memory,
+            Arc::new(ToolRegistry::new()), Arc::new(SessionStore::new()),
+        ))
+    }
+
+    // A cancelled turn emits `Cancelled` (not `Done`) and
+    // stops streaming; a normal turn still ends with `Done`.
+    #[tokio::test]
+    async fn cancelling_a_turn_emits_cancelled_not_done() {
+        let core = make_core_with(Arc::new(SlowProvider)).await;
+        let token = tokio_util::sync::CancellationToken::new();
+        let context = TurnContext {
+            cancel_token: Some(token.clone()),
+            turn_id: Some("t-cancel".into()),
+            ..TurnContext::default()
+        };
+        let mut rx = core
+            .process_with_context("conv-c", "alice", "voice", "hi", None, context)
+            .await
+            .unwrap();
+
+        let t2 = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            t2.cancel();
+        });
+
+        let (mut started, mut cancelled, mut done) = (false, false, false);
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                StreamEvent::TurnStarted { .. } => started = true,
+                StreamEvent::Cancelled { turn_id } => { assert_eq!(turn_id, "t-cancel"); cancelled = true; }
+                StreamEvent::Done { .. } => done = true,
+                _ => {}
+            }
+        }
+        assert!(started, "turn opened with TurnStarted");
+        assert!(cancelled, "a cancelled turn emits Cancelled");
+        assert!(!done, "a cancelled turn must NOT also emit Done");
+    }
+
+    #[tokio::test]
+    async fn uncancelled_turn_finishes_with_done() {
+        // Same path, but never fire the token → the EchoProvider completes.
+        let core = make_core_with(Arc::new(EchoProvider("hello".into()))).await;
+        let token = tokio_util::sync::CancellationToken::new();
+        let context = TurnContext {
+            cancel_token: Some(token),
+            turn_id: Some("t-ok".into()),
+            ..TurnContext::default()
+        };
+        let mut rx = core
+            .process_with_context("conv-ok", "alice", "voice", "hi", None, context)
+            .await
+            .unwrap();
+        let (mut done, mut cancelled) = (false, false);
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                StreamEvent::Done { .. } => done = true,
+                StreamEvent::Cancelled { .. } => cancelled = true,
+                _ => {}
+            }
+        }
+        assert!(done, "an uncancelled turn finishes with Done");
+        assert!(!cancelled, "an uncancelled turn never emits Cancelled");
+    }
+
+    // Spoken style (system) + reply language (user message).
+    #[test]
+    fn voice_addendum_spoken_style_has_tts_rules_and_no_warning() {
+        let (style, language, warns) = build_voice_addendum(Some("spoken"), None);
+        assert!(warns.is_empty());
+        assert!(language.is_empty(), "no language block without reply_language");
+        assert!(style.contains("read aloud"));
+        assert!(style.contains("markdown"), "forbids markdown");
+        assert!(style.to_lowercase().contains("digits"), "keeps digits");
+        // Prefer-direct-answer guidance is in the fixed text.
+        assert!(style.contains("general-knowledge"), "tells the model to answer directly");
+        assert!(style.to_lowercase().contains("personal data"), "tools only for personal/live data");
+    }
+
+    // The reply-language line is a SEPARATE (user-message)
+    // block, never in the style (system) block.
+    #[test]
+    fn voice_addendum_reply_language_is_in_the_user_block() {
+        let (style, language, warns) = build_voice_addendum(Some("spoken"), Some("fi"));
+        assert!(warns.is_empty());
+        assert!(language.contains("`fi`") && language.contains("Reply language"));
+        assert!(!style.contains("`fi`"), "language must NOT be in the system style block");
+    }
+
+    #[test]
+    fn voice_addendum_unknown_style_warns_and_is_ignored() {
+        let (style, _language, warns) = build_voice_addendum(Some("shouty"), None);
+        assert!(!style.contains("read aloud"), "unknown style adds no steer");
+        assert_eq!(warns.len(), 1);
+        assert!(warns[0].contains("shouty"));
+    }
+
+    #[test]
+    fn voice_addendum_bad_language_warns_and_is_ignored() {
+        let (_style, language, warns) = build_voice_addendum(None, Some("klingon"));
+        assert!(language.is_empty());
+        assert_eq!(warns.len(), 1);
+        assert!(warns[0].contains("klingon"));
+    }
+
+    #[test]
+    fn voice_addendum_absent_fields_are_noop() {
+        let (style, language, warns) = build_voice_addendum(None, None);
+        assert!(style.is_empty());
+        assert!(language.is_empty());
+        assert!(warns.is_empty());
+    }
+
+    #[test]
+    fn bcp47_sanity_accepts_real_tags_rejects_garbage() {
+        for ok in ["fi", "en", "en-GB", "zh-Hant", "es-419", "pt-BR"] {
+            assert!(looks_like_bcp47(ok), "{ok} should pass");
+        }
+        for bad in ["klingon", "en_US", "x", "123", "", "e", "toolongprimary"] {
+            assert!(!looks_like_bcp47(bad), "{bad} should fail");
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

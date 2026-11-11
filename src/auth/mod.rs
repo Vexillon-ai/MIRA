@@ -16,6 +16,8 @@ pub mod tokens;
 pub use capabilities::CapabilityProfile;
 pub use groups::{Group, NewGroup, UpdateGroup};
 pub use models::{AuthDb, User, Role, NewUser, UserProfile};
-pub use middleware::{AuthUser, AdminUser};
-pub use local::LocalAuthService;
+pub use middleware::{AuthUser, AdminUser, ChatAuth, ChatCancelAuth};
+pub use local::{
+    DeviceAuth, LocalAuthService, DEVICE_TOKEN_PREFIX, SCOPE_CHAT, SCOPE_CHAT_CANCEL,
+};
 pub use tokens::TokenPair;

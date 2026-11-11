@@ -73,7 +73,9 @@ pub async fn status_handler(
     // Compute the system-wide counts only for admins; non-admins get None.
     let (active_sessions, memory_count, conv_count, msg_count, provider_name) = if is_admin {
         let active_sessions  = Some(agent.sessions.len().await);
-        let memory_count: Option<usize> = agent.memory.count().ok().map(|n| n as usize);
+        // Instance-wide live-memory count (all users), not the legacy per-user
+        // scoped count which under-reported on multi-user installs.
+        let memory_count: Option<usize> = agent.memory.count_all_live().ok().map(|n| n as usize);
         let (conv_count, msg_count) = history.stats().unwrap_or((None, None));
         (active_sessions, memory_count, conv_count, msg_count, Some(agent.provider.name().to_owned()))
     } else {

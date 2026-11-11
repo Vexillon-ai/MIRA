@@ -65,11 +65,23 @@ export interface ListMemoryQuery {
   source?:   'user_explicit' | 'auto_extracted' | 'imported' | 'all'
   /** Filter to memories carrying this exact tag (e.g. 'rollup'). */
   tag?:      string
+  /** Server-side kind split: 'saved' (non-rollup) | 'summary' (daily rollups) | 'all'. */
+  kind?:     'saved' | 'summary' | 'all'
 }
 
 export const memoryApi = {
   list: (params?: ListMemoryQuery) =>
     api.get<MemoryItem[]>('/api/memory', { params }).then((r) => r.data),
+
+  /** Like `list`, but also returns the full server-side match count from the
+   *  `X-Total-Count` header, so a tab can show an accurate total even when the
+   *  page is capped. Falls back to the page length if the header is absent. */
+  listWithTotal: (params?: ListMemoryQuery) =>
+    api.get<MemoryItem[]>('/api/memory', { params }).then((r) => {
+      const header = r.headers['x-total-count']
+      const total = header != null ? Number(header) : r.data.length
+      return { items: r.data, total: Number.isFinite(total) ? total : r.data.length }
+    }),
 
   get: (id: number) =>
     api.get<MemoryItem>(`/api/memory/${id}`).then((r) => r.data),
@@ -83,6 +95,29 @@ export const memoryApi = {
   delete: (id: number) =>
     api.delete(`/api/memory/${id}`),
 
+  /** Undo a soft-delete of your own memory (the "Undo" toast). */
+  restore: (id: number) =>
+    api.post(`/api/memory/${id}/restore`),
+
+  /** The supersede chain through a memory (oldest → newest, incl. superseded). */
+  history: (id: number) =>
+    api.get<MemoryItem[]>(`/api/memory/${id}/history`).then((r) => r.data),
+
+  /** Delete ALL of the caller's own (user-scoped) memories. By default this is
+   *  a soft delete (hidden from recall, retained briefly in the audit log and
+   *  purged after the retention window). Pass `hard` to erase them immediately
+   *  with no retention. */
+  deleteMine: (hard = false) =>
+    api.delete<{ deleted: number }>(`/api/memory/mine${hard ? '?hard=true' : ''}`).then((r) => r.data),
+
+  /** Export everything visible as a Blob (JSON default, or 'md'), for download. */
+  exportBlob: (format: 'json' | 'md' = 'json') =>
+    api.get(`/api/memory/export?format=${format}`, { responseType: 'blob' }).then((r) => r.data as Blob),
+
+  /** Per-source status (admin): load state, locality, capabilities + live health. */
+  providersStatus: () =>
+    api.get<{ providers: ProviderStatus[] }>('/api/admin/memory/providers/status').then((r) => r.data.providers),
+
   /** Trigger the sleep-like consolidator on-demand for every user (admin
    *  only). Runs Phases C → A → D regardless of the per-phase config
    *  flags (the nightly job respects them; this manual button is for
@@ -90,6 +125,88 @@ export const memoryApi = {
   runConsolidatorNow: () =>
     api.post<ConsolidatorRunResult>('/api/admin/consolidator/run-now')
        .then((r) => r.data),
+
+  /** The caller's OWN memory catalog from a configured external source (any
+   *  memory-SPI HTTP service) — WHAT IS HELD, not a read of it. `available:false`
+   *  when no catalog source is configured. Owner-scoped server-side. */
+  catalog: (params?: CatalogQuery) =>
+    api.get<CatalogResponse>('/api/memory/catalog', { params }).then((r) => r.data),
+}
+
+export interface CatalogQuery {
+  /** Fetch one subject's held facts (with tier labels). */
+  subject?:  string
+  /** List only subjects whose name/alias/title starts with this. */
+  prefix?:   string
+  /** List only subjects whose name/alias/title contains this (not with prefix). */
+  contains?: string
+  page?:     number
+  per_page?: number
+}
+
+/** SPI trust level: how much the source stands behind a fact. */
+export type TrustLevel = 'verified' | 'reported' | 'unverified'
+
+/** A fact as the catalog's per-subject detail returns it. An `unverified` item
+ *  is a source passage, shown as an attributed quote. */
+export interface CatalogFact {
+  relation?:    string | null
+  content?:     string | null
+  trust?:       TrustLevel | string | null
+  trust_label?: string | null
+}
+
+export interface CatalogSubject {
+  name:     string
+  aliases?: string[]
+  label?:   string | null
+}
+
+/** The provider's catalog payload (generic memory SPI shape). */
+export interface CatalogPayload {
+  scope?:  Record<string, unknown>
+  counts?: {
+    subjects?: number
+    facts?:    number
+    by_trust?: Partial<Record<TrustLevel, number>> & Record<string, number>
+    [k: string]: unknown
+  }
+  page?: {
+    page?: number; per_page?: number
+    n_matching_subjects?: number; n_pages_subjects?: number
+    [k: string]: unknown
+  }
+  subjects?: CatalogSubject[]
+  subject_detail?: {
+    name?: string; state?: string; reason?: string | null
+    n_facts?: number; truncated?: unknown
+    facts?: CatalogFact[]
+  }
+}
+
+export interface ProviderStatus {
+  id:         string
+  /** Present on build-failure rows (providers that never loaded). */
+  transport?: string
+  locality:   string            // loopback | lan | remote | n/a
+  read:       boolean
+  write:      boolean
+  forget:     boolean
+  catalog:    boolean
+  citations:  boolean
+  /** 'error' = configured but failed to build (refused/missing key/TLS/MCP). */
+  health:     'ready' | 'warming' | 'unavailable' | 'error' | string
+  reason?:    string | null
+}
+
+export interface CatalogResponse {
+  available: boolean
+  state?:    string
+  catalog?:  CatalogPayload
+  reason?:   string
+  error?:    string
+  /** Id of the provider serving the catalog (for the UI header). */
+  source?:   string
 }
 
 export interface ConsolidatorRunResult {

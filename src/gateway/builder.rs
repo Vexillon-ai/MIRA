@@ -261,6 +261,32 @@ impl GatewayBuilder {
         );
         info!("Memory system initialised");
 
+        // Retention purge: permanently remove memories soft-deleted longer than
+        // `memory.retention_days` ago (0 = keep indefinitely). Runs at startup AND
+        // periodically (M4) so a long-running instance keeps its promise that a
+        // deleted memory is purged after the window — not only across a restart.
+        let retention_days = memory_config.retention_days;
+        match memory.purge_deleted(retention_days) {
+            Ok(n) if n > 0 => info!("Memory retention: purged {n} memories deleted > {retention_days}d ago"),
+            Ok(_) => {}
+            Err(e) => warn!("Memory retention purge failed (non-fatal): {e}"),
+        }
+        if retention_days > 0 {
+            let memory = Arc::clone(&memory);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+                tick.tick().await; // consume the immediate tick (boot already purged)
+                loop {
+                    tick.tick().await;
+                    match memory.purge_deleted(retention_days) {
+                        Ok(n) if n > 0 => info!("Memory retention: purged {n} memories (periodic)"),
+                        Ok(_) => {}
+                        Err(e) => warn!("Memory retention periodic purge failed (non-fatal): {e}"),
+                    }
+                }
+            });
+        }
+
         // ── Provider chain ───────────────────────────────────────────
         let provider = build_provider_chain(&config, Some(Arc::clone(&degradation_tracker)))?;
         if provider.health_check().await {
@@ -363,10 +389,19 @@ impl GatewayBuilder {
                     consolidate_importance:    config.memory.consolidation.importance_enabled,
                     importance_half_life_days: config.memory.consolidation.importance_half_life_days,
                 };
+                // A.8: the rollup job uses the `rollup` llm-alias (fallback:
+                // primary provider), resolved once at startup — a deterministic
+                // named model, never whatever chat routes to.
+                let rollup_provider = crate::agent::named_agent::build_provider_for_llm_alias(
+                    config.as_ref(), "rollup",
+                ).unwrap_or_else(|e| {
+                    warn!("rollup: rollup alias resolve failed ({e}); using primary provider");
+                    Arc::clone(&provider)
+                });
                 let _handle = crate::memory::rollup::MemoryRollup::start(
                     Arc::clone(hist),
                     Arc::clone(&memory),
-                    Arc::clone(&provider),
+                    rollup_provider,
                     cfg,
                 );
                 info!("Memory rollup started (every {}s, lag={}d)",
@@ -728,11 +763,41 @@ impl GatewayBuilder {
         let guardian_channel_manager: Arc<std::sync::OnceLock<Arc<tokio::sync::RwLock<crate::gateway::channel_manager::ChannelManager>>>> =
             Arc::new(std::sync::OnceLock::new());
 
+        // One shared provider set for the agent AND the memory_catalog tool.
+        let memory_providers = Arc::new(
+            crate::memory::provider::set::ProviderSet::build(&config, Arc::clone(&memory)),
+        );
+
+        // Probe each provider's declared capabilities once at boot (M6). An HTTP
+        // service that implements `GET /capabilities` has its catalog/citations
+        // gated on what it declares; a service without the endpoint keeps the
+        // optimistic default (fail-soft), so this never disables a working store.
+        // Must run before build_tool_registry so memory_catalog registers only
+        // when a provider actually advertises catalog.
+        for p in &memory_providers.read {
+            p.probe().await;
+        }
+        // Re-probe on a timer so a provider that was unreachable at boot (its
+        // catalog/citations defaulted off) recovers its declared capabilities
+        // without a restart — M6. Cheap: one GET /capabilities per provider.
+        {
+            let providers = Arc::clone(&memory_providers);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+                tick.tick().await; // consume the immediate first tick (boot already probed)
+                loop {
+                    tick.tick().await;
+                    for p in &providers.read { p.probe().await; }
+                }
+            });
+        }
+
         let tool_registry = build_tool_registry(
             &config,
             auth_service.as_ref(),
             history.as_ref(),
             &memory,
+            &memory_providers,
             &provider,
             &data_dir,
             tool_audit.clone(),
@@ -974,12 +1039,13 @@ impl GatewayBuilder {
         }
 
         // ── AgentCore ────────────────────────────────────────────────
-        let agent_core = Arc::new(AgentCore::new(
+        let agent_core = Arc::new(AgentCore::with_providers(
             Arc::clone(&config),
             provider,
             Arc::clone(&memory),
             Arc::clone(&tools),
             Arc::clone(&sessions),
+            Arc::clone(&memory_providers),
         ));
         info!("AgentCore ready");
 
@@ -2311,6 +2377,87 @@ pub(crate) fn build_single_provider(
     Some(crate::providers::degeneracy::guard(out, config.agent.degeneracy_guard.clone()))
 }
 
+/// Build an OpenAI-compatible client from a config entry (shared by the chain
+/// builder and the named-provider resolver). `None` when the entry is disabled,
+/// unnamed, or incomplete (missing url/model, or a key under bearer/azure).
+fn build_compat_client(
+    cc: &crate::config::OpenAiCompatProviderConfig,
+    config: &MiraConfig,
+) -> Option<Arc<dyn crate::providers::ModelProvider>> {
+    use crate::providers::openai_compat::{AuthHeader, OpenAiCompatClient, OpenAiCompatConfig};
+    if !cc.enabled || cc.name.is_empty() { return None; }
+    let auth = match cc.auth_style.to_ascii_lowercase().as_str() {
+        "azure" | "azure_openai" | "api-key" | "api_key" => AuthHeader::AzureApiKey,
+        "none" | "anonymous"                              => AuthHeader::None,
+        _                                                 => AuthHeader::Bearer,
+    };
+    let key = cc.api_key.clone().unwrap_or_default();
+    let keyed_ok = matches!(auth, AuthHeader::None) || !key.is_empty();
+    if !keyed_ok || cc.base_url.is_empty() || cc.default_model.is_empty() {
+        return None;
+    }
+    Some(Arc::new(OpenAiCompatClient::new(OpenAiCompatConfig {
+        provider_name: cc.name.clone(),
+        base_url:      cc.base_url.clone(),
+        api_key:       key,
+        model:         cc.default_model.clone(),
+        timeout_secs:  cc.timeout_secs,
+        auth_header:   auth,
+        extra_headers: vec![],
+        session_header: None,
+    }).with_degeneracy(config.agent.degeneracy_guard.clone())))
+}
+
+/// Resolve a provider by `name`: first the named
+/// OpenAI-compatible entries (the single `openai_compat` slot + the
+/// `openai_compat_extra` list — these carry a per-provider context budget), then
+/// a built-in vendor slug via [`build_single_provider`]. Returns the provider
+/// plus its optional per-provider context budget. `None` if nothing matches /
+/// the entry is incomplete.
+pub(crate) fn build_named_provider(
+    config: &MiraConfig,
+    name: &str,
+) -> Option<(Arc<dyn crate::providers::ModelProvider>, Option<usize>)> {
+    let oc = &config.providers.openai_compat;
+    if oc.name == name {
+        if let Some(p) = build_compat_client(oc, config) {
+            return Some((p, oc.context_length_tokens));
+        }
+    }
+    for cc in &config.providers.openai_compat_extra {
+        if cc.name == name {
+            if let Some(p) = build_compat_client(cc, config) {
+                return Some((p, cc.context_length_tokens));
+            }
+        }
+    }
+    build_single_provider(config, name, None).map(|p| (p, None))
+}
+
+/// Build the voice-channel provider (`voice.provider`), wrapped so it fails over
+/// to the instance's default chain when `voice.provider_failover` is on. Returns
+/// the provider + its optional per-provider context budget, or `None` when
+/// `voice.provider` is unset or can't be resolved (the caller then keeps the
+/// default provider + warns).
+pub(crate) fn build_voice_provider(
+    config: &MiraConfig,
+    default_chain: &Arc<dyn crate::providers::ModelProvider>,
+) -> Option<(Arc<dyn crate::providers::ModelProvider>, Option<usize>)> {
+    use crate::providers::failover::{FailoverProvider, SharedProvider};
+    let name = config.voice.provider.as_deref()?.trim().to_string();
+    if name.is_empty() { return None; }
+    let (vp, budget) = build_named_provider(config, &name)?;
+    let provider: Arc<dyn crate::providers::ModelProvider> = if config.voice.provider_failover {
+        Arc::new(FailoverProvider::new(
+            Box::new(SharedProvider(vp)),
+            vec![Box::new(SharedProvider(Arc::clone(default_chain)))],
+        ))
+    } else {
+        vp
+    };
+    Some((provider, budget))
+}
+
 /// The ordered fallback slugs to use as the automatic-failover tail, given the
 /// primary and the registered candidate slugs (registration order). Pure logic,
 /// unit-tested below:
@@ -2408,6 +2555,9 @@ fn build_tool_registry(
     auth:        Option<&Arc<LocalAuthService>>,
     history:     Option<&Arc<HistoryStore>>,
     memory:      &Arc<crate::memory::MemorySystem>,
+    // Shared read/write provider set (built once by the gateway, also handed to
+    // AgentCore), so the memory_catalog tool reuses the same HTTP client.
+    memory_providers: &Arc<crate::memory::provider::set::ProviderSet>,
     provider:    &Arc<dyn ModelProvider>,
     data_dir:    &std::path::Path,
     audit:       Option<Arc<ToolAuditStore>>,
@@ -2600,6 +2750,30 @@ fn build_tool_registry(
         info!("Tool registered: memory_supersede");
     } else {
         warn!("memory_supersede skipped (auth service unavailable)");
+    }
+
+    // Agent-driven memory tools (B2c): recall/store/forget durable facts on
+    // demand, through the provider seam. Scoped per-user via the injected
+    // `_user_id`; no auth dependency.
+    {
+        use crate::tools::memory_tools::{MemoryAddTool, MemoryForgetTool, MemorySearchTool};
+        // memory_search fans across ALL configured read providers (builtin +
+        // external, e.g. a remote HTTP service), so it shares the gateway's ProviderSet + auth.
+        registry.register(MemorySearchTool::new(Arc::clone(memory_providers), auth.cloned()));
+        registry.register(MemoryAddTool::new(Arc::clone(memory)));
+        registry.register(MemoryForgetTool::new(Arc::clone(memory_providers), Arc::clone(memory)).with_auth(auth.cloned()));
+        info!("Tools registered: memory_search, memory_add, memory_forget");
+
+        // memory_catalog — registered whenever ANY external (non-builtin) provider
+        // is configured. It resolves the catalog-capable provider at CALL time and
+        // refuses gracefully when none offers catalog, so a provider that only
+        // becomes reachable after boot (its catalog enabled by a later re-probe)
+        // still works without a restart (X10). Shares the agent's ProviderSet.
+        if memory_providers.read.iter().any(|p| p.id() != "builtin") {
+            registry.register(crate::tools::memory_tools::MemoryCatalogTool::new(
+                Arc::clone(memory_providers), auth.cloned()));
+            info!("Tool registered: memory_catalog");
+        }
     }
 
     // Onboarding (system-tier, flow="onboarding"). Requires auth+history to
@@ -3381,6 +3555,61 @@ mod failover_policy_tests {
     use crate::config::MiraConfig;
 
     fn cfg() -> MiraConfig { MiraConfig::default() }
+
+    // A named `openai_compat_extra` provider resolves by
+    // name and carries its own per-provider context budget.
+    #[test]
+    fn build_named_provider_resolves_extra_entry_with_budget() {
+        let mut c = cfg();
+        c.providers.openai_compat_extra.push(crate::config::OpenAiCompatProviderConfig {
+            enabled: true,
+            name: "router".into(),
+            api_key: None,
+            base_url: "http://192.0.2.10:8088/v1".into(),
+            default_model: "qwen3".into(),
+            available_models: vec![],
+            timeout_secs: 120,
+            auth_style: "none".into(),
+            context_length_tokens: Some(11264),
+            ..Default::default()
+        });
+        let (p, budget) = build_named_provider(&c, "router").expect("router resolves");
+        assert_eq!(p.name(), "router");
+        assert_eq!(budget, Some(11264));
+        // An unknown name resolves to nothing.
+        assert!(build_named_provider(&c, "nope").is_none());
+    }
+
+    // The voice provider wraps in failover when enabled (so a runtime failure
+    // falls through to the default chain), and is the bare provider when off.
+    #[test]
+    fn build_voice_provider_wraps_failover_when_enabled() {
+        let mut c = cfg();
+        c.providers.openai_compat_extra.push(crate::config::OpenAiCompatProviderConfig {
+            enabled: true, name: "router".into(), api_key: None,
+            base_url: "http://192.0.2.10:8088/v1".into(), default_model: "qwen3".into(),
+            available_models: vec![], timeout_secs: 120, auth_style: "none".into(),
+            context_length_tokens: Some(11264),
+            ..Default::default()
+        });
+        c.voice.provider = Some("router".into());
+        let default_chain: Arc<dyn crate::providers::ModelProvider> =
+            Arc::new(crate::providers::local::OllamaProvider::new(
+                "http://127.0.0.1:11434".into(), "llama".into()));
+
+        c.voice.provider_failover = true;
+        let (p, budget) = build_voice_provider(&c, &default_chain).expect("voice provider");
+        assert_eq!(p.name(), "failover", "failover-wrapped when enabled");
+        assert_eq!(budget, Some(11264));
+
+        c.voice.provider_failover = false;
+        let (p2, _) = build_voice_provider(&c, &default_chain).expect("voice provider");
+        assert_eq!(p2.name(), "router", "bare provider when failover off");
+
+        // No voice.provider → None (voice uses the default).
+        c.voice.provider = None;
+        assert!(build_voice_provider(&c, &default_chain).is_none());
+    }
 
     #[test]
     fn local_only_default_keeps_local_drops_cloud() {

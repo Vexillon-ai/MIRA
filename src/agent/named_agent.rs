@@ -99,9 +99,16 @@ impl WorkerTask for NamedAgentExecutor {
 
         // Persona + task. The system prompt is the saved persona; the user
         // message is the brief the caller handed us (already carrying any
-        // output-dir addendum the spawn tool appended).
+        // output-dir addendum the spawn tool appended). Append the non-negotiable
+        // memory-truthfulness rule here too (W4) — a named agent has the memory
+        // tools but doesn't go through the main turn's system-prompt assembly, so
+        // it otherwise never gets the rule.
         let mut messages = vec![
-            ChatMessage::system(self.def.system_prompt.clone()),
+            ChatMessage::system(format!(
+                "{}{}",
+                self.def.system_prompt,
+                crate::system_prompt::MEMORY_TRUTHFULNESS_ADDENDUM,
+            )),
             ChatMessage::user(task.to_string()),
         ];
 
@@ -332,6 +339,37 @@ pub(crate) fn build_provider_for_alias(
     crate::gateway::builder::build_provider_chain(&c, None)
 }
 
+/// Resolve one of MIRA's fixed internal `agent.llm_aliases` roles
+/// (`memory_extract`, `wiki_extract`, `rollup`) to a provider (A.8).
+///
+/// Precedence mirrors the guardian's `tier_model`: a configured alias wins; an
+/// empty/absent model falls back to the provider's `default_model` (via
+/// `build_provider_for_alias`, which only overrides when a model is given); an
+/// absent alias falls back to the **primary provider**. The point is that these
+/// background jobs resolve a *deterministic, named* model instead of cloning the
+/// turn's provider — so a turn routed to a grounded/remote model can't drag
+/// conversation content into the extractor/rollup, and a request naming no model
+/// can't JIT-load a rogue one.
+pub(crate) fn build_provider_for_llm_alias(
+    config: &MiraConfig,
+    alias:  &str,
+) -> Result<Arc<dyn ModelProvider>, crate::MiraError> {
+    let (provider, model) = resolve_llm_alias(config, alias);
+    build_provider_for_alias(config, &provider, model.as_deref())
+}
+
+/// Pure resolution step behind [`build_provider_for_llm_alias`]: `(provider,
+/// model)` for an alias name. Configured alias wins (empty model → `None`,
+/// which `build_provider_for_alias` fills from the provider default); otherwise
+/// the primary provider with its own default. Split out so the precedence is
+/// unit-testable without building a provider chain.
+pub(crate) fn resolve_llm_alias(config: &MiraConfig, alias: &str) -> (String, Option<String>) {
+    match config.agent.llm_aliases.get(alias) {
+        Some(a) => (a.provider.clone(), a.model.clone().filter(|m| !m.trim().is_empty())),
+        None    => (config.primary_provider.clone(), None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +379,26 @@ mod tests {
         let id = skill_id_for_handle("researcher");
         assert_eq!(id, "named:researcher");
         assert_eq!(handle_from_skill_id(&id), Some("researcher"));
+    }
+
+    #[test]
+    fn llm_alias_resolution_precedence() {
+        use crate::config::{LlmAlias, MiraConfig};
+        let mut c = MiraConfig::default();
+        c.primary_provider = "lmstudio".into();
+        // Absent alias → primary provider, model None (→ provider default).
+        assert_eq!(resolve_llm_alias(&c, "memory_extract"), ("lmstudio".into(), None));
+        // Configured alias wins, with its explicit model.
+        c.agent.llm_aliases.insert("memory_extract".into(),
+            LlmAlias { provider: "ollama".into(), model: Some("qwen2.5:3b".into()) });
+        assert_eq!(resolve_llm_alias(&c, "memory_extract"),
+            ("ollama".into(), Some("qwen2.5:3b".into())));
+        // Empty model string is treated as unset → None (provider default).
+        c.agent.llm_aliases.insert("rollup".into(),
+            LlmAlias { provider: "openai".into(), model: Some("   ".into()) });
+        assert_eq!(resolve_llm_alias(&c, "rollup"), ("openai".into(), None));
+        // A different, unconfigured role still falls back to primary.
+        assert_eq!(resolve_llm_alias(&c, "wiki_extract"), ("lmstudio".into(), None));
     }
 
     #[test]
