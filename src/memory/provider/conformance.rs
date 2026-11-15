@@ -73,7 +73,7 @@ pub async fn run_write_contract(
         return Err("run_write_contract on a non-write provider".into());
     }
     let turn = TurnRecord {
-        user_id: user.into(), agent_id: None, thread_id: None, channel: "conf".into(),
+        user_id: user.into(), username: None, email: None, agent_id: None, thread_id: None, channel: "conf".into(),
         user_msg: content.into(), assistant_msg: String::new(), conversation_id: None,
     };
     p.ingest(&turn).await.map_err(|e| format!("ingest: {e}"))?;

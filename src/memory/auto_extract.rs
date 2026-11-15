@@ -113,7 +113,7 @@ pub fn strip_remember_opener(text: &str) -> String {
     // Scan each sentence clause and return the first one that begins (after
     // fillers) with an opener, stripped — so "I had a long day. Remember my
     // sister's name is Leila." stores "my sister's name is Leila", not the whole
-    // message (X11). No opener anywhere → the whole trimmed text.
+    // message. No opener anywhere → the whole trimmed text.
     let mut start = 0usize;
     for (i, ch) in text.char_indices() {
         if matches!(ch, '.' | '!' | ';' | '\n' | '?') {
@@ -520,7 +520,7 @@ impl LlmMemoryExtractor {
         // fine (a fresh user, or the heuristic/test paths).
         existing_keys:       &[String],
     ) -> Vec<LlmCandidate> {
-        // A.3 — sanitise extractor INPUTS: strip reasoning blocks from both turns
+        // Sanitise extractor INPUTS: strip reasoning blocks from both turns
         // before the prompt is built, so a `<thinking>` block (including an
         // unclosed one from a truncated response) never reaches the extractor.
         let user_clean = crate::memory::authorship::strip_reasoning_blocks(user_msg);
@@ -602,7 +602,7 @@ impl LlmMemoryExtractor {
                     entity, conf, min_confidence);
                 return None;
             }
-            // A.2 — code-enforced authorship/provenance. The prompt asks the
+            // Code-enforced authorship/provenance. The prompt asks the
             // model to store only user-stated facts; this enforces it. Grade the
             // candidate against the user's own turn (reasoning-stripped inside)
             // and drop anything that is reasoning markup, assistant-/world-
@@ -1555,7 +1555,7 @@ mod structured_extractor_tests {
         );
 
         // `relationship` excluded — must be dropped even at high confidence.
-        // User turn supports the kept fact (A.2 grounding needs distinctive
+        // User turn supports the kept fact (grounding needs distinctive
         // overlap); the relationship candidate is dropped by the category gate
         // before grounding regardless.
         let got = LlmMemoryExtractor::new().extract(

@@ -165,7 +165,7 @@ pub struct MemoryItem {
     pub scope_id: Option<String>,
     #[serde(default)]
     pub created_by: Option<String>,
-    // Who SPOKE the source content (A.1): `user` | `assistant` | `system` |
+    // Who SPOKE the source content: `user` | `assistant` | `system` |
     // `rollup`. Distinct from `created_by` (the owning user). Auto-extracted
     // rows should be `user` once the authorship gates pass; a non-`user` value
     // flags a leak.
@@ -315,10 +315,10 @@ impl MemoryStorage {
             // Soft-delete (admin-only) — rows stay for audit but become invisible.
             "ALTER TABLE memories ADD COLUMN deleted_at INTEGER",
             "ALTER TABLE memories ADD COLUMN deleted_by TEXT",
-            // Who SPOKE the content this memory was distilled from (A.1):
+            // Who SPOKE the content this memory was distilled from:
             // 'user' | 'assistant' | 'system' | 'rollup'. Distinct from
             // `created_by` (which records the owning user_id, not the speaker).
-            // The authorship gates (A.2) should keep all auto-extracted rows at
+            // The authorship gates should keep all auto-extracted rows at
             // 'user'; a non-'user' value is a signal something leaked.
             "ALTER TABLE memories ADD COLUMN source_speaker TEXT NOT NULL DEFAULT 'user'",
         ];
@@ -338,7 +338,7 @@ impl MemoryStorage {
             "UPDATE memories SET created_by = user_id WHERE created_by IS NULL",
             [],
         );
-        // A.1 backfill: rollup summaries are tagged 'rollup'; mark their speaker
+        // Backfill: rollup summaries are tagged 'rollup'; mark their speaker
         // so day-summaries are distinguishable from user-stated facts. Everything
         // else keeps the column default 'user'.
         let _ = self.conn.execute(
@@ -1934,9 +1934,9 @@ impl MemoryStorage {
     ) -> Result<u64, MiraError> {
         let created_at = Utc::now().timestamp();
         let created_at_ms = created_at * 1000;
-        // A.1 — derive the speaker from the tags: a rollup summary is a MIRA-
+        // Derive the speaker from the tags: a rollup summary is a MIRA-
         // authored day digest, not a user-stated fact. Everything else is a
-        // user fact (the A.2 authorship gates keep assistant/system content out
+        // user fact (the authorship gates keep assistant/system content out
         // of the auto-extract path, so no other speaker reaches this write).
         let source_speaker = if tags.iter().any(|t| t == "rollup" || t.starts_with("rollup")) {
             "rollup"
@@ -2309,7 +2309,7 @@ mod tests {
 
     #[test]
     fn source_speaker_defaults_user_and_marks_rollups() {
-        // A.1: a plain stored fact records source_speaker='user'; a rollup-tagged
+        // A plain stored fact records source_speaker='user'; a rollup-tagged
         // memory records 'rollup', so day-summaries stay distinguishable from
         // user-stated facts and round-trip through MEMORY_COLUMNS.
         let path = "/tmp/mira_test_source_speaker.db";

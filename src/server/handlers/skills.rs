@@ -303,7 +303,7 @@ pub async fn promote_skill(
     }
 }
 
-// ── Skill authoring (Tier-1 reuse) — T1d ─────────────────────────────────────
+// ── Skill authoring (Tier-1 reuse) ─────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct AuthorSkillRequest {
@@ -351,7 +351,7 @@ fn slugify(s: &str) -> String {
 /// POST /api/skills/author — compose a skill (Tier-1 reuse of builtin tools, or
 /// Tier-0 guidance) and write it live. Gated by `skill_authoring` + the caller's
 /// max authoring tier (admins unrestricted). Admin / global-propose → global
-/// skill; otherwise user-scoped. Instance-signed, hot-reloaded. (T1d)
+/// skill; otherwise user-scoped. Instance-signed, hot-reloaded.
 pub async fn author_skill(
     AuthUser(user):      AuthUser,
     Extension(data_dir): Extension<DataDir>,

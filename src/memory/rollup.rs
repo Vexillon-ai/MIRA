@@ -359,7 +359,7 @@ fn build_transcript(msgs: &[crate::history::Message], max_chars_per_msg: usize) 
             crate::history::MessageRole::Assistant => "ASSISTANT",
             _                                      => continue,
         };
-        // A.4: strip reasoning markup before it reaches the rollup prompt. An
+        // Strip reasoning markup before it reaches the rollup prompt. An
         // assistant `<thinking>` block (or a truncated, unclosed one) is private
         // scratch work, not day-summary material — this was the second route by
         // which reasoning text leaked into stored memories.
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn build_transcript_strips_assistant_reasoning_blocks() {
-        // A.4: a `<thinking>` block in an assistant turn must not reach the
+        // A `<thinking>` block in an assistant turn must not reach the
         // rollup prompt (the leak route), while the real answer survives.
         use crate::history::{Message, MessageRole};
         let msgs = vec![

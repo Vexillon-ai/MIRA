@@ -65,6 +65,13 @@ pub struct TurnContext {
     // "use my wiki for this chat" toggle (Slice H) sets this; onboarding
     // also sets it since there's no wiki content to inject yet.
     pub skip_wiki_hooks:        bool,
+    // True when this turn's `input` is MIRA-authored, not something the user
+    // said — a scheduler/automation preamble, a proactive companion cue, a
+    // Guardian/watchdog analysis task. Memory capture (builtin extraction AND
+    // harness ingest to external stores) is skipped for these, so MIRA never
+    // stores or ships its own instruction text as if it were a user memory.
+    // Genuine user turns (chat, channels, email) leave it false.
+    pub non_user_input:         bool,
     // Q1.3 — non-text inputs for the *current* user turn. Attached to
     // the `ChatMessage::user(input)` built just before the tool loop;
     // provider wire layers translate these into image_content_blocks.
@@ -437,7 +444,7 @@ impl AgentCore {
     /// Deterministic capture for an explicit "remember this" request. Runs on
     /// every channel and every capture mode (including Off). Tries the LLM
     /// extractor with widened gates (via the `memory_extract` alias — never the
-    /// turn's model, A.8); if that resolves nothing, stores the user's sentence
+    /// turn's model); if that resolves nothing, stores the user's sentence
     /// VERBATIM as `user_explicit` so the request is never silently dropped.
     fn spawn_explicit_capture(
         &self,
@@ -2143,7 +2150,10 @@ impl AgentCore {
                 );
             }
         }
-        if !context.skip_memory_hooks && !no_store {
+        // `non_user_input`: a scheduler/automation preamble, a proactive cue, or
+        // a Guardian/watchdog task is MIRA's OWN text, not a user utterance — never
+        // extract memories from it or ship it to an external store as a user turn.
+        if !context.skip_memory_hooks && !no_store && !context.non_user_input {
             use crate::config::ExtractorKind;
             let ax     = &self.config.memory.auto_extract;
             let is_web = channel.eq_ignore_ascii_case("web");
@@ -2163,7 +2173,7 @@ impl AgentCore {
                 // Web's NORMAL LLM extraction is owned by the chat handler.
                 ExtractorKind::Llm if is_web => {}
                 ExtractorKind::Llm => {
-                    // A.8: resolve the `memory_extract` llm-alias (fallback:
+                    // Resolve the `memory_extract` llm-alias (fallback:
                     // primary provider), NEVER the turn's own provider — so a
                     // turn routed to a grounded/remote model can't pull
                     // conversation content into the extractor. Skip (don't abort
@@ -2226,8 +2236,18 @@ impl AgentCore {
                 info!("harness ingest: skipping a turn that looks to contain a credential (not sent to external stores)");
             }
             if capture_on && !secret_turn && !self.memory_providers.harness_writers.is_empty() {
+                // Resolve the account's username/email the SAME way recall does, so
+                // a provider keyed on `user_id_field = username|email` writes under
+                // the identical identity it reads with (else a service keyed on the
+                // username can't map the write and 400s it).
+                let (acct_username, acct_email) = self.auth.get()
+                    .and_then(|a| a.get_user(user_id).ok().flatten())
+                    .map(|u| (Some(u.username), u.email))
+                    .unwrap_or((None, None));
                 let turn = crate::memory::provider::TurnRecord {
                     user_id: user_id.to_string(),
+                    username: acct_username,
+                    email: acct_email,
                     agent_id: None,
                     thread_id: context.conversation_id.clone(),
                     channel: channel.to_string(),
@@ -2319,7 +2339,7 @@ impl AgentCore {
         {
             if let Some(registry) = self.wiki.get() {
                 let turn_id = uuid::Uuid::now_v7().to_string();
-                // A.8: wiki extraction uses the `wiki_extract` llm-alias
+                // Wiki extraction uses the `wiki_extract` llm-alias
                 // (fallback: primary provider), not the turn's provider; fall
                 // back to the turn provider only if the alias can't resolve.
                 let wiki_provider = crate::agent::named_agent::build_provider_for_llm_alias(
@@ -2574,7 +2594,14 @@ fn build_voice_addendum(
                  Answer general-knowledge questions directly from your own knowledge; \
                  use tools only for the user's personal data (calendar, memory, \
                  reminders), live data (time, weather, news), or an explicit request to \
-                 look something up."
+                 look something up. \
+                 For ANY weather, temperature, rain or forecast question — any place, \
+                 any language, any day (today, tomorrow, right now) — you MUST call the \
+                 weather tool and answer only from its result. If the weather tool is \
+                 not in your list, call find_tools to load it first, then call it. Never \
+                 state weather conditions, temperatures or a forecast from your own \
+                 knowledge, and if the tool reports a failure, say you couldn't get the \
+                 weather right now rather than guess."
             ),
             other => warnings.push(format!(
                 "ignored style {other:?}: the only supported voice style is \"spoken\""

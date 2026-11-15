@@ -31,10 +31,13 @@ pub struct WhisperModel {
     pub size_mb:     u32,
 }
 
-/// Default model id baked into [`crate::config::SttInternalConfig`]. Picked
-/// for being small enough to download quickly on first launch (~150 MB)
-/// while still being noticeably more accurate than `tiny.en`.
-pub const DEFAULT_MODEL_ID: &str = "base.en";
+/// Default model id baked into [`crate::config::SttInternalConfig`]. Multilingual
+/// `base` (~150 MB): small enough to download quickly on first launch, and it
+/// transcribes any language with a language hint (or auto-detect). The default is
+/// deliberately NOT the English-only `base.en` — that silently transcribes other
+/// languages as English (it ignores the hint). An English-only deployment can
+/// still pin `base.en` for a small English-accuracy gain.
+pub const DEFAULT_MODEL_ID: &str = "base";
 
 /// Curated whisper.cpp models offered to the user. We deliberately omit the
 /// quantised variants and the v1/v2 large models — they're either marginal

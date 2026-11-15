@@ -152,6 +152,8 @@ pub async fn dispatch_inbound(
     let turn_ctx = TurnContext {
         provider_request_context: None,
         system_prompt_override,
+        // The inbound email body IS user content — capture as normal.
+        non_user_input: false,
         allowed_tool_names,
         inject_tool_args: inject,
         // Email turns have no embedded image attachments (chunk 3

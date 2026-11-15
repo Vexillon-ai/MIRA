@@ -405,6 +405,9 @@ impl Dispatcher {
             // Automation turns run a deliberate toolset (explicit whitelist or
             // the chat flow set) — don't let adaptive selection narrow it.
             tools_flow_restricted: true,
+            // The framed input is MIRA's own scheduler preamble, not user text —
+            // don't extract it to memory or ship it to an external store.
+            non_user_input: true,
             // Honor the action's per-schedule iteration budget. Without this the
             // turn is capped at the global `agent.max_tool_rounds`, which a
             // research task burns on search/fetch before it can call its

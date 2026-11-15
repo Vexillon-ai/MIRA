@@ -389,7 +389,7 @@ impl GatewayBuilder {
                     consolidate_importance:    config.memory.consolidation.importance_enabled,
                     importance_half_life_days: config.memory.consolidation.importance_half_life_days,
                 };
-                // A.8: the rollup job uses the `rollup` llm-alias (fallback:
+                // The rollup job uses the `rollup` llm-alias (fallback:
                 // primary provider), resolved once at startup — a deterministic
                 // named model, never whatever chat routes to.
                 let rollup_provider = crate::agent::named_agent::build_provider_for_llm_alias(
@@ -1527,6 +1527,10 @@ impl GatewayBuilder {
                         automations_store.clone(),
                         Some(Arc::clone(&wiki_registry)),
                     )
+                    // The per-user MCP registry, so a briefing can
+                    // pull a user's CONNECTED (MCP) calendar — which isn't synced
+                    // into CalendarStore — the way a chat turn does.
+                    .with_mcp(Some(Arc::clone(&mcp_servers)))
                     .with_live_config(live_config.as_ref().map(Arc::clone))
                     // Agent activity log — lets "status update" check-ins
                     // narrate MIRA's recent autonomous work for the user.
@@ -2768,7 +2772,7 @@ fn build_tool_registry(
         // is configured. It resolves the catalog-capable provider at CALL time and
         // refuses gracefully when none offers catalog, so a provider that only
         // becomes reachable after boot (its catalog enabled by a later re-probe)
-        // still works without a restart (X10). Shares the agent's ProviderSet.
+        // still works without a restart. Shares the agent's ProviderSet.
         if memory_providers.read.iter().any(|p| p.id() != "builtin") {
             registry.register(crate::tools::memory_tools::MemoryCatalogTool::new(
                 Arc::clone(memory_providers), auth.cloned()));

@@ -333,7 +333,7 @@ mod tests {
     async fn add_and_forget_substitute_and_call() {
         let (p, mock) = provider(HashMap::new(), false);
         p.ingest(&TurnRecord {
-            user_id: "alice".into(), agent_id: None, thread_id: None, channel: "web".into(),
+            user_id: "alice".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "web".into(),
             user_msg: "I love hiking".into(), assistant_msg: String::new(), conversation_id: None,
         }).await.unwrap();
         let (tool, args) = mock.last.lock().unwrap().clone().unwrap();

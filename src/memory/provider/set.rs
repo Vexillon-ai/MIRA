@@ -6,7 +6,7 @@
 //! Splits providers into the **read** list (fanned by the recall router) and the
 //! **harness writers** (providers that get `ingest` called post-turn). The
 //! built-in store is special: its write path stays the turn's LLM extraction
-//! (alias-routed, A.8), so `builtin` is never a harness writer here — that would
+//! (alias-routed), so `builtin` is never a harness writer here — that would
 //! double-extract. A locality gate refuses a non-loopback provider unless it
 //! opted in. Empty config = built-in read only, i.e. exactly today's behaviour.
 

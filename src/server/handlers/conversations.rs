@@ -199,9 +199,30 @@ pub async fn get_messages(
 
     let limit = q.limit.unwrap_or(100).min(500);
     match store.get_messages(&id, limit, q.before_id.as_deref()) {
-        Ok(msgs) => axum::Json(msgs).into_response(),
+        Ok(msgs) => {
+            // Mobile contract: flatten each message and add the top-level
+            // `initiated_by` + `kind` fields so clients can mark proactive
+            // check-ins/briefings distinctly without parsing the metadata string.
+            let views: Vec<MessageView> = msgs.into_iter().map(|m| MessageView {
+                initiated_by: m.initiated_by(),
+                kind:         m.message_kind(),
+                msg:          m,
+            }).collect();
+            axum::Json(views).into_response()
+        }
         Err(e)   => err_response(e),
     }
+}
+
+/// A chat message plus the mobile contract's initiation fields
+/// `#[serde(flatten)]` keeps every
+/// original `Message` field at the top level and adds `initiated_by` + `kind`.
+#[derive(serde::Serialize)]
+struct MessageView {
+    #[serde(flatten)]
+    msg:          crate::history::models::Message,
+    initiated_by: &'static str,
+    kind:         &'static str,
 }
 
 // ── GET /api/conversations/stats ──────────────────────────────────────────────

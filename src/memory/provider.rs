@@ -25,7 +25,7 @@ pub mod mcp;
 pub mod set;
 
 /// Who spoke the content a fact was distilled from (ties to the `source_speaker`
-/// column, A.1). External providers that don't track it report `External`.
+/// column). External providers that don't track it report `External`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Speaker { User, Assistant, System, Rollup, External }
@@ -43,7 +43,7 @@ impl Speaker {
     }
 }
 
-/// How much a provider attests a fact — tiers how MIRA presents it (A.7 / spec
+/// How much a provider attests a fact — tiers how MIRA presents it (spec
 /// §5). The three SPI trust levels are `Verified` (the source attests it →
 /// "Established"), `Reported` (found/corroborated but not attested) and
 /// `Unverified` (present but unconfirmed); the latter two both render as "Found
@@ -68,7 +68,7 @@ pub struct MemoryCapabilities {
     pub temporal: bool,
     pub graph: bool,
     pub citations: bool,
-    /// May a result claim it is the COMPLETE set for the query? (A.5 → earned.)
+    /// May a result claim it is the COMPLETE set for the query? (earned.)
     pub can_assert_complete: bool,
     /// Does the provider expose a `catalog` surface — WHAT IS HELD (counts per
     /// store/tier, a paged subject/record list, one subject's served facts with
@@ -180,6 +180,13 @@ pub enum MemoryRetrieval {
 #[derive(Debug, Clone)]
 pub struct TurnRecord {
     pub user_id: String,
+    /// The account's username/email, when known, so an HTTP provider configured
+    /// with `user_id_field = username|email` can send the SAME identity on the
+    /// write path that it sends on reads (mirrored under that field name). Absent
+    /// here, a service keyed on username can't map the caller and refuses the
+    /// write. Mirrors `MemoryQuery`'s username/email on the read path.
+    pub username: Option<String>,
+    pub email: Option<String>,
     pub agent_id: Option<String>,
     pub thread_id: Option<String>,
     pub channel: String,

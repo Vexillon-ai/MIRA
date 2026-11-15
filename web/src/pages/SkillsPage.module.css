@@ -404,7 +404,7 @@
   color: var(--text-secondary);
 }
 
-/* T1d — New Skill form inputs */
+/* New Skill form inputs */
 .textInput {
   display: block; width: 100%; box-sizing: border-box; margin-top: 4px;
   padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;

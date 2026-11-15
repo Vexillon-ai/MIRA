@@ -374,7 +374,7 @@ impl MemoryCatalogTool {
     }
     /// The catalog-capable provider right now (capabilities can change after a
     /// late re-probe), or None — so the tool is always registered and simply
-    /// refuses when no source offers catalog (X10).
+    /// refuses when no source offers catalog.
     fn catalog_provider(&self) -> Option<&Arc<dyn MemoryProvider>> {
         self.providers.read.iter().find(|p| p.capabilities().catalog)
     }

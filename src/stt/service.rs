@@ -24,6 +24,19 @@ const BACKEND_INTERNAL:      &str = "internal";
 const BACKEND_OPENAI:        &str = "openai";
 const BACKEND_OPENAI_COMPAT: &str = "openai_compat";
 
+/// Normalise a language hint to the ISO-639-1 primary subtag the STT backends
+/// expect. Accepts ISO-639-1 ("de") or BCP-47 ("de-DE", "zh-Hans"), case- and
+/// separator-insensitive, and returns the lowercased primary subtag ("de").
+/// `"auto"`, empty, or anything that isn't a 2–3 letter language code → `None`
+/// (auto-detect). This keeps the wire field permissive while the backend always
+/// receives a clean code (whisper.cpp/OpenAI reject a region-tagged value).
+fn normalize_lang(raw: &str) -> Option<String> {
+    let primary = raw.trim().split(['-', '_']).next().unwrap_or("").to_ascii_lowercase();
+    if primary.is_empty() || primary == "auto" { return None; }
+    let ok = (2..=3).contains(&primary.len()) && primary.chars().all(|c| c.is_ascii_alphabetic());
+    ok.then_some(primary)
+}
+
 /// Resolve the OpenAI API key from config → environment. Empty string =
 /// "skip Authorization", same convention as TTS.
 fn resolve_openai_key(cfg_key: Option<&str>) -> String {
@@ -196,6 +209,11 @@ impl SttService {
         if req.language.is_none() && !snap.cfg.default_language.is_empty() {
             req.language = Some(snap.cfg.default_language.clone());
         }
+        // Normalise to the ISO-639-1 primary subtag the backends expect: a client
+        // may send BCP-47 ("de-DE") or ISO-639-1 ("de"); Whisper/OpenAI want "de".
+        // "auto"/"" or an unparseable value → None (auto-detect). Keeps the wire
+        // field permissive while the backend always gets a clean code.
+        req.language = req.language.take().and_then(|l| normalize_lang(&l));
 
         let backend_id = self.resolve_backend(backend, channel);
         let degr = self.degradations.clone();
@@ -248,6 +266,21 @@ impl SttService {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn normalize_lang_accepts_iso_and_bcp47() {
+        assert_eq!(normalize_lang("de"), Some("de".into()));
+        assert_eq!(normalize_lang("DE"), Some("de".into()));
+        assert_eq!(normalize_lang("de-DE"), Some("de".into()));   // BCP-47 region stripped
+        assert_eq!(normalize_lang("de_DE"), Some("de".into()));
+        assert_eq!(normalize_lang("zh-Hans"), Some("zh".into()));
+        assert_eq!(normalize_lang(" en "), Some("en".into()));
+        // Auto-detect / invalid → None.
+        assert_eq!(normalize_lang("auto"), None);
+        assert_eq!(normalize_lang(""), None);
+        assert_eq!(normalize_lang("english"), None);              // not a 2–3 letter code
+        assert_eq!(normalize_lang("123"), None);
+    }
 
     fn mira_cfg(data_dir: &std::path::Path) -> MiraConfig {
         let mut cfg = MiraConfig::default();

@@ -79,6 +79,10 @@ struct DonePayload {
     conversation_id: String,
     model:           String,
     provider:        String,
+    // Mobile contract: always user/reply on the live stream (proactive messages
+    // don't stream here), echoed from turn_started for a uniform contract.
+    initiated_by:    &'static str,
+    kind:            &'static str,
     #[serde(default)]
     usage:           crate::types::TokenUsage,
 }
@@ -224,7 +228,7 @@ pub async fn chat_handler(
         .and_then(|att| serde_json::to_string(
             &serde_json::json!({ "attachments": att })
         ).ok());
-    // Addendum-4 item 11 — a speculative turn stores nothing until commit; its
+    // A speculative turn stores nothing until commit; its
     // user message is persisted in the Done arm (with the committed transcript).
     if !speculative {
         if let Err(e) = history.add_message(NewMessage {
@@ -312,7 +316,7 @@ pub async fn chat_handler(
     let user_id       = user.id.clone();
     let message       = req.message.clone();
     let conv_id_c     = conv_id.clone();
-    // Addendum-4 item 11 — carried into the task so the Done (commit) arm can
+    // Carried into the task so the Done (commit) arm can
     // create the deferred conversation + persist the user message for a
     // speculative turn. `channel`/`model` already flow in via other captures.
     let new_conv_pending_task = new_conv_pending;
@@ -336,7 +340,7 @@ pub async fn chat_handler(
     let auth_for_task = Arc::clone(&auth);
     let mode_for_task = conv_mode.clone();
     // The extractor must use the same model the user picked in the UI for this
-    // A.8: the web turn's LLM extractor uses the fixed `memory_extract`
+    // The web turn's LLM extractor uses the fixed `memory_extract`
     // llm-alias (fallback: primary provider), NOT the per-turn model the user
     // picked — so a turn routed to a grounded/remote model can't pull
     // conversation content into the extractor. If the alias can't be resolved,
@@ -345,7 +349,7 @@ pub async fn chat_handler(
     let extractor_provider: Arc<dyn ModelProvider> =
         crate::agent::named_agent::build_provider_for_llm_alias(&agent.config, "memory_extract")
             .unwrap_or_else(|e| {
-                // A.8: NEVER fall back to the per-turn model the user picked (it may
+                // NEVER fall back to the per-turn model the user picked (it may
                 // be a grounded/remote model that must not see conversation content
                 // pulled into the extractor). Use the instance PRIMARY provider.
                 warn!("web extractor: memory_extract alias resolve failed ({e}); using the primary provider");
@@ -558,6 +562,10 @@ pub async fn chat_handler(
                             // clients ignore the unknown event name.
                             let payload = serde_json::json!({
                                 "turn_id": turn_id, "channel": channel,
+                                // Mobile contract: the live chat stream is always a
+                                // user-initiated reply (proactive messages never
+                                // stream here); included so the contract is uniform.
+                                "initiated_by": "user", "kind": "reply",
                             });
                             let _ = tx.send(Ok(
                                 Event::default().event("turn_started").data(payload.to_string())
@@ -570,7 +578,7 @@ pub async fn chat_handler(
                             )).await;
                         }
                         Some(StreamEvent::Done { usage }) => {
-                            // Addendum-4 item 11 — a speculative turn committed:
+                            // A speculative turn committed:
                             // NOW create the deferred conversation (if new) and
                             // persist the user message, using the FINAL transcript
                             // (the corrected message on a restart, else original).
@@ -708,6 +716,8 @@ pub async fn chat_handler(
                                 conversation_id: conv_id_c.clone(),
                                 model:           model.clone(),
                                 provider:        provider_name.clone(),
+                                initiated_by:    "user",
+                                kind:            "reply",
                                 usage:           usage.clone(),
                             }).unwrap_or_default();
                             let _ = tx.send(Ok(Event::default().event("done").data(payload))).await;
@@ -1166,6 +1176,8 @@ fn canned_assistant_sse(
         conversation_id,
         model,
         provider,
+        initiated_by: "user",
+        kind:         "reply",
         usage: crate::types::TokenUsage::default(),
     };
     tokio::spawn(async move {
@@ -1271,6 +1283,8 @@ fn build_onboarding_turn_context(
     TurnContext {
         provider_request_context: None,
         system_prompt_override: Some(system_prompt),
+        // Interactive chat — the message is the user's own text.
+        non_user_input: false,
         allowed_tool_names:     Some(allowed),
         inject_tool_args:       inject,
         skip_memory_hooks:      true,

@@ -177,7 +177,7 @@ fn global_id_for(owner: &str, id: &str) -> String {
 }
 
 /// Write a composed skill **directly to the live tree** (admin/granted authoring,
-/// T1d — not via staging, since the author IS the approver). `owner = None`
+/// not via staging, since the author IS the approver). `owner = None`
 /// writes a global skill `<skills_dir>/<id>/`; `Some(uid)` writes a user-scoped
 /// one under `users/<uid>/<id>/`. `prompt` (when present) becomes `prompts/main.md`.
 /// Refuses to overwrite an existing skill of the same id. Returns the live dir;

@@ -745,7 +745,7 @@ impl MemorySystem {
         // gate and record as `user_explicit`.
         explicit: bool,
     ) -> Result<usize, crate::MiraError> {
-        // A.6: defence-in-depth — strip reasoning markup even though the caller
+        // Defence-in-depth — strip reasoning markup even though the caller
         // now feeds only the user turn (the heuristic patterns are user-phrased,
         // so assistant text must never reach them).
         let clean = authorship::strip_reasoning_blocks(text);
@@ -1290,7 +1290,7 @@ impl MemorySystem {
     // Admin-only soft delete: hides from every visibility read but keeps
     // the row in place for audit.
     //
-    // A.9: also reap the embedding so a soft-deleted row can't surface as a
+    // Also reap the embedding so a soft-deleted row can't surface as a
     // semantic hit. `get_visible` already filters `deleted_at`, so this was
     // latent rather than a live bug, but it left orphan vectors as dead weight
     // and a trap for any future reader that skips the visibility gate. Mirrors

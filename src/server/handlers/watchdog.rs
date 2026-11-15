@@ -278,7 +278,9 @@ fn spawn_analysis_task(
 
         // Internal incident-analysis turn (a fixed diagnostic prompt, not a
         // user wellbeing conversation) — opt out of the universal safety floor.
-        let ctx = TurnContext { suppress_safety_floor: true, ..TurnContext::default() };
+        // Internal incident-analysis prompt is MIRA-authored, not user text —
+        // keep it out of memory capture / external ingest.
+        let ctx = TurnContext { suppress_safety_floor: true, non_user_input: true, ..TurnContext::default() };
         let mut rx = match agent.process_with_context(
             &conversation_id, &user_id, "web", &prompt, None, ctx,
         ).await {

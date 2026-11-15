@@ -128,7 +128,7 @@ export interface SkillProposal {
   tier:         number
 }
 
-/** Body for POST /api/skills/author (T1d). */
+/** Body for POST /api/skills/author. */
 export interface AuthorSkillRequest {
   display_name:  string
   description:   string
@@ -169,7 +169,7 @@ export const skillsApi = {
   },
 
   /** Author a skill (Tier-1 builtin reuse, or Tier-0 guidance), tier-gated by
-   *  the caller's rights. Returns {id, tier, scope}. (T1d) */
+   *  the caller's rights. Returns {id, tier, scope}. */
   async author(req: AuthorSkillRequest): Promise<{ id: string; tier: number; scope: string }> {
     const { data } = await api.post('/api/skills/author', req)
     return data

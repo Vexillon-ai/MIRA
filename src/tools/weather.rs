@@ -25,6 +25,12 @@ use crate::MiraError;
 
 const MAX_DAYS: u64 = 16;
 
+/// Hard upper bound on a whole weather lookup (geocode + forecast). A voice turn
+/// must not hang on a slow/unreachable upstream — past this, return a clear
+/// failure so the model says it couldn't get the weather, never a guess
+/// Sized so a healthy lookup (geocode ~1s + forecast) fits.
+const WEATHER_DEADLINE: Duration = Duration::from_secs(3);
+
 // ── Public report types (reused by the briefing) ───────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,9 +94,11 @@ fn units_for(cfg: &WeatherConfig) -> Units {
 // ── Shared HTTP client ─────────────────────────────────────────────────────────
 
 fn http_client() -> Result<reqwest::Client, String> {
+    // Tight per-request bounds; the whole lookup is additionally capped by
+    // WEATHER_DEADLINE in `get_weather`, which is the hard ceiling.
     reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(8))
-        .timeout(Duration::from_secs(12))
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(3))
         .user_agent("MIRA-weather/1.0")
         .build()
         .map_err(|e| format!("http client: {e}"))
@@ -107,9 +115,17 @@ pub async fn get_weather(cfg: &WeatherConfig, location: &str, days: u64) -> Resu
         return Err("no location given".to_string());
     }
     let client = http_client()?;
-    match cfg.provider.as_str() {
-        "openweathermap" => openweathermap(&client, cfg, loc, days).await,
-        _                => open_meteo(&client, cfg, loc, days).await, // default
+    // Bound the whole lookup (geocode + forecast). On elapse, a clear failure so
+    // the model reports it couldn't get the weather — never guesses.
+    let work = async {
+        match cfg.provider.as_str() {
+            "openweathermap" => openweathermap(&client, cfg, loc, days).await,
+            _                => open_meteo(&client, cfg, loc, days).await, // default
+        }
+    };
+    match tokio::time::timeout(WEATHER_DEADLINE, work).await {
+        Ok(result) => result,
+        Err(_) => Err("the weather service did not respond in time".to_string()),
     }
 }
 

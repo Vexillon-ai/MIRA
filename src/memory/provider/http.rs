@@ -323,7 +323,16 @@ impl MemoryProvider for HttpMemoryProvider {
         if self.read_only { return Ok(0); }
         let text = turn.user_msg.trim();
         if text.is_empty() { return Ok(0); }
-        let body = json!({ "user_id": turn.user_id, "text": text, "source": "mira" });
+        // Resolve + mirror the identity EXACTLY as the read path (search/catalog):
+        // send the configured identity value as `user_id`, and mirror it under the
+        // field name the service keys on (`username`/`email`). Writing
+        // `turn.user_id` raw with no mirror field left a service keyed on username
+        // unable to map the caller — every /add was refused 400 (user_id:unmapped).
+        let ident = self.pick_user_id(&turn.user_id, turn.username.as_deref(), turn.email.as_deref());
+        let mut body = json!({ "user_id": ident, "text": text, "source": "mira" });
+        if let Some(k) = self.identity_mirror_key() {
+            body.as_object_mut().unwrap().insert(k.into(), json!(ident));
+        }
         match self.caller.request("POST", "/add", Some(body)).await {
             Ok(r) if (200..300).contains(&r.status) => Ok(1),
             // 404 = the service's derived write-gate is closed; treat as a no-op,
@@ -621,7 +630,7 @@ mod tests {
         let (p, _) = provider(vec![], true);
         assert!(!p.capabilities().write);
         assert_eq!(p.ingest(&TurnRecord {
-            user_id: "t".into(), agent_id: None, thread_id: None, channel: "c".into(),
+            user_id: "t".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "c".into(),
             user_msg: "remember this".into(), assistant_msg: String::new(), conversation_id: None,
         }).await.unwrap(), 0, "read-only ingest is a no-op");
     }
@@ -631,7 +640,7 @@ mod tests {
         let (p, mock) = provider(vec![("/add", 200, json!({ "ok": true }))], false);
         assert!(p.capabilities().write);
         assert_eq!(p.ingest(&TurnRecord {
-            user_id: "tarek".into(), agent_id: None, thread_id: None, channel: "web".into(),
+            user_id: "tarek".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "web".into(),
             user_msg: "I prefer window seats".into(), assistant_msg: String::new(), conversation_id: None,
         }).await.unwrap(), 1);
         let (_, path, body) = mock.last.lock().unwrap().clone().unwrap();
@@ -641,7 +650,7 @@ mod tests {
         // write-gate closed → 404 → no-op, not fatal.
         let (p2, _) = provider(vec![("/add", 404, json!({ "reason": "no_acceptance_artifact" }))], false);
         assert_eq!(p2.ingest(&TurnRecord {
-            user_id: "t".into(), agent_id: None, thread_id: None, channel: "c".into(),
+            user_id: "t".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "c".into(),
             user_msg: "x".into(), assistant_msg: String::new(), conversation_id: None,
         }).await.unwrap(), 0);
     }
@@ -706,6 +715,33 @@ mod tests {
         let body2 = body2.unwrap();
         assert_eq!(body2["user_id"], "uuid-1");
         assert!(body2.get("username").is_none(), "no mirror key for the default id field");
+    }
+
+    #[tokio::test]
+    async fn write_sends_the_same_identity_as_read() {
+        // Regression (/add 400 user_id:unmapped): the write path must send
+        // the SAME resolved identity as the read path — the configured value as
+        // `user_id` AND mirrored under the field name the service keys on — not
+        // the raw canonical user_id with no mirror.
+        let mock = Arc::new(Mock {
+            last: Mutex::new(None),
+            get: std::collections::HashMap::new(),
+            post: [("/add".to_string(), HttpResp { status: 200, body: json!({ "ok": true }) })]
+                .into_iter().collect(),
+        });
+        let p = HttpMemoryProvider::new("ext-http", mock.clone(), false, MemoryLocality::Loopback, UserIdField::Username);
+        let n = p.ingest(&TurnRecord {
+            user_id: "uuid-9".into(), username: Some("tarek".into()), email: Some("tarek@example.com".into()),
+            agent_id: None, thread_id: None, channel: "web".into(),
+            user_msg: "I prefer window seats".into(), assistant_msg: String::new(), conversation_id: None,
+        }).await.unwrap();
+        assert_eq!(n, 1);
+        let (_, path, body) = mock.last.lock().unwrap().clone().unwrap();
+        let body = body.unwrap();
+        assert_eq!(path, "/add");
+        assert_eq!(body["user_id"], "tarek", "write sends the configured identity, not the UUID");
+        assert_eq!(body["username"], "tarek", "write mirrors identity under the configured field name");
+        assert_eq!(body["text"], "I prefer window seats");
     }
 
     #[test]

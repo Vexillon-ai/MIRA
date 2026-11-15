@@ -429,7 +429,7 @@ function PermLine({ label, children }: { label: string; children: React.ReactNod
   )
 }
 
-// ── Author (compose) a skill — T1d ─────────────────────────────────────────
+// ── Author (compose) a skill ─────────────────────────────────────────
 
 function AuthorModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient()

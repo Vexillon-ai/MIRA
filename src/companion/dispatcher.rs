@@ -157,6 +157,10 @@ pub struct CompanionDispatcher {
     // web send toward the missed-check-in counter and falsely escalate. `None`
     // → web sends stay confirmed (prior behaviour) when push isn't wired.
     web_push: Option<Arc<crate::notifications::web_push::WebPushService>>,
+    // The per-user MCP host registry, so a briefing can consult a
+    // user's CONNECTED (MCP) calendar — which is NOT synced into CalendarStore —
+    // the same way an interactive chat turn does. `None` → native snapshot only.
+    mcp: Option<Arc<crate::mcp::McpServerRegistry>>,
 }
 
 impl CompanionDispatcher {
@@ -181,7 +185,34 @@ impl CompanionDispatcher {
             tts: None,
             agent_audit: None,
             web_push: None,
+            mcp: None,
         }
+    }
+
+    /// Wire the per-user MCP registry so the daily briefing can pull a user's
+    /// connected (MCP) calendar events. `None` keeps the briefing on the native
+    /// `CalendarStore` snapshot only.
+    pub fn with_mcp(mut self, mcp: Option<Arc<crate::mcp::McpServerRegistry>>) -> Self {
+        self.mcp = mcp;
+        self
+    }
+
+    /// The user's CONNECTED (MCP) calendar tools — the gap the native snapshot
+    /// misses. Empty for a user with no MCP calendar (the briefing turn then stays
+    /// tool-less, exactly as before). Native/CalDAV/Google events are already in
+    /// the snapshot via `CalendarStore`, so those are deliberately NOT included.
+    fn user_mcp_calendar_tools(&self, user_id: &str) -> Vec<String> {
+        let Some(mcp) = &self.mcp else { return Vec::new(); };
+        let all = self.agent.tools.list_tools();
+        let Some(allowed) = mcp.allowed_tools_for(user_id, &all) else { return Vec::new(); };
+        allowed.into_iter()
+            .filter(|n| n.starts_with("mcp__"))
+            .filter(|n| {
+                let l = n.to_ascii_lowercase();
+                ["calendar", "event", "schedul", "appointment", "agenda"]
+                    .iter().any(|k| l.contains(k))
+            })
+            .collect()
     }
 
     // Wire the agent activity log so status-update check-ins can mention what
@@ -335,6 +366,9 @@ impl CompanionDispatcher {
             conversation_id: Some(conv_id.clone()),
             // Check-in/briefing pins its (empty) toolset — never adapt it.
             tools_flow_restricted: true,
+            // The cue is MIRA's own proactive prompt, not a user utterance —
+            // don't capture it to memory or ship it to an external store.
+            non_user_input: true,
             ..TurnContext::default()
         };
 
@@ -546,7 +580,9 @@ impl CompanionDispatcher {
                 channel:         Some(channel.clone()),
                 user_id:         Some(user_id.to_string()),
                 message:         Some(snippet(&assistant_text)),
-                category:        None,
+                // Mobile contract: a proactive check-in. `category` carries the
+                // sub-type; the envelope derives initiated_by="assistant" from it.
+                category:        Some("checkin".to_string()),
             });
         }
 
@@ -667,7 +703,13 @@ impl CompanionDispatcher {
         // Render the persona-aware cue. Names default to neutral
         // placeholders when the auth profile doesn't have them.
         let (agent_name, user_name) = self.resolve_names(user_id);
-        let cue = briefing::brief_cue(&snapshot, &agent_name, &user_name);
+        // A user's CONNECTED (MCP) calendar isn't in the native
+        // snapshot. When they have MCP calendar tools, give the briefing turn
+        // exactly those tools and ask it to fetch today's/tomorrow's events — the
+        // same source an interactive chat turn consults. Empty for everyone else,
+        // so their briefing stays tool-less and byte-for-byte as before.
+        let cal_tools = self.user_mcp_calendar_tools(user_id);
+        let cue = briefing::brief_cue(&snapshot, &agent_name, &user_name, &cal_tools);
 
         // From here on, the dispatch logic mirrors send_checkin —
         // pick channel, find-or-create thread, run the agent, persist
@@ -702,16 +744,20 @@ impl CompanionDispatcher {
             provider_request_context: Some(crate::providers::ProviderRequestContext {
                 session_id: Some(companion_provider_session_id(user_id)),
             }),
-            // Same restriction as check-ins — the briefing is content,
-            // not a tool-calling moment. Empty allowlist + the
-            // explicit "do not call tools" line in the cue.
-            allowed_tool_names: Some(Vec::new()),
+            // The briefing is content, not a tool-calling moment — EXCEPT the
+            // user's connected (MCP) calendar tools, so it can fetch events the
+            // native snapshot can't see. Empty for users without
+            // an MCP calendar → unchanged behaviour. The cue gates the fetch.
+            allowed_tool_names: Some(cal_tools.clone()),
             // Rehydrate the shared check-in/briefing thread from history (see
             // send_checkin) so restarts don't blank context and the briefing
             // sees the recent check-in/briefing exchange.
             conversation_id: Some(conv_id.clone()),
             // Check-in/briefing pins its (empty) toolset — never adapt it.
             tools_flow_restricted: true,
+            // The cue is MIRA's own proactive prompt, not a user utterance —
+            // don't capture it to memory or ship it to an external store.
+            non_user_input: true,
             ..TurnContext::default()
         };
 
@@ -790,7 +836,9 @@ impl CompanionDispatcher {
                 channel:         Some(channel.clone()),
                 user_id:         Some(user_id.to_string()),
                 message:         Some(snippet(&assistant_text)),
-                category:        None,
+                // Mobile contract: a proactive daily briefing. `category` carries
+                // the sub-type; the envelope derives initiated_by="assistant".
+                category:        Some("briefing".to_string()),
             });
         }
 
@@ -988,7 +1036,7 @@ impl CompanionDispatcher {
     // token (personal-first, shared-bot fallback for linked users), find
     // the Discord channel id from the user's most-recent inbound thread,
     // and POST the text via the REST API. Discord has no proactive voice
-    // path yet (D2/D3 are text-only), so this is text-only.
+    // path yet (those channels are text-only), so this is text-only.
     //     // Note the conversation key: Discord inbound records
     // `external_user_id = channel_id` (the DM or guild channel the user
     // talks to the bot in), which is exactly what `post_message` posts

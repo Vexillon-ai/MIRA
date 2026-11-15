@@ -109,7 +109,7 @@ pub async fn pre_hook_detailed(
     // merge. The router keeps the three statuses distinct — crucially, a store
     // that is DOWN surfaces as an explicit "unavailable" block here rather than
     // collapsing into an empty result the model reads as "no such memory" (the
-    // old `Err(_) => String::new()` bug). A.5's dropped graph-completeness claim
+    // old `Err(_) => String::new()` bug). The dropped graph-completeness claim
     // is now the earned `can_assert_complete` capability, enforced in the router.
     use crate::memory::provider::MemoryProvider;
     use crate::memory::provider::builtin::BuiltinMemoryProvider;
@@ -161,7 +161,7 @@ pub async fn pre_hook_via_router(
     MemoryContextResult { block: render_recalled(&recalled, include_unavailable), served, unavailable }
 }
 
-// A.7: softened, trust-tiered framing for recalled notes. Drops the old "facts
+// Softened, trust-tiered framing for recalled notes. Drops the old "facts
 // you personally hold / don't hedge" certainty claim; keeps per-line ages,
 // reconcile-against-now, and permission to aggregate; frames a missing fact as
 // "not recorded", never "false".
@@ -203,14 +203,14 @@ const RECALLED_SOURCED_HEADER: &str =
      source passage is present, just be clear about what it is:]\n";
 
 /// Render a [`RecalledMemory`](crate::memory::router::RecalledMemory) into the
-/// context block. Notes vs verified facts are tiered (A.7); an unavailable
+/// context block. Notes vs verified facts are tiered; an unavailable
 /// provider gets an explicit block so the model never reads "down" as "absent".
 fn render_recalled(r: &crate::memory::router::RecalledMemory, include_unavailable: bool) -> String {
     use crate::memory::provider::{Speaker, Trust};
     let now = Utc::now();
     let mut block = String::new();
 
-    // Three presentation tiers (memory SPI trust levels + A.7):
+    // Three presentation tiers (memory SPI trust levels):
     //   • verified — a citations-capable provider's attested rows (SPI `verified`).
     //   • sourced  — an external provider's UNverified findings (SPI `reported` /
     //                `unverified`): attributed, never asserted, never dropped.
@@ -377,7 +377,7 @@ pub fn post_hook(
     // The user explicitly asked to remember something this turn.
     explicit:  bool,
 ) {
-    // A.6: feed ONLY the user turn to the heuristic extractor. Its patterns are
+    // Feed ONLY the user turn to the heuristic extractor. Its patterns are
     // user-phrased ("my name is…", "i live in…"), so concatenating the assistant
     // turn made it emit "User lives in/is from X" from the assistant's own text.
     // The assistant turn is intentionally unused here.

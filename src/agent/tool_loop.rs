@@ -172,6 +172,14 @@ pub async fn run_tool_loop_with_provider_context(
     // there's nothing to discover.
     let mut active: Option<Vec<String>> = allowed_tool_names.map(|s| s.to_vec());
     let find_tools_on = expander.is_some() && active.is_some();
+    // The count of ORIGINAL (round-1) tools, before
+    // `find_tools` appends any. The round's tool-spec block is laid out as
+    // [original core…] + [find_tools] + [tools find_tools loaded this turn], so
+    // round 1's whole block (core + find_tools) stays a byte-identical PREFIX of
+    // every later round's block — the planner's prompt cache then survives a
+    // find_tools round. (Earlier the loaded tool sat BEFORE find_tools, shifting
+    // its bytes and busting the cache right after the small core set.)
+    let original_active_len = active.as_ref().map(|v| v.len()).unwrap_or(0);
     if find_tools_on {
         if let Some(a) = active.as_mut() {
             let name = crate::agent::tool_select::FIND_TOOLS_NAME;
@@ -230,10 +238,9 @@ pub async fn run_tool_loop_with_provider_context(
         // (rebuilt per round so tools loaded by `find_tools` appear next
         // round). Without this, providers send no `tools` field and the model
         // can only "describe" tool use in prose — which small local models do.
-        let mut tool_specs = build_tool_specs(tools, active.as_deref());
-        if find_tools_on {
-            tool_specs.push(crate::agent::tool_select::find_tools_spec());
-        }
+        let mut tool_specs = round_tool_specs(
+            tools, active.as_deref(), find_tools_on, original_active_len,
+        );
 
         let mut opts_with_tools = options.clone();
         if !tool_specs.is_empty() {
@@ -704,6 +711,32 @@ fn dedupe_tool_calls(calls: Vec<ToolCall>) -> Vec<ToolCall> {
 // advertised — free-chat mode. Each spec carries `{type:"function",
 // function:{name, description, parameters}}` which is what the chat
 // completions API expects.
+/// Assemble one round's tool-spec block. With `find_tools` on, lay it out as
+/// `[original core…] + find_tools + [tools find_tools loaded this turn]`, so the
+/// round-1 block (core + find_tools) stays a byte-identical PREFIX of every later
+/// round's block and the planner's prompt cache survives a find_tools round
+/// `original_active_len` is the core count captured before any
+/// find_tools append; `active` is the current list (core + find_tools name +
+/// loaded additions). Without find_tools, the specs just follow `active`.
+fn round_tool_specs(
+    tools: &ToolRegistry,
+    active: Option<&[String]>,
+    find_tools_on: bool,
+    original_active_len: usize,
+) -> Vec<crate::types::ToolSpec> {
+    if !find_tools_on {
+        return build_tool_specs(tools, active);
+    }
+    let set = active.unwrap_or(&[]);
+    let split = original_active_len.min(set.len());
+    // `set[split..]` begins with the FIND_TOOLS_NAME entry (a non-registered
+    // pseudo-tool) which build_tool_specs drops, followed by the real additions.
+    let mut specs = build_tool_specs(tools, Some(&set[..split]));
+    specs.push(crate::agent::tool_select::find_tools_spec());
+    specs.extend(build_tool_specs(tools, Some(&set[split..])));
+    specs
+}
+
 fn build_tool_specs(
     tools: &ToolRegistry,
     allowed: Option<&[String]>,
@@ -1633,6 +1666,31 @@ Nice to meet you!
         // The new tool is appended; the earlier entries keep their positions.
         assert_eq!(after, vec!["gamma", "alpha", "beta"], "appended, not inserted mid-list");
         assert_eq!(&after[..before.len()], &before[..], "earlier entries byte-stable");
+    }
+
+    #[test]
+    fn round_tool_specs_keeps_find_tools_prefix_stable_across_a_load() {
+        // Round 1 ships [core… , find_tools]; after find_tools loads a tool,
+        // round 2 must be [core…, find_tools, loaded] — the round-1 block a prefix
+        // of round 2, so the planner's prompt cache survives. (The old layout put
+        // the loaded tool BEFORE find_tools, shifting it and busting the cache.)
+        let mut r = ToolRegistry::new();
+        for n in ["now", "memory_get", "weather"] {
+            r.register(StubTool { name: n, reply: ToolResult::success("") });
+        }
+        let core_len = 2; // [now, memory_get]
+        // Round 1: active = core + find_tools name (weather not yet loaded).
+        let r1_active = vec!["now".to_string(), "memory_get".to_string(), crate::agent::tool_select::FIND_TOOLS_NAME.to_string()];
+        let r1: Vec<String> = round_tool_specs(&r, Some(&r1_active), true, core_len)
+            .iter().map(|s| s.function.name.clone()).collect();
+        assert_eq!(r1, vec!["now", "memory_get", crate::agent::tool_select::FIND_TOOLS_NAME]);
+        // Round 2: find_tools appended `weather` to the end of active.
+        let r2_active = vec!["now".to_string(), "memory_get".to_string(), crate::agent::tool_select::FIND_TOOLS_NAME.to_string(), "weather".to_string()];
+        let r2: Vec<String> = round_tool_specs(&r, Some(&r2_active), true, core_len)
+            .iter().map(|s| s.function.name.clone()).collect();
+        assert_eq!(r2, vec!["now", "memory_get", crate::agent::tool_select::FIND_TOOLS_NAME, "weather"]);
+        // The whole round-1 block is a byte-stable prefix of round 2.
+        assert_eq!(&r2[..r1.len()], &r1[..], "round-1 tool block must prefix round-2's");
     }
 
     #[test]

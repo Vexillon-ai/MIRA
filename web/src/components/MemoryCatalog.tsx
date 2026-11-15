@@ -131,20 +131,27 @@ export default function MemoryCatalog() {
           {subjects.length === 0 && !statusLine && (
             <li className={styles.empty}>No subjects{term ? ' match that filter' : ''}.</li>
           )}
-          {subjects.map((s) => (
-            <li key={s.name}>
-              <button
-                className={`${styles.subjectBtn} ${subject === s.name ? styles.subjectActive : ''}`}
-                onClick={() => setSubject(s.name)}
-              >
-                <span className={styles.subjectName}>{s.name}</span>
-                {s.aliases && s.aliases.length > 0 && (
-                  <span className={styles.aka}>{s.aliases[0]}</span>
-                )}
-                <ChevronRight size={14} className={styles.chevron} />
-              </button>
-            </li>
-          ))}
+          {subjects.map((s, i) => {
+            // Accept the generic `name`/`aliases` SPI shape OR the legacy
+            // `subject`/`titles` one some services still emit (otherwise the row
+            // renders as a blank line — no visible text).
+            const sname = s.name ?? s.subject ?? ''
+            const aka   = s.aliases ?? s.titles
+            return (
+              <li key={sname || i}>
+                <button
+                  className={`${styles.subjectBtn} ${subject === sname ? styles.subjectActive : ''}`}
+                  onClick={() => setSubject(sname)}
+                >
+                  <span className={styles.subjectName}>{sname}</span>
+                  {aka && aka.length > 0 && (
+                    <span className={styles.aka}>{aka[0]}</span>
+                  )}
+                  <ChevronRight size={14} className={styles.chevron} />
+                </button>
+              </li>
+            )
+          })}
         </ul>
 
         {/* Selected subject's held facts, with trust labels. */}

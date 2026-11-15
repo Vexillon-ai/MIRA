@@ -340,7 +340,7 @@ pub(crate) fn build_provider_for_alias(
 }
 
 /// Resolve one of MIRA's fixed internal `agent.llm_aliases` roles
-/// (`memory_extract`, `wiki_extract`, `rollup`) to a provider (A.8).
+/// (`memory_extract`, `wiki_extract`, `rollup`) to a provider.
 ///
 /// Precedence mirrors the guardian's `tier_model`: a configured alias wins; an
 /// empty/absent model falls back to the provider's `default_model` (via

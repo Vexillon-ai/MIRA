@@ -55,7 +55,7 @@ impl MemoryProvider for BuiltinMemoryProvider {
             read: true, write: true, forget: true, update: false, supersede: true,
             ingest_conversation: true, temporal: false, graph: false, citations: false,
             // The SQLite store retrieves by semantic top-k; it cannot enumerate a
-            // scope, so it never claims completeness (this is the A.5 fix as a
+            // scope, so it never claims completeness (this is the fix as a
             // capability rather than a hardcoded string).
             can_assert_complete: false,
             // No catalog surface: the store can't enumerate "what is held" by
@@ -95,7 +95,7 @@ impl MemoryProvider for BuiltinMemoryProvider {
     async fn ingest(&self, turn: &crate::memory::provider::TurnRecord) -> Result<usize, MemoryError> {
         // The built-in local (model-free) ingest: the heuristic extractor over
         // the user turn, user-scoped. The richer LLM extraction stays on the
-        // turn path (routed via the memory_extract alias, A.8) until B2 unifies
+        // turn path (routed via the memory_extract alias) until a later change unifies
         // the two under harness-driven ingest.
         // Harness ingest: allow all categories here (empty = allow all); the
         // capture-mode gate for harness ingest is applied by the caller.

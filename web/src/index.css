@@ -50,6 +50,23 @@
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
 
+  /* Spacing scale — used via var(--space-N). Previously undefined, which
+     silently zeroed every padding/gap/margin that referenced it. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Compatibility aliases — tokens referenced across pages (Email, MCP, Wiki,
+     Providers, Automations, Login, FailoverChainEditor) that were never defined,
+     so resolved to nothing. Map them onto the canonical tokens above. */
+  --bg-input:   var(--bg-overlay);
+  --bg-hover:   var(--bg-overlay);
+  --bg-primary: var(--bg-base);
+  --text:       var(--text-primary);
+
   /* Radius */
   --radius-sm:  4px;
   --radius-md:  8px;

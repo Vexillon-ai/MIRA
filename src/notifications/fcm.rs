@@ -208,6 +208,8 @@ impl FcmService {
         data.insert("title".into(),    env.title.clone().into());
         data.insert("body".into(),     env.body.clone().into());
         data.insert("sent_at".into(),  env.sent_at.to_string().into());
+        // Mobile contract: proactive marker. The sub-type stays in `category`.
+        data.insert("initiated_by".into(), env.initiated_by.clone().into());
         if let Some(c) = &env.conversation_id { data.insert("conversation_id".into(), c.clone().into()); }
         if let Some(u) = &env.url            { data.insert("url".into(),            u.clone().into()); }
 

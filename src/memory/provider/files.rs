@@ -285,7 +285,7 @@ mod tests {
     async fn ingest_retrieve_forget_round_trip() {
         let (p, _d) = provider();
         let turn = TurnRecord {
-            user_id: "alice".into(), agent_id: None, thread_id: None,
+            user_id: "alice".into(), username: None, email: None, agent_id: None, thread_id: None,
             channel: "web".into(), user_msg: "I love hiking in the mountains".into(),
             assistant_msg: String::new(), conversation_id: None,
         };
@@ -316,7 +316,7 @@ mod tests {
     async fn users_are_isolated() {
         let (p, _d) = provider();
         let turn = |u: &str, m: &str| TurnRecord {
-            user_id: u.into(), agent_id: None, thread_id: None, channel: "web".into(),
+            user_id: u.into(), username: None, email: None, agent_id: None, thread_id: None, channel: "web".into(),
             user_msg: m.into(), assistant_msg: String::new(), conversation_id: None,
         };
         p.ingest(&turn("alice", "alice keeps bees")).await.unwrap();
@@ -337,7 +337,7 @@ mod tests {
     async fn cross_user_forget_is_refused() {
         let (p, _d) = provider();
         let turn = TurnRecord {
-            user_id: "alice".into(), agent_id: None, thread_id: None, channel: "web".into(),
+            user_id: "alice".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "web".into(),
             user_msg: "alice secret note".into(), assistant_msg: String::new(), conversation_id: None,
         };
         p.ingest(&turn).await.unwrap();

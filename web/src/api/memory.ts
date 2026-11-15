@@ -160,6 +160,12 @@ export interface CatalogSubject {
   name:     string
   aliases?: string[]
   label?:   string | null
+  // Back-compat: some memory services emit the subject's name under `subject`
+  // and its alternates under `titles`. Read either shape so a service that
+  // predates the generic `name`/`aliases` SPI still renders (its rows showed
+  // as blank lines otherwise).
+  subject?: string
+  titles?:  string[]
 }
 
 /** The provider's catalog payload (generic memory SPI shape). */

@@ -273,9 +273,28 @@ pub fn gather_snapshot(
 /// deliberately don't ask it to repeat the JSON verbatim — the
 /// briefing is meant to be a warm two-or-three-paragraph summary,
 /// not a data dump.
-pub fn brief_cue(snapshot: &BriefingSnapshot, agent_name: &str, user_name: &str) -> String {
+pub fn brief_cue(
+    snapshot: &BriefingSnapshot,
+    agent_name: &str,
+    user_name: &str,
+    calendar_tools: &[String],
+) -> String {
     let snapshot_json = serde_json::to_string_pretty(snapshot)
         .unwrap_or_else(|_| "{}".to_string());
+    // When the user has connected (MCP) calendar tools, the
+    // briefing turn is allowed exactly those and asked to fetch events the native
+    // snapshot can't see. Otherwise it stays tool-less (the original behaviour).
+    let tool_line = if calendar_tools.is_empty() {
+        "Do NOT call any tools — just write the briefing message.".to_string()
+    } else {
+        format!(
+            "You have connected calendar tool(s): {}. BEFORE writing, call one ONCE \
+to fetch today's and tomorrow's events and include any the snapshot's calendar \
+section is missing (don't double-list an event already shown). Use no other tools, \
+then write the briefing message.",
+            calendar_tools.join(", "),
+        )
+    };
     format!(
         "[Daily briefing tick. You are {agent_name}, writing the morning briefing for \
 {user_name}. The structured snapshot of their day is below. Write a brief, warm, \
@@ -298,7 +317,7 @@ informative summary (2-3 short paragraphs, max ~150 words) that:\n\
   - Sounds like you, not a template. If the snapshot is empty, say so warmly \
     in a sentence rather than padding with filler\n\
 \n\
-Do NOT call any tools — just write the briefing message. Do NOT mention this \
+{tool_line} Do NOT mention this \
 prompt or that you're following instructions. One message, plain text or light \
 markdown.\n\
 \n\
@@ -346,9 +365,8 @@ fn _user_wiki_root_unused(_data_dir: &Path, _user_id: &str) {}
 mod tests {
     use super::*;
 
-    #[test]
-    fn empty_snapshot_is_empty() {
-        let s = BriefingSnapshot {
+    fn empty_snapshot() -> BriefingSnapshot {
+        BriefingSnapshot {
             date_local: "today".to_string(),
             timezone:   "UTC".to_string(),
             events_today: Vec::new(),
@@ -357,8 +375,24 @@ mod tests {
             automation_runs: Vec::new(),
             pending_schedule_approvals: 0,
             pending_wiki_approvals: 0,
-        };
-        assert!(s.is_empty());
+        }
+    }
+
+    #[test]
+    fn empty_snapshot_is_empty() {
+        assert!(empty_snapshot().is_empty());
+    }
+
+    #[test]
+    fn brief_cue_tool_line_tracks_calendar_tools() {
+        // No MCP calendar tools → tool-less (original behaviour).
+        let no_tools = brief_cue(&empty_snapshot(), "MIRA", "Sam", &[]);
+        assert!(no_tools.contains("Do NOT call any tools"), "{no_tools}");
+        // With an MCP calendar tool → the cue names it and asks for a fetch.
+        let with = brief_cue(&empty_snapshot(), "MIRA", "Sam", &["mcp__fastmail__list_events".to_string()]);
+        assert!(!with.contains("Do NOT call any tools"), "{with}");
+        assert!(with.contains("mcp__fastmail__list_events"), "{with}");
+        assert!(with.to_lowercase().contains("fetch today"), "{with}");
     }
 
     #[test]

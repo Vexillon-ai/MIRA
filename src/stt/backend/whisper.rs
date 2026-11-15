@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use crate::stt::backend::SttBackend;
@@ -166,6 +166,20 @@ impl SttBackend for WhisperBackend {
         let threads  = self.cfg.threads;
         let backend_id = self.id().to_string();
 
+        // An English-only model ("*.en") cannot transcribe another language and
+        // ignores the language hint — warn loudly so a "German comes out English"
+        // report points at the model, not the (working) hint. Fix: configure a
+        // multilingual model (drop the `.en`, e.g. `base`/`small`).
+        if self.cfg.model_id.ends_with(".en") {
+            if let Some(l) = language.as_deref().filter(|l| !l.is_empty() && *l != "en") {
+                warn!(
+                    "stt: language hint '{l}' requested but the internal model '{}' is English-only \
+                     (.en) — it will transcribe as English. Configure a multilingual model for '{l}'.",
+                    self.cfg.model_id,
+                );
+            }
+        }
+
         let (text, detected_lang) = tokio::task::spawn_blocking(move || -> Result<(String, Option<String>), SttError> {
             let mut state = ctx.create_state()
                 .map_err(|e| SttError::Upstream(format!("whisper state init: {e}")))?;
@@ -264,7 +278,7 @@ mod tests {
     fn under_data_dir_picks_default_model() {
         let dir = tempdir().unwrap();
         let cfg = WhisperConfig::under_data_dir(dir.path());
-        assert_eq!(cfg.model_id, "base.en");
+        assert_eq!(cfg.model_id, crate::stt::manifest::DEFAULT_MODEL_ID); // multilingual "base"
         assert!(cfg.models_dir.ends_with("stt/models"));
     }
 

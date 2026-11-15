@@ -89,6 +89,36 @@ pub struct Message {
     pub metadata:        Option<String>,
 }
 
+impl Message {
+    /// Mobile contract: who initiated
+    /// this message's turn. `"user"` for the user's own message, else
+    /// `"assistant"` (a reply or a proactive reach-out).
+    pub fn initiated_by(&self) -> &'static str {
+        match self.role {
+            MessageRole::User => "user",
+            _                 => "assistant",
+        }
+    }
+
+    /// Mobile contract: the message kind — `"reply" | "checkin" | "briefing"`
+    /// (open enum; clients treat an unknown value as a generic message). Derived
+    /// from the metadata markers proactive turns already carry
+    /// (`companion_checkin` / `companion_briefing`), or a structured `kind` key
+    /// if a future writer sets one; otherwise `"reply"`.
+    pub fn message_kind(&self) -> &'static str {
+        let Some(meta) = self.metadata.as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        else { return "reply"; };
+        if meta.get("companion_checkin").and_then(|b| b.as_bool()) == Some(true) { return "checkin"; }
+        if meta.get("companion_briefing").and_then(|b| b.as_bool()) == Some(true) { return "briefing"; }
+        match meta.get("kind").and_then(|k| k.as_str()) {
+            Some("checkin")  => "checkin",
+            Some("briefing") => "briefing",
+            _                => "reply",
+        }
+    }
+}
+
 // ── NewConversation ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]
@@ -152,4 +182,41 @@ pub struct NewMessage {
     pub model:           Option<String>,
     pub tool_calls:      Option<String>,
     pub metadata:        Option<String>,
+}
+
+#[cfg(test)]
+mod initiation_tests {
+    use super::*;
+
+    fn msg(role: MessageRole, metadata: Option<&str>) -> Message {
+        Message {
+            id: "m".into(), conversation_id: "c".into(), role,
+            content: "x".into(), content_type: "text".into(),
+            token_count: None, model: None, tool_calls: None, created_at: 0,
+            metadata: metadata.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn initiation_derivation() {
+        // User message → user / reply.
+        let m = msg(MessageRole::User, None);
+        assert_eq!(m.initiated_by(), "user");
+        assert_eq!(m.message_kind(), "reply");
+        // Normal assistant reply → assistant / reply.
+        let m = msg(MessageRole::Assistant, Some(r#"{"thinking":"…"}"#));
+        assert_eq!(m.initiated_by(), "assistant");
+        assert_eq!(m.message_kind(), "reply");
+        // Proactive markers map to the sub-type.
+        let m = msg(MessageRole::Assistant, Some(r#"{"companion_checkin":true}"#));
+        assert_eq!((m.initiated_by(), m.message_kind()), ("assistant", "checkin"));
+        let m = msg(MessageRole::Assistant, Some(r#"{"companion_briefing":true}"#));
+        assert_eq!((m.initiated_by(), m.message_kind()), ("assistant", "briefing"));
+        // A future structured `kind` key is honoured.
+        let m = msg(MessageRole::Assistant, Some(r#"{"kind":"briefing"}"#));
+        assert_eq!(m.message_kind(), "briefing");
+        // No/invalid metadata → reply.
+        assert_eq!(msg(MessageRole::Assistant, None).message_kind(), "reply");
+        assert_eq!(msg(MessageRole::Assistant, Some("not json")).message_kind(), "reply");
+    }
 }

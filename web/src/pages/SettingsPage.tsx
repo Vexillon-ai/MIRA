@@ -2935,12 +2935,15 @@ function MemoryProvidersEditor({ providers, set }: {
         // so render it as a fixed, non-editable row — no Remove, no toggles.
         if (p.id === 'builtin') {
           return (
-            <div key={i} style={{ ...card, display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-              <strong>builtin</strong>
-              <span className={styles.sectionDesc} style={{ margin: 0 }}>
-                Built-in SQLite store — always on, can't be removed. Configured by the
+            <div key={i} style={card}>
+              <div className={styles.sourceHeader}>
+                <strong>builtin</strong>
+                <span className={styles.badge}>Always on</span>
+              </div>
+              <p className={styles.sectionDesc} style={{ margin: 0 }}>
+                Built-in SQLite store. It can't be removed; configure it in the
                 Embeddings &amp; Recall sections below.
-              </span>
+              </p>
             </div>
           )
         }
@@ -2991,19 +2994,27 @@ function MemoryProvidersEditor({ providers, set }: {
           </div>
         )
       })}
-      <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-        <button type="button" className={styles.button}
-          onClick={() => add({ id: 'files', transport: 'in_process', mode: 'both', root: '~/.mira/data/memfiles' })}>+ Files store</button>
-        <button type="button" className={styles.button}
-          onClick={() => add({ id: 'external', transport: 'http', mode: 'harness', read_only: true, allow_non_loopback: false, base_url: 'https://memory.example.com/v1', api_key_file: '' })}>+ External memory service (HTTP)</button>
+      <div className={styles.addSource}>
+        <span className={styles.addSourceTitle}>Add a memory source</span>
+        <div className={styles.addSourceOptions}>
+          <button type="button" className={styles.addSourceOption}
+            onClick={() => add({ id: 'files', transport: 'in_process', mode: 'both', root: '~/.mira/data/memfiles' })}>
+            <span className={styles.addSourceLabel}>+ Files store</span>
+            <span className={styles.addSourceHint}>
+              Plain-text notes in a folder on this server, one note per file.
+            </span>
+          </button>
+          <button type="button" className={styles.addSourceOption}
+            onClick={() => add({ id: 'external', transport: 'http', mode: 'harness', read_only: true, allow_non_loopback: false, base_url: 'https://memory.example.com/v1', api_key_file: '' })}>
+            <span className={styles.addSourceLabel}>+ External memory service (HTTP)</span>
+            <span className={styles.addSourceHint}>
+              Any service that speaks MIRA's memory SPI. Facts carry a trust level
+              (verified / reported / unverified). Added read-only by default. See the
+              memory-provider SPI guide.
+            </span>
+          </button>
+        </div>
       </div>
-      <p className={styles.sectionDesc}>
-        <strong>External memory service (HTTP):</strong> any service that speaks MIRA's
-        provider-neutral memory SPI — add it as an HTTP provider with its base URL and an
-        API-key file. It serves facts with a trust level (verified / reported / unverified);
-        mark it read-only if MIRA shouldn't write to it. The built-in store always stays in
-        the read set. See the memory-provider SPI guide for the contract and setup.
-      </p>
     </div>
   )
 }
@@ -3075,7 +3086,7 @@ function MemoryTab({
     c === 'relationship' ? 'People & pets' : c.charAt(0).toUpperCase() + c.slice(1)
   const captureMode = str('memory.auto_extract.mode', 'off')
   const checkRow: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 'var(--space-3)' }
-  const checkItem: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: 'var(--font-size-sm)' }
+  const checkItem: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px' }
   // Sleep-like consolidator manual trigger (admin-only endpoint). Local state.
   // The button calls /api/admin/consolidator/run-now which runs all three
   // phases for every user regardless of the per-phase config flags below —
@@ -3422,7 +3433,7 @@ function MemoryTab({
               {consRunning ? 'Running…' : 'Run now'}
             </button>
             {consResult && (
-              <span style={{ color: 'var(--color-text-muted)', fontSize: 'var(--font-size-sm)' }}>
+              <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
                 Last run: {consResult.users_processed} user(s) ·{' '}
                 {consResult.contradictions_groups} contradictions ({consResult.contradictions_edges_closed} edges) ·{' '}
                 {consResult.entities_merged} entities merged ({consResult.entity_edges_repointed} edges re-pointed) ·{' '}

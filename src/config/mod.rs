@@ -2096,7 +2096,7 @@ impl Default for AutoExtractConfig {
     }
 }
 
-// Default `"off"` (A.6): a fresh install does NOT auto-capture memory until the
+// Default `"off"`: a fresh install does NOT auto-capture memory until the
 // operator opts in. This is the cautious default — the `"llm"` extractor sends
 // turn content to the configured model (which may be an external provider), and
 // the `"heuristic"` path, while local, still writes inferred facts without
@@ -2587,7 +2587,10 @@ pub struct ToolSelectionConfig {
 
 fn default_tool_selection_mode() -> String { "all".to_string() }
 fn default_core_tools() -> Vec<String> {
-    vec!["memory_*".to_string(), "wiki_*".to_string(), "now".to_string()]
+    // `weather` is always-on: a weather/forecast question must
+    // reach the tool on the first round, not wait on a `find_tools` hop that the
+    // model sometimes skips. One small schema, and it stays in the cached prefix.
+    vec!["memory_*".to_string(), "wiki_*".to_string(), "now".to_string(), "weather".to_string()]
 }
 fn default_tool_top_k() -> usize { 8 }
 fn default_tool_min_similarity() -> f32 { 0.30 }
@@ -4265,7 +4268,7 @@ fn default_stt_backend()              -> String { "internal".to_string() }
 fn default_stt_route()                -> String { String::new() }
 fn default_stt_max_audio_seconds()    -> u32    { 300 }
 fn default_stt_request_timeout()      -> u64    { 60 }
-fn default_stt_internal_model()       -> String { "base.en".to_string() }
+fn default_stt_internal_model()       -> String { crate::stt::manifest::DEFAULT_MODEL_ID.to_string() } // multilingual "base"
 // OpenAI's hosted Whisper transcription model id — `whisper-1` is the only
 // one publicly available right now; if that changes, the user can override
 // in the Voice settings tab.

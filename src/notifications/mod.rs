@@ -88,6 +88,11 @@ pub struct NotificationEnvelope {
     pub url:             Option<String>,
     /// Milliseconds since the Unix epoch when the envelope was built.
     pub sent_at:         i64,
+    /// Mobile contract: "user" | "assistant". "assistant" marks a proactive
+    /// (MIRA-initiated) message; the proactive sub-type is carried in
+    /// `category` ("checkin" | "briefing"). The legacy `kind` below is the
+    /// notification EVENT class, unchanged — do not read the sub-type from it.
+    pub initiated_by:    String,
 
     // ── legacy SSE fields (kept for the existing web client) ───────────
     pub kind:            NotificationKind,
@@ -151,6 +156,14 @@ impl Notification {
         let severity = if is_care { "high" } else { "normal" };
         let category = self.category.clone().unwrap_or_else(|| default_category.to_string());
         let url = self.conversation_id.as_ref().map(|c| format!("/chat/{c}"));
+        // Mobile contract: "assistant" marks a MIRA-initiated (proactive) push —
+        // a check-in/briefing, a care/wellbeing reach-out, or a system/guardian
+        // alert; a normal reply/inbound push is "user"-initiated (the user's turn
+        // drove it). The proactive sub-type stays in `category`.
+        let initiated_by = if is_care
+            || matches!(category.as_str(), "checkin" | "briefing")
+            || matches!(self.kind, NotificationKind::SystemDegraded | NotificationKind::GuardianAlert)
+        { "assistant" } else { "user" };
 
         NotificationEnvelope {
             r#type:          r#type.to_string(),
@@ -160,6 +173,7 @@ impl Notification {
             body,
             url,
             sent_at:         chrono::Utc::now().timestamp_millis(),
+            initiated_by:    initiated_by.to_string(),
             kind:            self.kind.clone(),
             conversation_id: self.conversation_id.clone(),
             channel:         self.channel.clone(),
@@ -194,4 +208,30 @@ impl NotificationBus {
 
 impl Default for NotificationBus {
     fn default() -> Self { Self::new() }
+}
+
+#[cfg(test)]
+mod initiation_tests {
+    use super::*;
+
+    fn notif(kind: NotificationKind, category: Option<&str>) -> Notification {
+        Notification { kind, category: category.map(|s| s.to_string()), ..Default::default() }
+    }
+
+    #[test]
+    fn envelope_initiated_by_marks_proactive() {
+        // Normal reply/inbound → user-initiated.
+        assert_eq!(notif(NotificationKind::ConversationUpdated, None).to_envelope().initiated_by, "user");
+        assert_eq!(notif(NotificationKind::InboundMessage, None).to_envelope().initiated_by, "user");
+        // Proactive companion sub-types → assistant, and category carries them.
+        let e = notif(NotificationKind::ConversationUpdated, Some("checkin")).to_envelope();
+        assert_eq!(e.initiated_by, "assistant");
+        assert_eq!(e.category, "checkin");
+        let e = notif(NotificationKind::ConversationUpdated, Some("briefing")).to_envelope();
+        assert_eq!((e.initiated_by.as_str(), e.category.as_str()), ("assistant", "briefing"));
+        // Care/wellbeing + system/guardian are MIRA-initiated too.
+        assert_eq!(notif(NotificationKind::ConversationUpdated, Some("wellbeing")).to_envelope().initiated_by, "assistant");
+        assert_eq!(notif(NotificationKind::SystemDegraded, None).to_envelope().initiated_by, "assistant");
+        assert_eq!(notif(NotificationKind::GuardianAlert, None).to_envelope().initiated_by, "assistant");
+    }
 }
