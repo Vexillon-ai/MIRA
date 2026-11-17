@@ -119,6 +119,62 @@ impl HttpMemoryProvider {
     }
 }
 
+/// Build the `/ingest` `texts` array for a completed turn (the service's whole-turn
+/// ingest): the user's message, then one `tool`-speaker element per successful
+/// tool the turn ran (chronological — tools ran before the final reply), then
+/// MIRA's reply — each with its `speaker` role so the service labels facts by who said
+/// them. `athena_refs` on the assistant element lists the `provenance.fact_id`s of
+/// service-served facts this reply repeats, so the service's echo guard neither
+/// re-stores them nor counts them as new confirmation.
+///
+/// Field names match the service's accepted set:
+/// the per-turn fields are a CLOSED set — `speaker`, `text`, `source`, `at`,
+/// `athena_refs` — and an unlisted key is refused by name;
+/// `speaker` is one of `user|assistant|tool`. We send `speaker`+`text` (+
+/// `athena_refs` on the reply when non-empty, + `source` on a tool element when
+/// the tool has a known data source) and deliberately OMIT `at`: MIRA has no real
+/// per-message timestamps, and a stamp the service reads as the future is strictly
+/// refused, so letting the service record its receive time is both honest (receive
+/// time ≈ the live turn time) and safe from clock skew. The batch `source` is set
+/// by the caller; a tool element's own `source` is the thing the tool read from,
+/// which the service shows as "found in <source>" — and is REQUIRED on a tool turn
+/// (the service refuses one with none), so a tool with no mapped source gets a true
+/// per-tool fallback here rather than being sent sourceless.
+fn build_ingest_texts(turn: &TurnRecord, athena_refs: &[String]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let user = turn.user_msg.trim();
+    if !user.is_empty() {
+        out.push(json!({ "speaker": "user", "text": user }));
+    }
+    // Tool turns, in call order, between the user and the reply. Each is its own
+    // `tool`-speaker episode and ALWAYS carries a `source`: the mapped provenance
+    // when known, else a true per-tool fallback ("the <tool> tool"), because a
+    // tool turn with no source is refused and would fail the whole batch.
+    for t in &turn.tool_turns {
+        let text = t.text.trim();
+        if text.is_empty() { continue; }
+        let source = t.source.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let tool = t.tool.trim();
+                if tool.is_empty() { "a MIRA tool".to_string() } else { format!("the {tool} tool") }
+            });
+        out.push(json!({ "speaker": "tool", "text": text, "source": source }));
+    }
+    let asst = turn.assistant_msg.trim();
+    if !asst.is_empty() {
+        let mut el = json!({ "speaker": "assistant", "text": asst });
+        // Non-empty fact ids only — the service refuses an empty-string ref (a
+        // reference naming nothing). Absent is fine; empty array would be too.
+        let refs: Vec<&str> = athena_refs.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        if !refs.is_empty() {
+            el.as_object_mut().unwrap().insert("athena_refs".into(), json!(refs));
+        }
+        out.push(el);
+    }
+    out
+}
+
 /// Map a wire fact into a `MemoryFact`. Trust `"verified"` → Verified (the
 /// service attests it); `"reported"` → Reported; anything else → Unverified (a
 /// user-stated write is never verified). The human `trust_label` and the
@@ -285,12 +341,20 @@ impl MemoryProvider for HttpMemoryProvider {
             return Err(MemoryError::InvalidRequest(
                 resp.body.get("reason").and_then(|r| r.as_str()).unwrap_or("bad request").to_string()));
         }
+        // 403 is ITS OWN class (SPI contract): authenticated but not permitted
+        // for this request — NOT absent, NOT unavailable. The credential is right,
+        // the scope is not, so retrying or re-keying won't help; surface it plainly.
+        if resp.status == 403 {
+            return Ok(MemoryRetrieval::Forbidden {
+                reason: Some(resp.body.get("reason").and_then(|r| r.as_str())
+                    .unwrap_or("not permitted for this request").to_string()) });
+        }
         if !(200..300).contains(&resp.status) {
             let reason = resp.body.get("reason").and_then(|r| r.as_str()).map(str::to_string)
                 .unwrap_or_else(|| match resp.status {
-                    401 | 403 => "auth rejected (check the API key)".into(),
-                    404       => "endpoint not found".into(),
-                    s         => format!("service error (HTTP {s})"),
+                    401 => "auth rejected (check the API key)".into(),
+                    404 => "endpoint not found".into(),
+                    s   => format!("service error (HTTP {s})"),
                 });
             return Ok(MemoryRetrieval::Unavailable { reason });
         }
@@ -321,24 +385,33 @@ impl MemoryProvider for HttpMemoryProvider {
 
     async fn ingest(&self, turn: &TurnRecord) -> Result<usize, MemoryError> {
         if self.read_only { return Ok(0); }
-        let text = turn.user_msg.trim();
-        if text.is_empty() { return Ok(0); }
-        // Resolve + mirror the identity EXACTLY as the read path (search/catalog):
-        // send the configured identity value as `user_id`, and mirror it under the
-        // field name the service keys on (`username`/`email`). Writing
-        // `turn.user_id` raw with no mirror field left a service keyed on username
-        // unable to map the caller — every /add was refused 400 (user_id:unmapped).
+        // WHOLE-TURN INGEST: send the user's turn AND MIRA's own reply
+        // to POST /ingest with speaker roles — not just the user's text to /add — so
+        // The service distils facts from both sides and labels them by speaker. Only
+        // user-originated content and MIRA's replies reach here; the `non_user_input`
+        // gate blocks scheduler/system/proactive turns upstream. Identity is resolved
+        // + mirrored exactly as the read path (search/catalog).
+        //
+        // `athena_refs`: the `provenance.fact_id`s of service-served facts MIRA's
+        // reply repeats (computed by the turn path and carried on `echo_refs`), so
+        // the service's echo guard skips them. (It's a belt-and-suspenders signal —
+        // the service's DERIVED channel content-matches regardless.)
         let ident = self.pick_user_id(&turn.user_id, turn.username.as_deref(), turn.email.as_deref());
-        let mut body = json!({ "user_id": ident, "text": text, "source": "mira" });
+        let texts = build_ingest_texts(turn, &turn.echo_refs);
+        if texts.is_empty() { return Ok(0); }
+        // `source` is PROVENANCE shown to the user (never identity, never the agent
+        // — the agent is resolved from the API key). Keep it true, not a constant.
+        let source = format!("a MIRA conversation ({})", turn.channel);
+        let mut body = json!({ "user_id": ident, "source": source, "texts": texts });
         if let Some(k) = self.identity_mirror_key() {
             body.as_object_mut().unwrap().insert(k.into(), json!(ident));
         }
-        match self.caller.request("POST", "/add", Some(body)).await {
+        match self.caller.request("POST", "/ingest", Some(body)).await {
             Ok(r) if (200..300).contains(&r.status) => Ok(1),
             // 404 = the service's derived write-gate is closed; treat as a no-op,
             // never fatal to the turn.
             Ok(r) if r.status == 404 => { tracing::warn!("{} write-gate closed (404): {}", self.id, r.body); Ok(0) }
-            Ok(r) => Err(MemoryError::Backend(format!("add HTTP {}", r.status))),
+            Ok(r) => Err(MemoryError::Backend(format!("ingest HTTP {}", r.status))),
             Err(e) => Err(MemoryError::Unavailable(e.to_string())),
         }
     }
@@ -608,15 +681,22 @@ mod tests {
 
     #[tokio::test]
     async fn auth_and_notfound_statuses_are_unavailable_not_absent() {
-        // A bad key (401/403), a wrong path (404) or a bad gateway (502) must
-        // never read as "the user has no memories".
-        for code in [401u16, 403, 404, 502] {
+        // A bad key (401), a wrong path (404) or a bad gateway (502) must never
+        // read as "the user has no memories" — they map to Unavailable. (403 is
+        // its OWN class, Forbidden — covered separately.)
+        for code in [401u16, 404, 502] {
             let (p, _) = provider(vec![("/search", code, serde_json::json!({}))], true);
             assert!(matches!(
                 p.retrieve(&MemoryQuery::new("t", "x", 5)).await.unwrap(),
                 MemoryRetrieval::Unavailable { .. }),
                 "HTTP {code} must map to Unavailable, not Absent");
         }
+        // 403 is Forbidden, never Unavailable and never Absent.
+        let (p, _) = provider(vec![("/search", 403u16, serde_json::json!({}))], true);
+        assert!(matches!(
+            p.retrieve(&MemoryQuery::new("t", "x", 5)).await.unwrap(),
+            MemoryRetrieval::Forbidden { .. }),
+            "HTTP 403 must map to Forbidden");
     }
 
     #[tokio::test]
@@ -632,27 +712,114 @@ mod tests {
         assert_eq!(p.ingest(&TurnRecord {
             user_id: "t".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "c".into(),
             user_msg: "remember this".into(), assistant_msg: String::new(), conversation_id: None,
+            echo_refs: vec![],            tool_turns: vec![],
         }).await.unwrap(), 0, "read-only ingest is a no-op");
     }
 
     #[tokio::test]
-    async fn writable_add_posts_and_gate_404_is_noop() {
-        let (p, mock) = provider(vec![("/add", 200, json!({ "ok": true }))], false);
+    async fn ingest_posts_whole_turn_to_ingest_and_gate_404_is_noop() {
+        // Whole-turn ingest: the whole turn (user + assistant) goes to POST /ingest with
+        // speaker roles, not just the user's text to /add.
+        let (p, mock) = provider(vec![("/ingest", 200, json!({ "ok": true }))], false);
         assert!(p.capabilities().write);
         assert_eq!(p.ingest(&TurnRecord {
             user_id: "tarek".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "web".into(),
-            user_msg: "I prefer window seats".into(), assistant_msg: String::new(), conversation_id: None,
+            user_msg: "I prefer window seats".into(),
+            assistant_msg: "Noted — you prefer window seats.".into(), conversation_id: None,
+            echo_refs: vec![],            tool_turns: vec![],
         }).await.unwrap(), 1);
         let (_, path, body) = mock.last.lock().unwrap().clone().unwrap();
-        assert_eq!(path, "/add");
-        assert_eq!(body.unwrap()["text"], "I prefer window seats");
+        assert_eq!(path, "/ingest");
+        let body = body.unwrap();
+        let texts = body["texts"].as_array().unwrap();
+        assert_eq!(texts.len(), 2, "user + assistant");
+        assert_eq!(texts[0]["speaker"], "user");
+        assert_eq!(texts[0]["text"], "I prefer window seats");
+        assert_eq!(texts[1]["speaker"], "assistant");
+        assert_eq!(texts[1]["text"], "Noted — you prefer window seats.");
+        assert_eq!(body["source"], "a MIRA conversation (web)"); // true provenance, not a constant
+        assert!(texts[0].get("at").is_none(), "at is omitted (service records receive time)");
 
         // write-gate closed → 404 → no-op, not fatal.
-        let (p2, _) = provider(vec![("/add", 404, json!({ "reason": "no_acceptance_artifact" }))], false);
+        let (p2, _) = provider(vec![("/ingest", 404, json!({ "reason": "no_acceptance_artifact" }))], false);
         assert_eq!(p2.ingest(&TurnRecord {
             user_id: "t".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "c".into(),
             user_msg: "x".into(), assistant_msg: String::new(), conversation_id: None,
+            echo_refs: vec![],            tool_turns: vec![],
         }).await.unwrap(), 0);
+    }
+
+    #[test]
+    fn build_ingest_texts_shapes_turn_and_attaches_echo_refs() {
+        let turn = TurnRecord {
+            user_id: "tarek".into(), username: None, email: None, agent_id: None, thread_id: None,
+            channel: "web".into(),
+            user_msg: "  who is Ada Lovelace  ".into(),
+            assistant_msg: "Ada Lovelace was a mathematician.".into(),
+            conversation_id: None,
+            echo_refs: vec![],
+            tool_turns: vec![],
+        };
+        // No echo refs → `text`/`speaker` only, no athena_refs, no `at`.
+        let t = build_ingest_texts(&turn, &[]);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0]["speaker"], "user");
+        assert_eq!(t[0]["text"], "who is Ada Lovelace"); // trimmed
+        assert!(t[0].get("at").is_none());
+        assert_eq!(t[1]["speaker"], "assistant");
+        assert!(t[1].get("athena_refs").is_none());
+        // Echo refs (provenance.fact_id from a served fact) attach to the reply.
+        let t = build_ingest_texts(&turn, &["lt_a_real_fact_id".to_string(), "  ".to_string()]);
+        assert_eq!(t[1]["athena_refs"], json!(["lt_a_real_fact_id"])); // empty-string ref dropped
+        // User-only turn → one element, no assistant.
+        let mut u = turn.clone(); u.assistant_msg = String::new();
+        assert_eq!(build_ingest_texts(&u, &[]).len(), 1);
+    }
+
+    #[test]
+    fn build_ingest_texts_emits_tool_turns_between_user_and_assistant() {
+        use crate::memory::provider::ToolTurn;
+        let turn = TurnRecord {
+            user_id: "tarek".into(), username: None, email: None, agent_id: None, thread_id: None,
+            channel: "web".into(),
+            user_msg: "what's on my calendar and the weather?".into(),
+            assistant_msg: "You have a dentist at 9, and it's sunny.".into(),
+            conversation_id: None,
+            echo_refs: vec![],
+            tool_turns: vec![
+                ToolTurn { tool: "calendar_list_events".into(), text: "Mon 09:00 dentist".into(),
+                           source: Some("your calendar".into()) },
+                // A tool with no mapped source → a true per-tool fallback source
+                // (the service REQUIRES `source` on a tool turn; sourceless is refused).
+                ToolTurn { tool: "math_eval".into(), text: "42".into(), source: None },
+                // Empty-text tool turn → dropped entirely.
+                ToolTurn { tool: "noop".into(), text: "   ".into(), source: Some("x".into()) },
+            ],
+        };
+        let t = build_ingest_texts(&turn, &[]);
+        // user, calendar, math, assistant — the empty one is dropped.
+        assert_eq!(t.len(), 4);
+        assert_eq!(t[0]["speaker"], "user");
+        assert_eq!(t[1]["speaker"], "tool");
+        assert_eq!(t[1]["text"], "Mon 09:00 dentist");
+        assert_eq!(t[1]["source"], "your calendar");
+        assert_eq!(t[2]["speaker"], "tool");
+        assert_eq!(t[2]["text"], "42");
+        // Required source: fallback names the tool, never omitted.
+        assert_eq!(t[2]["source"], "the math_eval tool");
+        assert_eq!(t[3]["speaker"], "assistant");
+        // Tool turns carry no `at` (same as the human sides).
+        assert!(t[1].get("at").is_none());
+    }
+
+    #[tokio::test]
+    async fn search_403_is_forbidden_not_absent_or_unavailable() {
+        // 403 is its own class: authenticated but not permitted. Never absent, never unavailable.
+        let (p, _) = provider(vec![("/search", 403, json!({ "reason": "outside this agent's scope" }))], true);
+        match p.retrieve(&MemoryQuery::new("t", "x", 5)).await.unwrap() {
+            MemoryRetrieval::Forbidden { reason } => assert_eq!(reason.as_deref(), Some("outside this agent's scope")),
+            other => panic!("expected Forbidden, got {other:?}"),
+        }
     }
 
     // user_id_field — the provider sends the configured identity (with a UUID
@@ -726,7 +893,7 @@ mod tests {
         let mock = Arc::new(Mock {
             last: Mutex::new(None),
             get: std::collections::HashMap::new(),
-            post: [("/add".to_string(), HttpResp { status: 200, body: json!({ "ok": true }) })]
+            post: [("/ingest".to_string(), HttpResp { status: 200, body: json!({ "ok": true }) })]
                 .into_iter().collect(),
         });
         let p = HttpMemoryProvider::new("ext-http", mock.clone(), false, MemoryLocality::Loopback, UserIdField::Username);
@@ -734,14 +901,15 @@ mod tests {
             user_id: "uuid-9".into(), username: Some("tarek".into()), email: Some("tarek@example.com".into()),
             agent_id: None, thread_id: None, channel: "web".into(),
             user_msg: "I prefer window seats".into(), assistant_msg: String::new(), conversation_id: None,
+            echo_refs: vec![],            tool_turns: vec![],
         }).await.unwrap();
         assert_eq!(n, 1);
         let (_, path, body) = mock.last.lock().unwrap().clone().unwrap();
         let body = body.unwrap();
-        assert_eq!(path, "/add");
+        assert_eq!(path, "/ingest");
         assert_eq!(body["user_id"], "tarek", "write sends the configured identity, not the UUID");
         assert_eq!(body["username"], "tarek", "write mirrors identity under the configured field name");
-        assert_eq!(body["text"], "I prefer window seats");
+        assert_eq!(body["texts"][0]["text"], "I prefer window seats");
     }
 
     #[test]

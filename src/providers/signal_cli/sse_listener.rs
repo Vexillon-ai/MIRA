@@ -372,6 +372,22 @@ impl SignalSseListener {
         );
         let mut turn_ctx = TurnContext { inject_tool_args: inject, ..TurnContext::default() };
 
+        // `/new` | `/clear` | `/reset` → fresh thread + confirm, no LLM turn.
+        if crate::history::is_conversation_reset_command(&effective_text) {
+            let _ = cancel_tx.send(()); // stop the typing indicator
+            if let Some(hist) = self.history.as_ref() {
+                if let Err(e) = hist.reset_external_conversation(
+                    &self.owner_user_id, "signal", &msg.sender,
+                    Some(&truncate_title(&effective_text)),
+                ) { warn!("signal /new: reset failed: {}", e); }
+            }
+            let client = SignalCliClient::new(self.port, self.phone_number.clone());
+            self.dispatch_signal_reply(&client, &msg.sender,
+                "Fresh start — I've cleared this conversation's context. What can I help you with?",
+                false).await;
+            return;
+        }
+
         // Resolve the persisted thread up-front so the agent can rehydrate this
         // conversation's context on a cache miss (restart / idle eviction); the
         // record-turn below reuses the same id. The owner (MIRA user) owns the

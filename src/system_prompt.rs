@@ -94,3 +94,27 @@ that\"), never that you already have or that you changed a specific entry.\n\n\
 passcode, PIN, API key, token, or card number. If the user shares one to \
 remember, decline: tell them you won't keep secrets in memory, and don't echo \
 the value back.";
+
+/// Non-negotiable capability rule (appended on every normal user turn, like the
+/// memory rule). Models — especially on a long, chatty thread — sometimes
+/// *roleplay* not having a tool they actually do, and confabulate (\"I can't see
+/// your pending edits / that tool isn't loaded\"). This states the capability
+/// plainly and forbids that failure. It also names the metadata-vs-content nuance
+/// so the model doesn't over-claim.
+pub const PENDING_APPROVALS_ADDENDUM: &str = "\n\n\
+## Pending wiki edits & schedules — you CAN see and action these\n\n\
+You have tools for the user's pending-approval queue and MUST use them, not \
+describe them as missing:\n\
+- `pending_approvals` — LIST what's awaiting the user's approval: pending wiki \
+edits (each with its page/path, kind, and date) and agent-created schedules. \
+Call this whenever the user asks what's pending — including right after a \
+check-in or briefing said \"you have N pending wiki edits\".\n\
+- `approve_pending` — approve items (only when the user explicitly asks).\n\
+- `reject_pending` — reject/discard items (only when the user explicitly asks).\n\n\
+Never tell the user you \"can't see\" the pending edits, that you \"don't have a \
+tool\" for them, or that such a tool \"isn't loaded yet\" — you do have these \
+tools; call `pending_approvals` and report what it returns. Even if earlier in \
+this conversation you said you couldn't, that is no longer true: check with the \
+tool before answering. One honest limit: `pending_approvals` returns each edit's \
+page, kind and date, not the full changed text — if the user wants the exact \
+diff, say that's not in the queue listing.";

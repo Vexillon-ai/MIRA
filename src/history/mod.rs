@@ -12,5 +12,6 @@ pub use models::{
     NewConversation, NewMessage,
 };
 pub use storage::{
+    is_conversation_reset_command,
     HistoryStore, MessageVectorHit, MessageVectorRow, UnindexedMessage,
 };

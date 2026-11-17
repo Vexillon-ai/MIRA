@@ -335,6 +335,7 @@ mod tests {
         p.ingest(&TurnRecord {
             user_id: "alice".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "web".into(),
             user_msg: "I love hiking".into(), assistant_msg: String::new(), conversation_id: None,
+            echo_refs: vec![],            tool_turns: vec![],
         }).await.unwrap();
         let (tool, args) = mock.last.lock().unwrap().clone().unwrap();
         assert_eq!(tool, "add_memory");

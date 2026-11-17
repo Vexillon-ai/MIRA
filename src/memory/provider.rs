@@ -173,7 +173,28 @@ pub enum MemoryRetrieval {
     /// from `Absent` — the model must NOT read it as "you have no such memory";
     /// the reason is surfaced so it can refine or ask.
     Withheld { reason: Option<String> },
+    /// The caller is authenticated but NOT permitted for this request (HTTP 403
+    /// from an SPI service — e.g. a request outside the agent's granted scope).
+    /// Its OWN class, per the SPI contract: NOT `Absent` ("you have no such
+    /// memory") and NOT `Unavailable` ("the store is down") — the credential is
+    /// right, the permission is not. Surfaced as "not permitted here".
+    Forbidden { reason: Option<String> },
     Unavailable { reason: String },
+}
+
+/// One tool execution within a turn, carried so a whole-turn ingest can send it
+/// as its own `tool`-speaker element (the data the assistant acted on, labelled
+/// by where it came from). `text` is the tool's result (clamped, non-empty);
+/// `source` is the provenance a service shows as "found in <source>" (None when
+/// the tool has no external data source — the element then omits `source`).
+#[derive(Debug, Clone)]
+pub struct ToolTurn {
+    /// The tool that ran — kept for provenance mapping/debugging, not sent as-is.
+    pub tool: String,
+    /// The tool's result text that a service distils (clamped, never empty).
+    pub text: String,
+    /// Where the tool read from, when known; `None` omits `source` on the wire.
+    pub source: Option<String>,
 }
 
 /// A completed turn handed to `ingest` (spec: `ingest_turn`).
@@ -193,6 +214,16 @@ pub struct TurnRecord {
     pub user_msg: String,
     pub assistant_msg: String,
     pub conversation_id: Option<String>,
+    /// External `fact_id`s this turn's reply repeats from facts the memory
+    /// service served this turn — so a whole-turn ingest can mark the assistant
+    /// element (`athena_refs`) and the service's echo guard skips it.
+    /// Empty when the reply echoed nothing, or for providers that don't serve ids.
+    pub echo_refs: Vec<String>,
+    /// Successful tool executions in this turn, in call order, so a whole-turn
+    /// ingest can send each as a `tool`-speaker element between the user and the
+    /// assistant reply. Empty for a turn that used no tools (or for providers
+    /// that ingest only the two human-visible sides).
+    pub tool_turns: Vec<ToolTurn>,
 }
 
 /// What to forget.

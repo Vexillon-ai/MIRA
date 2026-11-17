@@ -37,6 +37,9 @@ pub async fn run_read_contract(p: &dyn MemoryProvider) -> Result<(), String> {
         Ok(MemoryRetrieval::Facts(_)) => return Err("fresh user returned facts".into()),
         Ok(MemoryRetrieval::Unavailable { reason }) =>
             return Err(format!("healthy provider returned Unavailable for a fresh user: {reason}")),
+        // Forbidden (403) is a permission state, not a healthy fresh-user answer.
+        Ok(MemoryRetrieval::Forbidden { reason }) =>
+            return Err(format!("provider returned Forbidden for a fresh user: {reason:?}")),
         Err(e) => return Err(format!("fresh-user retrieve errored: {e}")),
     }
 
@@ -75,6 +78,7 @@ pub async fn run_write_contract(
     let turn = TurnRecord {
         user_id: user.into(), username: None, email: None, agent_id: None, thread_id: None, channel: "conf".into(),
         user_msg: content.into(), assistant_msg: String::new(), conversation_id: None,
+        echo_refs: vec![],        tool_turns: vec![],
     };
     p.ingest(&turn).await.map_err(|e| format!("ingest: {e}"))?;
 

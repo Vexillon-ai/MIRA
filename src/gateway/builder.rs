@@ -2986,9 +2986,12 @@ fn build_tool_registry(
                 automations.clone(), wiki_for_approvals.clone(),
             ));
             registry.register(crate::tools::approvals::ApprovePendingTool::new(
+                automations.clone(), wiki_for_approvals.clone(),
+            ));
+            registry.register(crate::tools::approvals::RejectPendingTool::new(
                 automations.clone(), wiki_for_approvals,
             ));
-            info!("Tool registered: pending_approvals, approve_pending");
+            info!("Tool registered: pending_approvals, approve_pending, reject_pending");
         }
     }
 

@@ -83,6 +83,19 @@ pub struct MemoryContextResult {
     pub block: String,
     pub served: Vec<String>,
     pub unavailable: Vec<String>,
+    /// Facts served this turn that carry an external `provenance.fact_id` (i.e.
+    /// service-origin), as `(fact_id, content)`. The turn's ingest marks a reply
+    /// that repeats one of these (`athena_refs`) so the service's echo guard doesn't
+    /// re-store it or count it as new confirmation.
+    pub served_facts: Vec<(String, String)>,
+}
+
+/// Pull the external `fact_id` out of a fact's `provenance` JSON string, if any.
+/// Only facts from a provider that carries one (the service's consolidated facts) have
+/// it; a built-in or files fact returns `None`.
+fn provenance_fact_id(provenance: Option<&str>) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(provenance?).ok()?;
+    v.get("fact_id").and_then(|f| f.as_str()).map(str::to_string)
 }
 
 /// Back-compat wrapper returning just the rendered block.
@@ -151,14 +164,21 @@ pub async fn pre_hook_via_router(
     let recalled = router.recall(&q, 0).await;
     let served = recalled.served.clone();
     let unavailable: Vec<String> = recalled.unavailable.iter().map(|(s, _)| s.clone()).collect();
+    // Service-origin served facts (id + content), for the ingest echo marker.
+    let served_facts: Vec<(String, String)> = recalled.facts.iter()
+        .filter_map(|f| provenance_fact_id(f.provenance.as_deref())
+            .map(|id| (id, f.content.clone())))
+        .collect();
     if recalled.is_empty() {
-        return MemoryContextResult { block: String::new(), served, unavailable };
+        return MemoryContextResult { block: String::new(), served, unavailable, served_facts };
     }
     debug!(
         "Memory pre-hook: {} facts, {} unavailable for user '{}'",
         recalled.facts.len(), recalled.unavailable.len(), user_id,
     );
-    MemoryContextResult { block: render_recalled(&recalled, include_unavailable), served, unavailable }
+    MemoryContextResult {
+        block: render_recalled(&recalled, include_unavailable), served, unavailable, served_facts,
+    }
 }
 
 // Softened, trust-tiered framing for recalled notes. Drops the old "facts
@@ -276,6 +296,16 @@ fn render_recalled(r: &crate::memory::router::RecalledMemory, include_unavailabl
                  query ({reason}). This is NOT \"no such memory\" — a result was withheld; help the \
                  user narrow it down or ask a more specific question rather than saying nothing is \
                  recorded.]\n",
+            ));
+        }
+        // FORBIDDEN (403): authenticated but not permitted for this request. Its
+        // own class — NOT "no such memory" and NOT "store down". Tell the model to
+        // say it isn't permitted to look here, not that nothing is recorded.
+        for (source, reason) in &r.forbidden {
+            block.push_str(&format!(
+                "\n[Your {source} memory store refused this request as not permitted ({reason}). \
+                 This is NOT \"no such memory\" and NOT an outage — say you are not permitted to \
+                 look there for this, rather than that nothing is recorded.]\n",
             ));
         }
     }
@@ -418,7 +448,7 @@ mod tests {
             facts: vec![],
             unavailable: vec![("ext-http".into(), "connection refused".into())],
             withheld: vec![],
-            served: vec![],
+            forbidden: vec![], served: vec![],
         };
         let block = render_recalled(&r, true);
         assert!(!block.is_empty());
@@ -433,7 +463,7 @@ mod tests {
         let r = RecalledMemory {
             facts: vec![], unavailable: vec![("ext-http".into(), "connection refused".into())],
             withheld: vec![],
-            served: vec![],
+            forbidden: vec![], served: vec![],
         };
         let suppressed = render_recalled(&r, false);
         assert!(suppressed.is_empty(), "no unavailable notice when suppressed");
@@ -451,7 +481,7 @@ mod tests {
 
     #[test]
     fn render_notes_use_the_softened_header_with_ages() {
-        let r = RecalledMemory { facts: vec![note("User likes tea")], unavailable: vec![], withheld: vec![], served: vec!["builtin".into()] };
+        let r = RecalledMemory { facts: vec![note("User likes tea")], unavailable: vec![], withheld: vec![], forbidden: vec![], served: vec!["builtin".into()] };
         let block = render_recalled(&r, true);
         assert!(block.contains("User likes tea"));
         assert!(block.contains("treat it as your own notes"), "softened header");
@@ -464,7 +494,7 @@ mod tests {
         let mut f = note("User works at Anthropic");
         f.trust = Trust::Verified;
         f.source_id = "ext-http".into();
-        let r = RecalledMemory { facts: vec![f], unavailable: vec![], withheld: vec![], served: vec!["ext-http".into()] };
+        let r = RecalledMemory { facts: vec![f], unavailable: vec![], withheld: vec![], forbidden: vec![], served: vec!["ext-http".into()] };
         let block = render_recalled(&r, true);
         assert!(block.contains("Established facts"), "verified tier header");
         assert!(block.contains("[ext-http]"), "source labelled");
@@ -492,7 +522,7 @@ mod tests {
         let f = sourced(
             "Jordan Vale appeared in the 1994 film.",
             "unverified", "found in source, not verified");
-        let r = RecalledMemory { facts: vec![f], unavailable: vec![], withheld: vec![], served: vec!["ext-http".into()] };
+        let r = RecalledMemory { facts: vec![f], unavailable: vec![], withheld: vec![], forbidden: vec![], served: vec!["ext-http".into()] };
         let block = render_recalled(&r, true);
         assert!(block.contains("external memory source"), "sourced-tier header present");
         assert!(block.contains("Jordan Vale appeared"), "passage not dropped");
@@ -507,7 +537,7 @@ mod tests {
     #[test]
     fn render_sourced_reported_label() {
         let f = sourced("Subject directed a 1980 film.", "reported", "externally confirmed");
-        let r = RecalledMemory { facts: vec![f], unavailable: vec![], withheld: vec![], served: vec!["ext-http".into()] };
+        let r = RecalledMemory { facts: vec![f], unavailable: vec![], withheld: vec![], forbidden: vec![], served: vec!["ext-http".into()] };
         let block = render_recalled(&r, true);
         assert!(block.contains("external memory source"), "sourced-tier header");
         assert!(block.contains("externally confirmed"), "the source's label");
@@ -524,7 +554,7 @@ mod tests {
         let own = note("User likes tea");
         let r = RecalledMemory {
             facts: vec![attested, srcd, own], unavailable: vec![], withheld: vec![],
-            served: vec!["ext-http".into(), "builtin".into()],
+            forbidden: vec![], served: vec!["ext-http".into(), "builtin".into()],
         };
         let block = render_recalled(&r, true);
         assert!(block.contains("Established facts"), "verified block");
@@ -540,7 +570,7 @@ mod tests {
         let r = RecalledMemory {
             facts: vec![], unavailable: vec![],
             withheld: vec![("ext-http".into(), "a near match exists; be more specific".into())],
-            served: vec![],
+            forbidden: vec![], served: vec![],
         };
         let block = render_recalled(&r, true);
         assert!(block.contains("did NOT return"), "withheld framing");

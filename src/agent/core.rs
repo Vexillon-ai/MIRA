@@ -1238,6 +1238,9 @@ impl AgentCore {
         } else {
             memory_hook::profile_hook(self.auth.get(), user_id)
         };
+        // Memory-service facts served this turn (id + content) — used after the
+        // reply to mark an echoed assistant turn for the ingest (`echo_refs`).
+        let mut athena_served_facts: Vec<(String, String)> = Vec::new();
         let memory_context = if context.skip_memory_hooks {
             String::new()
         } else {
@@ -1271,6 +1274,7 @@ impl AgentCore {
                     unavailable: mem.unavailable.clone(),
                 }).await;
             }
+            athena_served_facts = mem.served_facts.clone();
             mem.block
         };
         // R6: an explicit "remember this" is captured SYNCHRONOUSLY here — before
@@ -1439,6 +1443,13 @@ impl AgentCore {
         let mem_rule: &str = if context.system_prompt_override.is_none() {
             crate::system_prompt::MEMORY_TRUTHFULNESS_ADDENDUM
         } else { "" };
+        // Capability rule (X-pending): on every normal user turn, independent of
+        // persona/channel, so a chatty or primed thread can't make the model
+        // claim it lacks the pending-approvals tools. Skipped on internal
+        // override turns (onboarding/guardian) that drive their own flow.
+        let caps_rule: &str = if context.system_prompt_override.is_none() {
+            crate::system_prompt::PENDING_APPROVALS_ADDENDUM
+        } else { "" };
         let effective_system = if profile_block.is_empty()
             && sys_wiki.is_empty()
             && sys_memory.is_empty()
@@ -1447,13 +1458,14 @@ impl AgentCore {
             && easter_egg_addendum.is_empty()
             && safety_addendum.is_empty()
             && mem_rule.is_empty()
+            && caps_rule.is_empty()
         {
             base_prompt.to_string()
         } else {
             format!(
-                "{}{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}{}",
                 base_prompt, profile_block, sys_wiki, sys_memory,
-                companion_addendum, tone_addendum, easter_egg_addendum, safety_addendum, mem_rule,
+                companion_addendum, tone_addendum, easter_egg_addendum, safety_addendum, mem_rule, caps_rule,
             )
         };
 
@@ -1923,6 +1935,12 @@ impl AgentCore {
         let t_before_loop = std::time::Instant::now();
         // Count tool-loop rounds for the final timing.
         let round_counter = std::sync::atomic::AtomicUsize::new(0);
+        // Capture each successful tool's (name, output) in call order, so the
+        // harness ingest below can ship them as `tool`-speaker turns to a
+        // whole-turn memory service. Read once after the loop; empty for a
+        // no-tool turn. `find_tools` is excluded by the loop (not a dispatch).
+        let tool_turns_capture: std::sync::Mutex<Vec<(String, String)>> =
+            std::sync::Mutex::new(Vec::new());
 
         // When timings are on, route the loop's events through
         // a proxy channel so we can slip the `first_token` timing snapshot in
@@ -1990,6 +2008,7 @@ impl AgentCore {
             tool_result_cap_bytes,
             &provider_request_context,
             Some(&round_counter),
+            Some(&tool_turns_capture),
             commit_gate.as_ref(),
             voice,
         );
@@ -2227,11 +2246,19 @@ impl AgentCore {
             // ship raw turns to external stores either — the UI promises "records
             // nothing until you opt in". (A matching `mode` is set per channel.)
             let capture_on = ax.effective_extractor(channel) != ExtractorKind::Off;
+            // The tools this turn ran (name, output), in call order — shipped as
+            // `tool`-speaker turns below. Read once (loop is done); a snapshot so
+            // the secret guard and the ingest build see the same list.
+            let captured_tools: Vec<(String, String)> = tool_turns_capture
+                .lock().map(|v| v.clone()).unwrap_or_default();
             // R2: never ship a credential-bearing turn to a Files store or a
             // (possibly remote) HTTP memory service. The built-in store's guard
             // is `remember_fact`; this is the matching guard for harness ingest.
+            // A tool result can carry a credential too (a tool that read a file or
+            // env), so the whole-turn guard covers tool outputs as well.
             let secret_turn = crate::memory::auto_extract::looks_like_secret(input)
-                || crate::memory::auto_extract::looks_like_secret(&response_text);
+                || crate::memory::auto_extract::looks_like_secret(&response_text)
+                || captured_tools.iter().any(|(_, out)| crate::memory::auto_extract::looks_like_secret(out));
             if capture_on && secret_turn {
                 info!("harness ingest: skipping a turn that looks to contain a credential (not sent to external stores)");
             }
@@ -2244,6 +2271,32 @@ impl AgentCore {
                     .and_then(|a| a.get_user(user_id).ok().flatten())
                     .map(|u| (Some(u.username), u.email))
                     .unwrap_or((None, None));
+                // Echo marker: the ids of memory-served facts THIS reply repeats
+                // verbatim, so the ingest can flag them (`athena_refs`) and
+                // the echo guard doesn't count MIRA restating a fact as the user
+                // independently confirming it. Conservative verbatim match; a miss
+                // just falls back to the service's own content match.
+                let echo_refs: Vec<String> = athena_served_facts.iter()
+                    .filter(|(_, content)| {
+                        let c = content.trim();
+                        !c.is_empty() && response_text.contains(c)
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                // Tool turns: each successful tool's result becomes a `tool`
+                // episode, clamped and tagged with where it read from (when the
+                // tool has a known data source). Empty results are dropped.
+                let tool_turns: Vec<crate::memory::provider::ToolTurn> = captured_tools.iter()
+                    .filter_map(|(name, output)| {
+                        let text = clamp_tool_turn_text(output);
+                        if text.is_empty() { return None; }
+                        Some(crate::memory::provider::ToolTurn {
+                            tool: name.clone(),
+                            text,
+                            source: tool_source_phrase(name).map(str::to_string),
+                        })
+                    })
+                    .collect();
                 let turn = crate::memory::provider::TurnRecord {
                     user_id: user_id.to_string(),
                     username: acct_username,
@@ -2254,6 +2307,8 @@ impl AgentCore {
                     user_msg: input.to_string(),
                     assistant_msg: response_text.clone(),
                     conversation_id: context.conversation_id.clone(),
+                    echo_refs,
+                    tool_turns,
                 };
                 for w in &self.memory_providers.harness_writers {
                     let w = Arc::clone(w);
@@ -2459,6 +2514,48 @@ fn truncate_on_boundary(s: &str, cap: usize) -> &str {
     &s[..end]
 }
 
+/// Max bytes of a tool result shipped as a `tool`-speaker ingest turn. A tool
+/// episode is context, not the fact itself — enough to be useful, bounded so a
+/// huge dump (a big JSON, a fetched page) can't bloat the ingest. The copy fed
+/// back to the model is clamped separately (`tool_result_cap_bytes`).
+const TOOL_TURN_TEXT_CAP: usize = 2000;
+
+/// Trim + clamp a tool result for ingest as a `tool` turn. Empty-after-trim → "",
+/// which the caller drops (a tool episode must carry text).
+fn clamp_tool_turn_text(output: &str) -> String {
+    let t = output.trim();
+    if t.is_empty() { return String::new(); }
+    let clamped = truncate_on_boundary(t, TOOL_TURN_TEXT_CAP);
+    if clamped.len() < t.len() {
+        format!("{}…", clamped.trim_end())
+    } else {
+        clamped.to_string()
+    }
+}
+
+/// The data source a tool read from, phrased for a memory service's "found in
+/// <source>" provenance line. `None` for a tool with no external source (a
+/// calculation, a timezone lookup, a pure action); a service that requires a
+/// source on every tool turn (the service does) fills a true per-tool fallback in its
+/// own builder, so `None` here is "no nicer phrase", not "omit it". Kept
+/// deliberately small and generic: the exact per-call target (a specific URL, a
+/// named calendar) isn't available here, so these are the honest category of
+/// source, not a precise citation.
+fn tool_source_phrase(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "weather" => "a weather service",
+        "web_search" => "a web search",
+        "web_fetch" | "url_preview" => "the web",
+        "pdf_extract" => "a PDF",
+        "memory_search" | "memory_catalog" => "your saved memory",
+        "recall_history" => "your conversation history",
+        "wiki_read" | "wiki_search" => "your wiki",
+        "calendar_list_events" => "your calendar",
+        "mira_help" => "MIRA's documentation",
+        _ => return None,
+    })
+}
+
 /// Cap the combined injected RAG (wiki + memory) to ~`window/RAG_WINDOW_DIVISOR`
 /// tokens (≈4 bytes/token), so retrieval can't dominate the prompt (b#4). Curated
 /// `wiki` keeps priority over auto-extracted `memory`: wiki is filled first, then
@@ -2640,6 +2737,28 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use crate::types::{GenerationResponse, TokenUsage, ProviderId};
+
+    #[test]
+    fn tool_source_phrase_maps_known_sources_and_omits_the_rest() {
+        assert_eq!(tool_source_phrase("weather"), Some("a weather service"));
+        assert_eq!(tool_source_phrase("web_search"), Some("a web search"));
+        assert_eq!(tool_source_phrase("calendar_list_events"), Some("your calendar"));
+        assert_eq!(tool_source_phrase("memory_search"), Some("your saved memory"));
+        // A pure computation / action has no external source.
+        assert_eq!(tool_source_phrase("math_eval"), None);
+        assert_eq!(tool_source_phrase("settings_set"), None);
+        assert_eq!(tool_source_phrase("some_unknown_tool"), None);
+    }
+
+    #[test]
+    fn clamp_tool_turn_text_trims_drops_empty_and_bounds_length() {
+        assert_eq!(clamp_tool_turn_text("  hi  "), "hi");       // trimmed
+        assert_eq!(clamp_tool_turn_text("   "), "");            // empty → dropped by caller
+        let big = "x".repeat(TOOL_TURN_TEXT_CAP + 500);
+        let out = clamp_tool_turn_text(&big);
+        assert!(out.len() <= TOOL_TURN_TEXT_CAP + 4, "bounded (+ ellipsis bytes)");
+        assert!(out.ends_with('…'), "clamp marks truncation");
+    }
 
     // ── Mock provider ─────────────────────────────────────────────────────────
 

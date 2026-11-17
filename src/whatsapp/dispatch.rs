@@ -177,6 +177,18 @@ pub async fn process_whatsapp_message(
         }
     }
 
+    // `/new` | `/clear` | `/reset` → fresh thread + confirm, no LLM turn.
+    if crate::history::is_conversation_reset_command(&effective_text) {
+        if let Some(hist) = deps.history.as_ref() {
+            if let Err(e) = hist.reset_external_conversation(
+                &resolved_user_id, "whatsapp", &msg.from, Some(&format!("WhatsApp — {}", msg.from)),
+            ) { warn!("whatsapp /new: reset failed: {}", e); }
+        }
+        reply(&deps, &ctx, &msg.from,
+            "Fresh start — I've cleared this conversation's context. What can I help you with?").await;
+        return;
+    }
+
     // Resolve the persisted thread up-front so the agent can rehydrate this
     // conversation's context on a cache miss (restart / idle eviction); the
     // record-turn below reuses the same id.

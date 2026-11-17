@@ -199,9 +199,15 @@ You can act on them right there by **replying** — no need to open the dashboar
   what the wiki edit changes).
 - *"approve all"*, or *"approve the backup schedule"* → MIRA approves what you
   named (or everything).
+- *"reject those wiki edits"*, or *"discard the proposed schedule"* → MIRA
+  rejects/discards what you named (or everything) so it's never applied.
 
-The reminder is just a reminder: **MIRA only approves when you tell it to** — it
-never approves on its own, and never inside the proactive message itself. The
+These work on **any channel** — Telegram, the web, email — because the tools that
+list, approve and reject pending items are always loaded, so asking right after a
+check-in reaches them on the first try.
+
+The reminder is just a reminder: **MIRA only approves or rejects when you tell it
+to** — it never acts on its own, and never inside the proactive message itself. The
 human-in-the-loop review stays with you. (You can still approve from the
 **Automations** and **Wiki review** pages in the UI if you prefer.)
 

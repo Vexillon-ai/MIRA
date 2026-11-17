@@ -2590,7 +2590,18 @@ fn default_core_tools() -> Vec<String> {
     // `weather` is always-on: a weather/forecast question must
     // reach the tool on the first round, not wait on a `find_tools` hop that the
     // model sometimes skips. One small schema, and it stays in the cached prefix.
-    vec!["memory_*".to_string(), "wiki_*".to_string(), "now".to_string(), "weather".to_string()]
+    //
+    // The approval tools are always-on for the SAME reason: a companion check-in
+    // or briefing actively nudges the user to ask about ("you have N pending wiki
+    // edits") and then approve/reject their pending items — so the tools that
+    // answer and action that MUST reach the model on the first round of the very
+    // next turn, not wait on a `find_tools` hop. Without this the model has the
+    // `wiki_*` page tools (which don't see the review queue) and confabulates
+    // that it "has no tools" for the pending edits.
+    vec![
+        "memory_*".to_string(), "wiki_*".to_string(), "now".to_string(), "weather".to_string(),
+        "pending_approvals".to_string(), "approve_pending".to_string(), "reject_pending".to_string(),
+    ]
 }
 fn default_tool_top_k() -> usize { 8 }
 fn default_tool_min_similarity() -> f32 { 0.30 }

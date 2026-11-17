@@ -230,6 +230,126 @@ impl Tool for ApprovePendingTool {
     }
 }
 
+// ── reject_pending (mutating, user-gated) ─────────────────────────────────────
+
+pub struct RejectPendingTool {
+    automations: Option<Arc<AutomationsStore>>,
+    wiki:        Option<Arc<WikiRegistry>>,
+}
+
+impl RejectPendingTool {
+    pub fn new(automations: Option<Arc<AutomationsStore>>, wiki: Option<Arc<WikiRegistry>>) -> Self {
+        Self { automations, wiki }
+    }
+}
+
+#[async_trait]
+impl Tool for RejectPendingTool {
+    fn name(&self) -> &str { "reject_pending" }
+
+    fn description(&self) -> &str {
+        "Reject (discard) items waiting for the user's approval — agent-created \
+         schedules and/or wiki review-queue edits — so they are NOT applied and \
+         leave the pending list. ONLY call this when the user has explicitly told \
+         you to reject, discard, decline, or delete the pending items (e.g. \
+         \"reject them all\", \"discard the wiki edits\", \"delete that proposed \
+         schedule\"); never reject on your own initiative, and never from a \
+         check-in or briefing. `kind` selects what to reject (`schedule` | `wiki` \
+         | `all`, default `all`). Omit `ids` to reject every pending item of that \
+         kind, or pass specific ids (from `pending_approvals`) to reject just \
+         those. `reason` is an optional short note recorded on the rejection. \
+         Returns how many were rejected and any that failed."
+    }
+
+    fn visibility(&self) -> ToolVisibility { ToolVisibility::User }
+    // Mutates MIRA-owned state only (removes pending items from our DBs) — Pure
+    // tier, same as `approve_pending`. The real safety is the user-instruction
+    // guardrail in the description + the human in the loop.
+    fn tier(&self) -> Tier { Tier::Pure }
+
+    fn args_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["schedule", "wiki", "all"],
+                    "description": "Which kind of pending item to reject. Default `all`."
+                },
+                "ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Specific item ids to reject (from `pending_approvals`). Omit to reject all pending items of the chosen kind."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional short note recorded with the rejection (e.g. why the user declined)."
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: ToolArgs) -> Result<ToolResult, MiraError> {
+        let user_id = caller(&args)?;
+        let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("all");
+        let reason = args.get("reason").and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("rejected by the user");
+        let ids: Option<Vec<String>> = args.get("ids").and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
+        let id_filter = |id: &str| ids.as_ref().map(|set| set.iter().any(|x| x == id)).unwrap_or(true);
+
+        let mut rejected_schedules = 0usize;
+        let mut rejected_wiki = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+
+        // Schedules: declining a PENDING-APPROVAL proposal removes it. Filtered to
+        // PendingApproval so "reject all" can never delete an already-active one.
+        if matches!(kind, "schedule" | "all") {
+            if let Some(store) = self.automations.as_ref() {
+                let pending: Vec<String> = store.list_schedules(Some(&user_id)).unwrap_or_default()
+                    .into_iter()
+                    .filter(|s| matches!(s.status, ScheduleStatus::PendingApproval))
+                    .map(|s| s.id)
+                    .filter(|id| id_filter(id))
+                    .collect();
+                for id in pending {
+                    match store.delete_schedule(&id) {
+                        Ok(_)  => rejected_schedules += 1,
+                        Err(e) => errors.push(format!("schedule {id}: {e}")),
+                    }
+                }
+            }
+        }
+
+        // Wiki ops.
+        if matches!(kind, "wiki" | "all") {
+            if let Some(reg) = self.wiki.as_ref() {
+                if let Ok(wiki) = reg.for_user(&user_id) {
+                    let pending: Vec<String> = wiki.list_pending_ops().unwrap_or_default()
+                        .into_iter()
+                        .map(|e| e.op_id)
+                        .filter(|id| id_filter(id))
+                        .collect();
+                    for id in pending {
+                        // Reviewer = the user themselves (they instructed it).
+                        match wiki.reject_op(&id, &user_id, reason) {
+                            Ok(())  => rejected_wiki += 1,
+                            Err(e)  => errors.push(format!("wiki op {id}: {e}")),
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(ToolResult::success(json!({
+            "rejected_schedules": rejected_schedules,
+            "rejected_wiki_edits": rejected_wiki,
+            "errors": errors,
+        }).to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +376,17 @@ mod tests {
         assert!(r.success);
         assert!(r.output.contains("\"approved_schedules\":0"));
         assert!(r.output.contains("\"approved_wiki_edits\":0"));
+
+        let reject = RejectPendingTool::new(None, None);
+        let r = reject.execute(json!({"_user_id": "u1", "kind": "all", "reason": "no"})).await.unwrap();
+        assert!(r.success);
+        assert!(r.output.contains("\"rejected_schedules\":0"));
+        assert!(r.output.contains("\"rejected_wiki_edits\":0"));
+    }
+
+    #[tokio::test]
+    async fn reject_requires_caller_identity() {
+        let tool = RejectPendingTool::new(None, None);
+        assert!(tool.execute(json!({})).await.is_err(), "missing _user_id should error");
     }
 }

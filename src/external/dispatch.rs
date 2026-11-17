@@ -266,6 +266,19 @@ pub async fn process_external_message(
         }
     }
 
+    // `/new` | `/clear` | `/reset` → fresh thread + confirm, no LLM turn.
+    if crate::history::is_conversation_reset_command(&effective_text) {
+        if let Some(hist) = deps.history.as_ref() {
+            let title = format!("{} — {}", titlecase_kind(&ctx.provider_kind), msg.conversation_id);
+            if let Err(e) = hist.reset_external_conversation(
+                &resolved_user_id, &channel_str, &msg.conversation_id, Some(title.as_str()),
+            ) { warn!("external /new: reset failed: {}", e); }
+        }
+        reply(&deps, &ctx, &msg.conversation_id,
+            "Fresh start — I've cleared this conversation's context. What can I help you with?").await;
+        return;
+    }
+
     // Resolve the persisted thread up-front so the agent can rehydrate this
     // conversation's context on a cache miss (restart / idle eviction); the
     // record-turn below reuses the same id.

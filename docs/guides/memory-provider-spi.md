@@ -101,6 +101,26 @@ MIRA only acts on the generic `state`.
 (`read_only: false` and the capability is declared). A closed write-gate may answer
 `404`, treated as a no-op.
 
+`/ingest` sends a whole turn as `texts`, one element per contribution in order, so
+the service can distil and label facts by who said them:
+
+`texts: [ { "speaker": "user"|"assistant"|"tool", "text": string,
+            "source"?: string, "athena_refs"?: [string] } ]`
+
+- the **user** message, then each **tool** the turn ran (the data the assistant
+  acted on), then the **assistant** reply;
+- a `tool` element **must** carry its own `source` — where the tool read from,
+  shown as "found in <source>"; a sourceless tool turn is refused (a provenance
+  claim with no operand), so a tool with no known data source still sends a true
+  per-tool fallback rather than inheriting the batch `source`;
+- the assistant element may carry `athena_refs`: the ids of facts the service
+  served this turn that the reply repeats, so its echo-guard neither re-stores them
+  nor counts them as fresh confirmation.
+
+MIRA omits per-message timestamps (it has none that are reliable); the service uses
+its receive time. A whole turn that looks to contain a credential (in any element,
+tool outputs included) is not sent at all.
+
 ### `GET /health`
 `→ { "ready": bool }` (or `503` while warming).
 

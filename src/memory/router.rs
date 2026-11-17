@@ -38,12 +38,19 @@ pub struct RecalledMemory {
     /// didn't return it — e.g. a near/ambiguous match), with the reason. Rendered
     /// as "a result was withheld: …", never as "nothing recorded".
     pub withheld: Vec<(String, String)>,
+    /// Providers that returned FORBIDDEN (HTTP 403) this turn — authenticated but
+    /// not permitted for the request, with the reason. Its own class: rendered as
+    /// "not permitted", never as "nothing recorded" (absent) or "store
+    /// unavailable". The credential is right; the scope is not.
+    pub forbidden: Vec<(String, String)>,
     /// Provider ids that actually contributed ≥1 fact (for UI pills / logs).
     pub served: Vec<String>,
 }
 
 impl RecalledMemory {
-    pub fn is_empty(&self) -> bool { self.facts.is_empty() && self.unavailable.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.facts.is_empty() && self.unavailable.is_empty() && self.forbidden.is_empty()
+    }
     /// Does any surviving fact legitimately claim to be the complete set?
     pub fn has_complete_set(&self) -> bool { self.facts.iter().any(|f| f.complete_set) }
 }
@@ -145,6 +152,15 @@ impl MemoryRouter {
                     out.withheld.push((
                         id,
                         reason.unwrap_or_else(|| "a related result was withheld".into()),
+                    ));
+                }
+                // Forbidden (HTTP 403) is its OWN class — NOT absent, NOT
+                // unavailable. Surface it distinctly so the model never reads it
+                // as "you have no such memory" or "the store is down".
+                MemoryRetrieval::Forbidden { reason } => {
+                    out.forbidden.push((
+                        id,
+                        reason.unwrap_or_else(|| "not permitted for this request".into()),
                     ));
                 }
                 MemoryRetrieval::Unavailable { reason } => {
@@ -271,6 +287,20 @@ mod tests {
         assert_eq!(got.unavailable.len(), 1, "unavailable must surface, never collapse to empty");
         assert_eq!(got.unavailable[0].0, "ext-http");
         assert!(!got.is_empty(), "a down store is NOT an empty recall");
+    }
+
+    #[tokio::test]
+    async fn forbidden_is_its_own_class_not_absent_or_unavailable() {
+        let r = MemoryRouter::single(stub(
+            "ext-http", MemoryCapabilities::read_only(),
+            MemoryRetrieval::Forbidden { reason: Some("outside this agent's scope".into()) },
+        ));
+        let got = r.recall(&MemoryQuery::new("u", "q", 5), 0).await;
+        assert!(got.facts.is_empty());
+        assert!(got.unavailable.is_empty(), "403 is NOT unavailable");
+        assert_eq!(got.forbidden.len(), 1, "403 surfaces in its own bucket");
+        assert_eq!(got.forbidden[0].0, "ext-http");
+        assert!(!got.is_empty(), "a forbidden recall is NOT 'nothing recorded'");
     }
 
     #[tokio::test]

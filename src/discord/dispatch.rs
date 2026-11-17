@@ -248,6 +248,19 @@ pub async fn process_discord_message(
         }
     }
 
+    // `/new` | `/clear` | `/reset` → fresh thread + confirm, no LLM turn.
+    if crate::history::is_conversation_reset_command(&effective_text) {
+        if let Some(hist) = deps.history.as_ref() {
+            let title = discord_default_title(&msg);
+            if let Err(e) = hist.reset_external_conversation(
+                &resolved_user_id, "discord", &msg.channel_id, Some(title.as_str()),
+            ) { warn!("discord /new: reset failed: {}", e); }
+        }
+        let _ = super::api::post_message(&deps.http_client, &ctx.bot_token, &msg.channel_id,
+            "Fresh start — I've cleared this conversation's context. What can I help you with?").await;
+        return;
+    }
+
     // Resolve the persisted thread up-front so the agent can rehydrate this
     // conversation's context on a cache miss (restart / idle eviction); the
     // record-turn below reuses the same id.

@@ -218,6 +218,32 @@ impl HistoryStore {
         })
     }
 
+    /// Start a FRESH external thread for this sender, even if one already exists.
+    /// `find_or_create_external_conversation` returns the most-recent thread
+    /// (`ORDER BY updated_at DESC`), so the row created here becomes the one
+    /// subsequent inbound turns resolve to — the previous thread goes dormant,
+    /// its history preserved but out of the model's context window. Used by the
+    /// channel `/new` (`/clear`, `/reset`) command so a user can break out of a
+    /// stuck/primed conversation on a channel that otherwise reuses one thread
+    /// per contact forever.
+    pub fn reset_external_conversation(
+        &self,
+        owner_user_id: &str,
+        channel:       &str,
+        sender:        &str,
+        default_title: Option<&str>,
+    ) -> Result<Conversation, MiraError> {
+        self.create_conversation(NewConversation {
+            user_id:          owner_user_id.to_owned(),
+            channel:          channel.to_owned(),
+            title:            default_title.map(str::to_owned),
+            model:            None,
+            provider:         None,
+            external_user_id: Some(sender.to_owned()),
+            mode:             None,
+        })
+    }
+
     pub fn get_conversation(&self, id: &str) -> Result<Option<Conversation>, MiraError> {
         let conn = self.conn.lock().unwrap();
         let result = conn.query_row(
@@ -1202,6 +1228,19 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 // ── Row helpers ───────────────────────────────────────────────────────────────
 
+/// Does this inbound message ask to start a fresh conversation? True only for an
+/// explicit slash command — `/new`, `/clear`, or `/reset` — as the whole message
+/// (a trailing `@botname` or args are tolerated, e.g. Telegram's `/new@MyBot`).
+/// Deliberately strict: it must be the user's clear intent, never inferred from
+/// prose, so an ordinary message is never swallowed as a reset.
+pub fn is_conversation_reset_command(text: &str) -> bool {
+    let t = text.trim();
+    let Some(first) = t.split_whitespace().next() else { return false; };
+    // Strip a `@botname` suffix (Telegram command form) and lowercase.
+    let cmd = first.split('@').next().unwrap_or(first).to_ascii_lowercase();
+    matches!(cmd.as_str(), "/new" | "/clear" | "/reset")
+}
+
 fn row_to_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
     // skip_wiki is optional in the SELECT — most existing queries pull
     // 10 columns; the ones that need the toggle (get / list) pull 11.
@@ -1256,6 +1295,32 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn reset_command_matches_only_explicit_slash_commands() {
+        for s in ["/new", "/clear", "/reset", " /NEW ", "/new@MyBot", "/reset keep notes"] {
+            assert!(is_conversation_reset_command(s), "should match: {s:?}");
+        }
+        for s in ["new", "clear the queue", "please reset my wiki edits",
+                  "what's new?", "", "/news", "/newsletter", "tell me /new things"] {
+            assert!(!is_conversation_reset_command(s), "should NOT match: {s:?}");
+        }
+    }
+
+    #[test]
+    fn reset_external_conversation_makes_a_fresh_current_thread() {
+        let dir = tempdir().unwrap();
+        let store = HistoryStore::open(&dir.path().join("h.db")).unwrap();
+        let first = store.find_or_create_external_conversation("owner", "telegram", "contact", None).unwrap();
+        // Same sender resolves back to the same thread…
+        let again = store.find_or_create_external_conversation("owner", "telegram", "contact", None).unwrap();
+        assert_eq!(first.id, again.id);
+        // …until a reset creates a new one, which then becomes current.
+        let fresh = store.reset_external_conversation("owner", "telegram", "contact", None).unwrap();
+        assert_ne!(fresh.id, first.id, "reset must create a new thread");
+        let after = store.find_or_create_external_conversation("owner", "telegram", "contact", None).unwrap();
+        assert_eq!(after.id, fresh.id, "subsequent turns resolve to the fresh thread");
+    }
 
     fn seed(store: &HistoryStore, user_id: &str, channel: &str) -> String {
         store

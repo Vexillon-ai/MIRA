@@ -419,6 +419,23 @@ pub async fn process_message_for_account(
         }
     };
 
+    // `/new` | `/clear` | `/reset` → start a fresh thread and confirm, without
+    // running an LLM turn. Telegram reuses one thread per contact forever, so
+    // this is the only way to break out of a stuck/primed conversation.
+    if crate::history::is_conversation_reset_command(&effective_text) {
+        if let Some(hist) = state.history.as_ref() {
+            let title = telegram_default_title(&msg);
+            if let Err(e) = hist.reset_external_conversation(
+                &resolved_user_id, "telegram", &tg_user, Some(title.as_str()),
+            ) {
+                warn!("telegram /new: reset_external_conversation failed: {}", e);
+            }
+        }
+        send_telegram_message(&state.http_client, &ctx.bot_token, chat_id,
+            "Fresh start — I've cleared this conversation's context. What can I help you with?").await;
+        return;
+    }
+
     // Session id bakes in the resolved MIRA user so each linked sender
     // gets their own session even when sharing one admin-managed bot.
     let session_id = format!("tg-{}-{}", resolved_user_id, chat_id);

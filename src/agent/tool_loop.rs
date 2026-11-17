@@ -117,7 +117,7 @@ pub async fn run_tool_loop_with_context(
 ) -> Result<(String, TokenUsage), MiraError> {
     run_tool_loop_with_provider_context(provider, tools, messages, options, mode, max_rounds, tx,
         allowed_tool_names, inject_args, event_ctx, expander, expand_pool, tool_result_cap_bytes,
-        &crate::providers::ProviderRequestContext::default(), None, None, false).await
+        &crate::providers::ProviderRequestContext::default(), None, None, None, false).await
 }
 
 pub async fn run_tool_loop_with_provider_context(
@@ -148,6 +148,11 @@ pub async fn run_tool_loop_with_provider_context(
     // When set, incremented once per tool-loop round so the
     // caller can report `tool_rounds` in its timing event. Measurement only.
     round_counter: Option<&std::sync::atomic::AtomicUsize>,
+    // When set, each SUCCESSFUL tool dispatch appends `(tool_name, output)` in
+    // call order, so the caller can ship them as `tool`-speaker turns to a
+    // whole-turn memory ingest. `find_tools` is excluded (handled before
+    // dispatch). Capture only — never affects the loop.
+    tool_turns: Option<&std::sync::Mutex<Vec<(String, String)>>>,
     // Speculative commit barrier. When set, the loop awaits it
     // before executing ANY tool, so a speculative turn holds tool execution
     // until commit. `None` for a normal turn.
@@ -339,7 +344,7 @@ pub async fn run_tool_loop_with_provider_context(
 
                 let (output, success) = dispatch_tool_call(
                     tools, &tc.name, merged, active.as_deref(), &mut seen_calls,
-                    event_ctx, commit_gate,
+                    event_ctx, commit_gate, tool_turns,
                 ).await;
 
                 info!("Tool '{}' → success={} output_len={}", tc.name, success, output.len());
@@ -425,7 +430,7 @@ pub async fn run_tool_loop_with_provider_context(
 
                     let (output, success) = dispatch_tool_call(
                         tools, &tc.name, merged, active.as_deref(), &mut seen_calls,
-                        event_ctx, commit_gate,
+                        event_ctx, commit_gate, tool_turns,
                     ).await;
 
                     info!("Tool '{}' (Hermes) → success={} output_len={}", tc.name, success, output.len());
@@ -470,7 +475,7 @@ pub async fn run_tool_loop_with_provider_context(
 
                 let (output, success) = dispatch_tool_call(
                     tools, &tool_name, merged, active.as_deref(), &mut seen_calls,
-                    event_ctx, commit_gate,
+                    event_ctx, commit_gate, tool_turns,
                 ).await;
 
                 info!("Tool '{}' (ReAct) → success={}", tool_name, success);
@@ -583,6 +588,9 @@ async fn dispatch_tool_call(
     event_ctx: ToolEventCtx<'_>,
     // Hold execution here until a speculative turn commits.
     commit_gate: Option<&crate::agent::turn_registry::CommitGate>,
+    // When set, a successful dispatch appends `(name, output)` for whole-turn
+    // ingest. `find_tools` never reaches here, so it is excluded automatically.
+    tool_turns: Option<&std::sync::Mutex<Vec<(String, String)>>>,
 ) -> (String, bool) {
     if !tool_allowed(name, allowed) {
         let body = format!(
@@ -619,6 +627,11 @@ async fn dispatch_tool_call(
     match tools.execute(name, args.clone()).await {
         Ok(r) => {
             if r.success {
+                if let Some(c) = tool_turns {
+                    if let Ok(mut v) = c.lock() {
+                        v.push((name.to_string(), r.output.clone()));
+                    }
+                }
                 (r.output, true)
             } else {
                 let msg = r.error.as_deref().unwrap_or("").trim();
@@ -1760,7 +1773,7 @@ Nice to meet you!
             reply: ToolResult::success("hello world"),
         });
         let mut seen = std::collections::HashSet::new();
-        let (out, ok) = dispatch_tool_call(&tools, "ok_tool", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE, None).await;
+        let (out, ok) = dispatch_tool_call(&tools, "ok_tool", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE, None, None).await;
         assert!(ok);
         assert_eq!(out, "hello world");
     }
@@ -1777,7 +1790,7 @@ Nice to meet you!
             reply: ToolResult::failure("sandbox refused: EPERM"),
         });
         let mut seen = std::collections::HashSet::new();
-        let (out, ok) = dispatch_tool_call(&tools, "boom", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE, None).await;
+        let (out, ok) = dispatch_tool_call(&tools, "boom", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE, None, None).await;
         assert!(!ok, "failed tool must report success=false");
         assert!(!out.is_empty(),
             "failed tool must not return empty output (would invite hallucination)");
@@ -1796,7 +1809,7 @@ Nice to meet you!
             reply: ToolResult { success: false, output: String::new(), error: None },
         });
         let mut seen = std::collections::HashSet::new();
-        let (out, ok) = dispatch_tool_call(&tools, "silent_fail", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE, None).await;
+        let (out, ok) = dispatch_tool_call(&tools, "silent_fail", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE, None, None).await;
         assert!(!ok);
         assert!(!out.is_empty(), "fallback label must not be empty, got: {out:?}");
         assert!(out.contains("silent_fail"), "fallback should name the failing tool, got: {out}");
@@ -1806,7 +1819,7 @@ Nice to meet you!
     async fn dispatch_unknown_tool_returns_registry_error() {
         let tools = ToolRegistry::new();
         let mut seen = std::collections::HashSet::new();
-        let (out, ok) = dispatch_tool_call(&tools, "missing", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE, None).await;
+        let (out, ok) = dispatch_tool_call(&tools, "missing", serde_json::json!({}), None, &mut seen, ToolEventCtx::NONE, None, None).await;
         assert!(!ok);
         assert!(out.starts_with("Tool error:"), "got: {out}");
     }
@@ -1819,7 +1832,7 @@ Nice to meet you!
         });
         let allowed = vec!["calendar".to_string()];
         let mut seen = std::collections::HashSet::new();
-        let (out, ok) = dispatch_tool_call(&tools, "shell", serde_json::json!({}), Some(&allowed), &mut seen, ToolEventCtx::NONE, None).await;
+        let (out, ok) = dispatch_tool_call(&tools, "shell", serde_json::json!({}), Some(&allowed), &mut seen, ToolEventCtx::NONE, None, None).await;
         assert!(!ok);
         assert!(out.contains("not available"), "got: {out}");
     }

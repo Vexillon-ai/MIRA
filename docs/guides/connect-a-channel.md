@@ -152,6 +152,19 @@ Both are set up under **My Preferences → Notifications & devices** (open to ev
 user), where you can also fire a test check-in or briefing immediately to confirm
 delivery.
 
+## Start a fresh conversation (`/new`)
+
+Chat channels (Telegram, Signal, WhatsApp, Discord, Matrix, and other connected
+providers) keep **one running conversation per contact**, so MIRA remembers the
+thread across messages. To wipe the slate — start a new thread with no earlier
+context — send **`/new`** (or `/clear`, or `/reset`) as the whole message. MIRA
+confirms and the next message starts clean. The web app has its own "new chat"
+button for the same thing.
+
+This is handy if a long thread has drifted or MIRA seems stuck on something from
+earlier in the conversation. Your earlier messages aren't deleted — they're just
+no longer part of the active thread (your memories and wiki are untouched).
+
 ## Troubleshooting
 
 - **MIRA can't message me proactively on Telegram.** Make sure you've **linked

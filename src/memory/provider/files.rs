@@ -288,6 +288,7 @@ mod tests {
             user_id: "alice".into(), username: None, email: None, agent_id: None, thread_id: None,
             channel: "web".into(), user_msg: "I love hiking in the mountains".into(),
             assistant_msg: String::new(), conversation_id: None,
+            echo_refs: vec![],            tool_turns: vec![],
         };
         assert_eq!(p.ingest(&turn).await.unwrap(), 1);
 
@@ -318,6 +319,7 @@ mod tests {
         let turn = |u: &str, m: &str| TurnRecord {
             user_id: u.into(), username: None, email: None, agent_id: None, thread_id: None, channel: "web".into(),
             user_msg: m.into(), assistant_msg: String::new(), conversation_id: None,
+            echo_refs: vec![],            tool_turns: vec![],
         };
         p.ingest(&turn("alice", "alice keeps bees")).await.unwrap();
         p.ingest(&turn("bob", "bob keeps bees")).await.unwrap();
@@ -337,6 +339,7 @@ mod tests {
     async fn cross_user_forget_is_refused() {
         let (p, _d) = provider();
         let turn = TurnRecord {
+            echo_refs: vec![],            tool_turns: vec![],
             user_id: "alice".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "web".into(),
             user_msg: "alice secret note".into(), assistant_msg: String::new(), conversation_id: None,
         };
