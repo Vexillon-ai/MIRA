@@ -55,6 +55,23 @@ fn pending_schedules(store: &AutomationsStore, user_id: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Parse the optional `ids` / `paths` selectors shared by approve & reject.
+/// Returns (ids, lowercased path substrings, any_selector_present). No selector
+/// present → the caller treats it as "all". `paths` lets the model act on items
+/// by their wiki page (which it can read straight from `pending_approvals`)
+/// instead of copying an opaque UUID — far more reliable for a partial action.
+fn selectors(args: &ToolArgs) -> (Vec<String>, Vec<String>, bool) {
+    let ids = args.get("ids").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let paths = args.get("paths").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.trim().to_lowercase()))
+            .filter(|s| !s.is_empty()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let present = !ids.is_empty() || !paths.is_empty();
+    (ids, paths, present)
+}
+
 // Pending wiki review-queue ops for the user, as summary JSON.
 fn pending_wiki(reg: &WikiRegistry, user_id: &str) -> Vec<Value> {
     let Ok(wiki) = reg.for_user(user_id) else { return Vec::new() };
@@ -145,8 +162,12 @@ impl Tool for ApprovePendingTool {
          from a check-in or briefing. `kind` selects what to approve \
          (`schedule` | `wiki` | `all`, default `all`). Omit `ids` to approve \
          every pending item of that kind, or pass specific ids (from \
-         `pending_approvals`) to approve just those. Returns how many were \
-         approved and any that failed."
+         `pending_approvals`) to approve just those. For a PARTIAL approval — some \
+         items but not all — first call `pending_approvals` to see the items, then \
+         target the ones to approve by `paths` (their wiki page, e.g. \
+         `pages/chronotype_wolf.md`) or by `ids`; `paths` is easier and more \
+         reliable than copying ids. Returns how many were approved and any that \
+         failed."
     }
 
     fn visibility(&self) -> ToolVisibility { ToolVisibility::User }
@@ -167,7 +188,12 @@ impl Tool for ApprovePendingTool {
                 "ids": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Specific item ids to approve (from `pending_approvals`). Omit to approve all pending items of the chosen kind."
+                    "description": "Specific item ids to approve (from `pending_approvals`). Omit (with no `paths`) to approve ALL pending items of the chosen kind."
+                },
+                "paths": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Approve only the pending WIKI edits whose page matches one of these (substring of the `path` from `pending_approvals`, e.g. `chronotype_wolf` or `pages/chronotype_wolf.md`). Use this for a partial approval instead of copying ids. Does not affect schedules."
                 }
             }
         })
@@ -176,9 +202,16 @@ impl Tool for ApprovePendingTool {
     async fn execute(&self, args: ToolArgs) -> Result<ToolResult, MiraError> {
         let user_id = caller(&args)?;
         let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("all");
-        let ids: Option<Vec<String>> = args.get("ids").and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
-        let id_filter = |id: &str| ids.as_ref().map(|set| set.iter().any(|x| x == id)).unwrap_or(true);
+        let (ids, paths, selector_present) = selectors(&args);
+        // Schedules have no page; a path-only selector targets wiki ops, so it
+        // never sweeps schedules. With no selector at all, everything matches.
+        let sched_match = |id: &str| !selector_present || ids.iter().any(|x| x == id);
+        let wiki_match = |op_id: &str, path: &str| {
+            if !selector_present { return true; }
+            if ids.iter().any(|x| x == op_id) { return true; }
+            let p = path.to_lowercase();
+            paths.iter().any(|x| p.contains(x.as_str()))
+        };
 
         let mut approved_schedules = 0usize;
         let mut approved_wiki = 0usize;
@@ -191,7 +224,7 @@ impl Tool for ApprovePendingTool {
                     .into_iter()
                     .filter(|s| matches!(s.status, ScheduleStatus::PendingApproval))
                     .map(|s| s.id)
-                    .filter(|id| id_filter(id))
+                    .filter(|id| sched_match(id))
                     .collect();
                 for id in pending {
                     match store.approve_schedule(&id) {
@@ -208,8 +241,8 @@ impl Tool for ApprovePendingTool {
                 if let Ok(wiki) = reg.for_user(&user_id) {
                     let pending: Vec<String> = wiki.list_pending_ops().unwrap_or_default()
                         .into_iter()
+                        .filter(|e| wiki_match(&e.op_id, &e.op.target_path().to_string()))
                         .map(|e| e.op_id)
-                        .filter(|id| id_filter(id))
                         .collect();
                     for id in pending {
                         // Reviewer = the user themselves (they instructed it).
@@ -257,8 +290,11 @@ impl Tool for RejectPendingTool {
          check-in or briefing. `kind` selects what to reject (`schedule` | `wiki` \
          | `all`, default `all`). Omit `ids` to reject every pending item of that \
          kind, or pass specific ids (from `pending_approvals`) to reject just \
-         those. `reason` is an optional short note recorded on the rejection. \
-         Returns how many were rejected and any that failed."
+         those. For a PARTIAL rejection, first call `pending_approvals` to see the \
+         items, then target them by `paths` (their wiki page) or `ids`; `paths` is \
+         easier and more reliable than copying ids. `reason` is an optional short \
+         note recorded on the rejection. Returns how many were rejected and any \
+         that failed."
     }
 
     fn visibility(&self) -> ToolVisibility { ToolVisibility::User }
@@ -279,7 +315,12 @@ impl Tool for RejectPendingTool {
                 "ids": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Specific item ids to reject (from `pending_approvals`). Omit to reject all pending items of the chosen kind."
+                    "description": "Specific item ids to reject (from `pending_approvals`). Omit (with no `paths`) to reject ALL pending items of the chosen kind."
+                },
+                "paths": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Reject only the pending WIKI edits whose page matches one of these (substring of the `path` from `pending_approvals`). Use this for a partial rejection instead of copying ids. Does not affect schedules."
                 },
                 "reason": {
                     "type": "string",
@@ -295,9 +336,14 @@ impl Tool for RejectPendingTool {
         let reason = args.get("reason").and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
             .unwrap_or("rejected by the user");
-        let ids: Option<Vec<String>> = args.get("ids").and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
-        let id_filter = |id: &str| ids.as_ref().map(|set| set.iter().any(|x| x == id)).unwrap_or(true);
+        let (ids, paths, selector_present) = selectors(&args);
+        let sched_match = |id: &str| !selector_present || ids.iter().any(|x| x == id);
+        let wiki_match = |op_id: &str, path: &str| {
+            if !selector_present { return true; }
+            if ids.iter().any(|x| x == op_id) { return true; }
+            let p = path.to_lowercase();
+            paths.iter().any(|x| p.contains(x.as_str()))
+        };
 
         let mut rejected_schedules = 0usize;
         let mut rejected_wiki = 0usize;
@@ -311,7 +357,7 @@ impl Tool for RejectPendingTool {
                     .into_iter()
                     .filter(|s| matches!(s.status, ScheduleStatus::PendingApproval))
                     .map(|s| s.id)
-                    .filter(|id| id_filter(id))
+                    .filter(|id| sched_match(id))
                     .collect();
                 for id in pending {
                     match store.delete_schedule(&id) {
@@ -328,8 +374,8 @@ impl Tool for RejectPendingTool {
                 if let Ok(wiki) = reg.for_user(&user_id) {
                     let pending: Vec<String> = wiki.list_pending_ops().unwrap_or_default()
                         .into_iter()
+                        .filter(|e| wiki_match(&e.op_id, &e.op.target_path().to_string()))
                         .map(|e| e.op_id)
-                        .filter(|id| id_filter(id))
                         .collect();
                     for id in pending {
                         // Reviewer = the user themselves (they instructed it).
@@ -360,6 +406,20 @@ mod tests {
         let tool = PendingApprovalsTool::new(None, None);
         let r = tool.execute(json!({})).await;
         assert!(r.is_err(), "missing _user_id should error");
+    }
+
+    #[test]
+    fn selectors_parse_ids_and_paths() {
+        let (ids, paths, present) = selectors(&json!({}));
+        assert!(ids.is_empty() && paths.is_empty() && !present, "no selector → all");
+        let (ids, paths, present) = selectors(&json!({"ids": ["a", "b"]}));
+        assert_eq!(ids, vec!["a", "b"]);
+        assert!(paths.is_empty() && present);
+        // paths are trimmed, lowercased, blanks dropped.
+        let (ids, paths, present) = selectors(&json!({"paths": ["Pages/Chronotype_Wolf.md", "  "]}));
+        assert!(ids.is_empty());
+        assert_eq!(paths, vec!["pages/chronotype_wolf.md"]);
+        assert!(present);
     }
 
     #[tokio::test]

@@ -839,6 +839,20 @@ impl AgentCore {
     // Borrow the installed wiki registry, if any.
     pub fn wiki(&self) -> Option<&Arc<WikiRegistry>> { self.wiki.get() }
 
+    /// Count this user's pending wiki-edit ops, read from the store RIGHT NOW —
+    /// not cached, not model-derived. This is the same source the companion
+    /// check-in counts from, so the two can never disagree. It exists so the
+    /// turn can hand the model GROUND TRUTH ("you have N pending") instead of
+    /// trusting the model to call a tool and report honestly — which, on long
+    /// chatty threads, it has been observed to fake. 0 when wiki is off / none.
+    pub fn live_pending_wiki_count(&self, user_id: &str) -> usize {
+        self.wiki.get()
+            .and_then(|reg| reg.for_user(user_id).ok())
+            .and_then(|w| w.list_pending_ops().ok())
+            .map(|ops| ops.len())
+            .unwrap_or(0)
+    }
+
     // Install the companion system (of companion mode).
     // Returns `Err(())` if one was already installed.
     pub fn set_companion(&self, sys: Arc<crate::companion::CompanionSystem>) -> Result<(), ()> {
@@ -1233,11 +1247,11 @@ impl AgentCore {
         // `system_prompt_override`, so injecting again would duplicate
         // identity facts. Channels (Signal/Telegram) take the simpler
         // identity block since they don't go through the web preamble path.
-        let profile_block = if context.system_prompt_override.is_some() {
-            String::new()
-        } else {
-            memory_hook::profile_hook(self.auth.get(), user_id)
-        };
+        // Identity now rides the consolidated grounded-facts block (volatile,
+        // built below) so all the "facts about you" sit in one labelled place —
+        // except on the web path, which already injects an identity preamble as
+        // the system override. So nothing identity-related is added here.
+        let profile_block = String::new();
         // Memory-service facts served this turn (id + content) — used after the
         // reply to mark an echoed assistant turn for the ingest (`echo_refs`).
         let mut athena_served_facts: Vec<(String, String)> = Vec::new();
@@ -1450,6 +1464,12 @@ impl AgentCore {
         let caps_rule: &str = if context.system_prompt_override.is_none() {
             crate::system_prompt::PENDING_APPROVALS_ADDENDUM
         } else { "" };
+        // General grounding rule (X-ground): the umbrella over the per-fact
+        // anchors — don't assert any user/system fact you weren't given. Scoped so
+        // it never makes the assistant hedge on general knowledge or creativity.
+        let ground_rule: &str = if context.system_prompt_override.is_none() {
+            crate::system_prompt::GROUNDING_RULE
+        } else { "" };
         let effective_system = if profile_block.is_empty()
             && sys_wiki.is_empty()
             && sys_memory.is_empty()
@@ -1459,13 +1479,14 @@ impl AgentCore {
             && safety_addendum.is_empty()
             && mem_rule.is_empty()
             && caps_rule.is_empty()
+            && ground_rule.is_empty()
         {
             base_prompt.to_string()
         } else {
             format!(
-                "{}{}{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}{}{}",
                 base_prompt, profile_block, sys_wiki, sys_memory,
-                companion_addendum, tone_addendum, easter_egg_addendum, safety_addendum, mem_rule, caps_rule,
+                companion_addendum, tone_addendum, easter_egg_addendum, safety_addendum, mem_rule, caps_rule, ground_rule,
             )
         };
 
@@ -1739,11 +1760,43 @@ impl AgentCore {
         let time_context = if context.suppress_time_context {
             String::new()
         } else {
-            memory_hook::time_context_hook(self.auth.get(), user_id)
+            // Consolidated grounded facts: live clock + identity (unless the web
+            // preamble already supplied it) + birthday-vs-today, in one block.
+            memory_hook::grounded_facts_hook(
+                self.auth.get(), user_id, context.system_prompt_override.is_none(),
+            )
         };
+        // Pending-approvals ground truth (volatile, rides the user message so the
+        // cached system prefix stays stable). Read LIVE from the store, so the
+        // model is handed the real count rather than inventing one or claiming it
+        // "checked". Only when there's something pending (the harmful case: real
+        // edits exist and the model has been seen to deny them / fake-approve).
+        // Internal override turns (onboarding/guardian) opt out.
+        let pending_context = if context.system_prompt_override.is_none() {
+            let n = self.live_pending_wiki_count(user_id);
+            if n > 0 {
+                format!(
+                    "## Pending approvals — verified live, this instant\n\
+                     GROUND TRUTH: the user has {n} pending wiki edit{s} awaiting approval \
+                     (read directly from the store just now). If asked how many are pending, \
+                     state exactly this number — never a different count from memory or from \
+                     earlier in this conversation, and never say the queue is empty while this \
+                     says otherwise. To show WHAT they are, call `pending_approvals`. To change \
+                     the queue you MUST call `approve_pending` or `reject_pending`; only tell the \
+                     user you approved or rejected something when that tool returned success in \
+                     THIS reply. Saying you did it does NOT make it happen — if you didn't call \
+                     the tool, the edits are still pending, so say so and offer to do it now.",
+                    s = if n == 1 { "" } else { "s" },
+                )
+            } else { String::new() }
+        } else { String::new() };
         let user_prefix = {
             let mut p = String::new();
             p.push_str(time_context.trim());
+            if !pending_context.is_empty() {
+                if !p.is_empty() { p.push_str("\n\n"); }
+                p.push_str(&pending_context);
+            }
             if !folded_context.is_empty() {
                 if !p.is_empty() { p.push_str("\n\n"); }
                 p.push_str(&folded_context);
@@ -2020,7 +2073,7 @@ impl AgentCore {
                 None    => std::future::pending::<()>().await,
             }
         };
-        let (response_text, usage) = match &context.cancel_token {
+        let (mut response_text, usage) = match &context.cancel_token {
             Some(cancel) => tokio::select! {
                 biased;
                 _ = restart_signal() => {
@@ -2110,6 +2163,71 @@ impl AgentCore {
                 cached_tokens: Some(usage.cache_read_tokens as u32),
                 ..Default::default()
             })).await;
+        }
+        // Pending-approvals truthfulness backstop. The model has been seen to
+        // CLAIM it approved/rejected/cleared the queue (or that 0 are pending)
+        // without calling any approval tool. If, at the end of the turn, edits
+        // are STILL pending, NO approval tool ran this turn, and the reply makes
+        // such a claim, append a deterministic correction so the user is never
+        // told a false "done"/"empty". Streamed as a trailing token so it reaches
+        // every channel (collected or live). Skipped on override turns.
+        if context.system_prompt_override.is_none() {
+            let ran_write = tool_turns_capture.lock().ok()
+                .map(|v| v.iter().any(|(n, _)| n == "approve_pending" || n == "reject_pending"))
+                .unwrap_or(false);
+            let mut handled = ran_write;
+            // Deterministic action: when the user plainly told MIRA to approve or
+            // reject the pending queue but the model didn't actually run the tool
+            // (it narrates calling tools on long companion threads without emitting
+            // the call), carry it out here so an explicit instruction is never
+            // silently dropped. Gated to genuine user turns (`!non_user_input`), so
+            // a proactive/check-in turn can never auto-approve on its own.
+            if !ran_write && !context.non_user_input {
+                if let Some(action) = detect_bulk_approval_intent(input) {
+                    if let Some(reg) = self.wiki.get() {
+                        if let Ok(wiki) = reg.for_user(user_id) {
+                            let res = match action {
+                                ApprovalAction::Approve => wiki.approve_pending_bulk(user_id, None),
+                                ApprovalAction::Reject  =>
+                                    wiki.reject_pending_bulk(user_id, "rejected by the user via chat", None),
+                            };
+                            match res {
+                                Ok(n) if n > 0 => {
+                                    let verb = match action {
+                                        ApprovalAction::Approve => "approved",
+                                        ApprovalAction::Reject  => "rejected",
+                                    };
+                                    let note = format!(
+                                        "\n\n✅ Done — {verb} {n} pending wiki edit{s}; the queue is now clear.",
+                                        s = if n == 1 { "" } else { "s" },
+                                    );
+                                    let _ = tx.send(StreamEvent::Token(note.clone())).await;
+                                    response_text.push_str(&note);
+                                    info!("deterministic {action:?} of {n} pending wiki ops for user (model did not call the tool)");
+                                    handled = true;
+                                }
+                                Ok(_) => {} // nothing pending → fall through
+                                Err(e) => warn!("deterministic {action:?} of pending wiki ops failed: {e}"),
+                            }
+                        }
+                    }
+                }
+            }
+            // Backstop: a false "done / empty / approved / rejected" claim when
+            // nothing was actually handled and edits are still pending.
+            if !handled && reply_claims_approvals_handled(&response_text) {
+                let n = self.live_pending_wiki_count(user_id);
+                if n > 0 {
+                    let correction = format!(
+                        "\n\n⚠️ Correction: I didn't actually check or change the approval queue just \
+                         now, so nothing has changed — you still have {n} pending wiki edit{s}. I can \
+                         list them or approve/reject them for real if you tell me to.",
+                        s = if n == 1 { "" } else { "s" },
+                    );
+                    let _ = tx.send(StreamEvent::Token(correction.clone())).await;
+                    response_text.push_str(&correction);
+                }
+            }
         }
         let _ = tx.send(StreamEvent::Done { usage }).await;
 
@@ -2514,6 +2632,64 @@ fn truncate_on_boundary(s: &str, cap: usize) -> &str {
     &s[..end]
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ApprovalAction { Approve, Reject }
+
+/// Detect an EXPLICIT instruction to approve or reject the pending-approval queue
+/// in bulk, so the harness can carry it out deterministically when the model
+/// fails to call the tool. Conservative by design — it drives a mutating action,
+/// so it returns `None` unless the user clearly means "act on the pending queue
+/// now": it requires a bare approve/reject verb (exactly one of the two), a
+/// reference to the queue, and NO hedge/negation/question marker. A false
+/// negative just falls back to the model; a false positive would act unbidden,
+/// so the bar is set to avoid that.
+fn detect_bulk_approval_intent(text: &str) -> Option<ApprovalAction> {
+    let t = text.to_lowercase();
+    // Never act on a hedge, a negation, or a question-for-advice.
+    const BLOCKERS: &[&str] = &[
+        "don't", "do not", "dont", "never", "not yet", "hold off", "hold on",
+        "wait", "should i", "shall i", "do you think", "what if", "maybe",
+        "how do i", "how to", "can i ", "not sure", "later", "before you",
+    ];
+    if BLOCKERS.iter().any(|b| t.contains(b)) { return None; }
+    // Must clearly be about the pending/approval queue.
+    let about_queue = t.contains("pending") || t.contains("wiki edit")
+        || t.contains("approval") || t.contains("the edits") || t.contains("those edits")
+        || t.contains("them all") || t.contains("the queue") || t.contains("approve all")
+        || t.contains("reject all") || t.contains("approve them") || t.contains("reject them")
+        || t.contains("discard them") || t.contains("discard all");
+    if !about_queue { return None; }
+    let approve = t.contains("approve");
+    let reject = t.contains("reject") || t.contains("discard");
+    match (approve, reject) {
+        (true, false) => Some(ApprovalAction::Approve),
+        (false, true) => Some(ApprovalAction::Reject),
+        _ => None, // neither, or both at once (ambiguous) → leave it to the model
+    }
+}
+
+/// Heuristic: does this reply CLAIM the approval queue is empty or handled
+/// (0 pending, approved/rejected everything, cleared the queue)? Used ONLY as a
+/// guard that fires when edits are in fact still pending AND no approval tool ran
+/// this turn — a false claim then gets a deterministic correction. Deliberately
+/// conservative; a false negative just skips a correction, never invents one.
+fn reply_claims_approvals_handled(text: &str) -> bool {
+    let t = text.to_lowercase();
+    const ACTION: &[&str] = &[
+        "approved all", "approved them", "rejected all", "rejected them",
+        "all approved", "all rejected", "approved your pending", "rejected your pending",
+        "cleared the queue", "cleared your queue", "cleared all pending",
+    ];
+    if ACTION.iter().any(|p| t.contains(p)) { return true; }
+    const EMPTY: &[&str] = &[
+        "0 pending", "zero pending", "no pending", "nothing pending",
+        "no longer any pending", "no items pending", "no pending items",
+        "queue is empty", "queue is now empty", "empty queue",
+        "no pending wiki", "nothing in the queue", "nothing left in the queue",
+    ];
+    EMPTY.iter().any(|p| t.contains(p))
+}
+
 /// Max bytes of a tool result shipped as a `tool`-speaker ingest turn. A tool
 /// episode is context, not the fact itself — enough to be useful, bounded so a
 /// huge dump (a big JSON, a fetched page) can't bloat the ingest. The copy fed
@@ -2737,6 +2913,46 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use crate::types::{GenerationResponse, TokenUsage, ProviderId};
+
+    #[test]
+    fn detect_bulk_approval_intent_fires_on_clear_orders_only() {
+        use ApprovalAction::*;
+        assert_eq!(detect_bulk_approval_intent("approve pending wiki edits"), Some(Approve));
+        assert_eq!(detect_bulk_approval_intent("Approve them all please"), Some(Approve));
+        assert_eq!(detect_bulk_approval_intent("go ahead and approve all the pending edits"), Some(Approve));
+        assert_eq!(detect_bulk_approval_intent("reject the pending wiki edits"), Some(Reject));
+        assert_eq!(detect_bulk_approval_intent("discard them all"), Some(Reject));
+        // Hedges / negations / questions / unrelated → no auto-action.
+        assert_eq!(detect_bulk_approval_intent("should I approve the pending edits?"), None);
+        assert_eq!(detect_bulk_approval_intent("don't approve the pending edits"), None);
+        assert_eq!(detect_bulk_approval_intent("maybe approve them later"), None);
+        assert_eq!(detect_bulk_approval_intent("what are my pending wiki edits?"), None);
+        assert_eq!(detect_bulk_approval_intent("approve and reject are confusing me"), None); // both verbs
+        assert_eq!(detect_bulk_approval_intent("approve my vacation request"), None); // not the queue
+    }
+
+    #[test]
+    fn reply_claims_approvals_handled_catches_false_clears_not_neutral_text() {
+        for s in [
+            "I've approved all 7 pending wiki edits.",
+            "Done — rejected them for you.",
+            "The queue is now empty. ✅",
+            "Result: 0 pending items.",
+            "There's nothing pending anymore.",
+            "I cleared the queue.",
+        ] {
+            assert!(reply_claims_approvals_handled(s), "should flag: {s:?}");
+        }
+        for s in [
+            "You have 7 pending wiki edits — want me to list them?",
+            "I can approve or reject them if you say so.",
+            "Your pre-approved loan amount is unchanged.", // 'approved' substring, not a queue claim
+            "Here's the weather and your calendar.",
+            "",
+        ] {
+            assert!(!reply_claims_approvals_handled(s), "should NOT flag: {s:?}");
+        }
+    }
 
     #[test]
     fn tool_source_phrase_maps_known_sources_and_omits_the_rest() {

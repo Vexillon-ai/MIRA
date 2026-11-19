@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use tracing::{debug, warn};
 
 use crate::auth::LocalAuthService;
@@ -60,11 +60,108 @@ fn format_time_anchor(now: DateTime<Utc>, tz_name: Option<&str>) -> String {
 /// Build the "now" anchor block for a turn, resolving the user's profile
 /// timezone. Empty only if there is genuinely no clock (there always is) — it's
 /// unconditional so every real turn knows what "now" is.
-pub fn time_context_hook(auth: Option<&Arc<LocalAuthService>>, user_id: &str) -> String {
-    let tz = auth
-        .and_then(|a| a.get_profile(user_id).ok().flatten())
-        .and_then(|p| p.timezone);
-    format!("\n\n{}", format_time_anchor(Utc::now(), tz.as_deref()))
+/// The consolidated per-turn GROUNDED-FACTS block (volatile, rides the user
+/// message so the cached system prefix stays stable). One labeled place for
+/// everything the harness knows for certain this turn — the live clock, the
+/// user's identity, and their birthday vs. today — so the model anchors on it
+/// instead of guessing. The general `GROUNDING_RULE` in the system prompt points
+/// back at "the grounded details above" and governs the whole class.
+///
+/// `include_identity` is false on paths that already inject an identity preamble
+/// (the web chat handler), so identity isn't stated twice; the clock and
+/// birthday are always included (a preamble can't carry the live date).
+pub fn grounded_facts_hook(
+    auth: Option<&Arc<LocalAuthService>>,
+    user_id: &str,
+    include_identity: bool,
+) -> String {
+    let profile = auth.and_then(|a| a.get_profile(user_id).ok().flatten());
+    let tz = profile.as_ref().and_then(|p| p.timezone.clone());
+    let now = Utc::now();
+
+    let mut lines = String::new();
+    // Live clock — always; even an identity preamble has no current date/time.
+    lines.push_str(&format_time_anchor(now, tz.as_deref()));
+    // Identity — unless the caller already stated it (web preamble).
+    if include_identity {
+        if let Some(p) = profile.as_ref() {
+            lines.push_str(&profile_identity_lines(p));
+        }
+    }
+    // Birthday vs TODAY — stops the model guessing that today is their birthday.
+    if let Some(bd) = profile.as_ref().and_then(|p| p.birth_date.as_deref()) {
+        if let Some(l) = birthday_anchor(bd, now, tz.as_deref()) { lines.push_str(&l); }
+    }
+    format!(
+        "\n\n[Grounded facts — verified from your profile and this system right now; \
+         treat as ground truth and don't contradict or guess past them:]\n{lines}"
+    )
+}
+
+/// The identity bullet lines for the grounded-facts block (no header).
+fn profile_identity_lines(p: &crate::auth::UserProfile) -> String {
+    let name = p.preferred_name.as_deref().or(p.full_name.as_deref())
+        .map(str::trim).filter(|s| !s.is_empty());
+    let pronouns = p.pronouns.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let timezone = p.timezone.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let agent    = p.agent_name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let mut out = String::new();
+    if let Some(n) = name {
+        let mut who = format!("You are talking to {n}");
+        if let Some(pr) = pronouns { who.push_str(&format!(" ({pr})")); }
+        if let Some(tz) = timezone { who.push_str(&format!(", in {tz}")); }
+        out.push_str(&format!("{who}.\n"));
+    } else if let Some(tz) = timezone {
+        out.push_str(&format!("User timezone: {tz}.\n"));
+    }
+    if let Some(a) = agent {
+        out.push_str(&format!(
+            "They call you {a} — answer to that name and use it when referring to yourself.\n",
+        ));
+    }
+    out
+}
+
+const MONTHS: [&str; 12] = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+];
+
+/// Parse a stored birth date to (month, day). Accepts the ISO `YYYY-MM-DD` form
+/// onboarding writes, and the vCard `--MM-DD` (year unknown) form. Anything
+/// ambiguous (e.g. bare `MM/DD` vs `DD/MM`) returns `None` — a missing anchor is
+/// safer than a wrong one.
+fn parse_birth_month_day(s: &str) -> Option<(u32, u32)> {
+    let s = s.trim();
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Some((d.month(), d.day()));
+    }
+    if let Some(rest) = s.strip_prefix("--") {
+        let parts: Vec<&str> = rest.split('-').collect();
+        if parts.len() == 2 {
+            if let (Ok(m), Ok(d)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                if (1..=12).contains(&m) && (1..=31).contains(&d) { return Some((m, d)); }
+            }
+        }
+    }
+    None
+}
+
+/// One-line birthday anchor comparing the user's birthday to TODAY in their own
+/// timezone (the same "today" the time anchor shows). `None` when the stored
+/// date can't be read unambiguously.
+fn birthday_anchor(birth_date: &str, now: DateTime<Utc>, tz_name: Option<&str>) -> Option<String> {
+    let (today_month, today_day) = match tz_name.and_then(|n| n.parse::<chrono_tz::Tz>().ok()) {
+        Some(tz) => { let l = now.with_timezone(&tz); (l.month(), l.day()) }
+        None     => (now.month(), now.day()),
+    };
+    let (bm, bd) = parse_birth_month_day(birth_date)?;
+    let month = MONTHS.get((bm as usize).checked_sub(1)?)?;
+    if bm == today_month && bd == today_day {
+        Some(format!("[Birthday: TODAY is the user's birthday ({month} {bd}) — you may acknowledge it warmly.]\n"))
+    } else {
+        Some(format!("[Birthday: the user's birthday is {month} {bd}; today is NOT their birthday — never say or imply it is.]\n"))
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -348,51 +445,6 @@ fn sourced_label(f: &crate::memory::provider::MemoryFact) -> String {
     }
 }
 
-/// Build a short identity block describing who the agent is talking to and
-/// what the user calls the agent. Prepended to the system prompt for every
-/// turn so cross-channel chats (Signal, Telegram) carry the same identity
-/// the user established during onboarding on the web UI.
-///
-/// Returns an empty string when no auth service is wired, the user has no
-/// profile row, or none of the surfaced fields are populated. Only the
-/// fields the user actually filled in show up — we never invent defaults
-/// like "they/them" that the user didn't choose.
-pub fn profile_hook(
-    auth:    Option<&Arc<LocalAuthService>>,
-    user_id: &str,
-) -> String {
-    let Some(auth)    = auth                                     else { return String::new() };
-    let Ok(Some(p))   = auth.get_profile(user_id)                else { return String::new() };
-
-    let name = p.preferred_name.as_deref()
-        .or(p.full_name.as_deref())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let pronouns = p.pronouns.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let timezone = p.timezone.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let agent    = p.agent_name.as_deref().map(str::trim).filter(|s| !s.is_empty());
-
-    if name.is_none() && pronouns.is_none() && timezone.is_none() && agent.is_none() {
-        return String::new();
-    }
-
-    let mut block = String::from("\n\n[Identity for this turn:]\n");
-    if let Some(n) = name {
-        let mut who = format!("• You are talking to {n}");
-        if let Some(pr) = pronouns { who.push_str(&format!(" ({pr})")); }
-        if let Some(tz) = timezone { who.push_str(&format!(", in {tz}")); }
-        who.push_str(".\n");
-        block.push_str(&who);
-    } else if let Some(tz) = timezone {
-        block.push_str(&format!("• User timezone: {tz}.\n"));
-    }
-    if let Some(a) = agent {
-        block.push_str(&format!(
-            "• They call you {a} — answer to that name and use it when referring to yourself.\n",
-        ));
-    }
-    block
-}
 
 /// Spawn a background task to extract and store new memories from the
 /// just-completed conversation turn. Returns immediately; errors are logged.
@@ -429,6 +481,30 @@ mod tests {
 
     use crate::memory::provider::{MemoryFact, Speaker, Trust};
     use crate::memory::router::RecalledMemory;
+
+    #[test]
+    fn parse_birth_month_day_accepts_iso_and_vcard_rejects_ambiguous() {
+        assert_eq!(parse_birth_month_day("1990-02-08"), Some((2, 8)));
+        assert_eq!(parse_birth_month_day("  2001-12-25 "), Some((12, 25)));
+        assert_eq!(parse_birth_month_day("--02-08"), Some((2, 8)));
+        assert_eq!(parse_birth_month_day("02/08"), None);      // ambiguous → no anchor
+        assert_eq!(parse_birth_month_day("8 Feb 1990"), None); // not a supported form
+        assert_eq!(parse_birth_month_day(""), None);
+    }
+
+    #[test]
+    fn birthday_anchor_says_today_only_on_the_day() {
+        use chrono::TimeZone;
+        // A fixed UTC instant: 8 February 2026, 10:00.
+        let on_bday = Utc.with_ymd_and_hms(2026, 2, 8, 10, 0, 0).unwrap();
+        let other   = Utc.with_ymd_and_hms(2026, 11, 18, 10, 0, 0).unwrap();
+        let a = birthday_anchor("1990-02-08", on_bday, None).unwrap();
+        assert!(a.contains("TODAY is the user's birthday"), "{a}");
+        let b = birthday_anchor("1990-02-08", other, None).unwrap();
+        assert!(b.contains("February 8") && b.contains("NOT their birthday"), "{b}");
+        // Unparseable date → no anchor rather than a wrong one.
+        assert!(birthday_anchor("sometime in spring", other, None).is_none());
+    }
 
     fn note(content: &str) -> MemoryFact {
         MemoryFact {
@@ -655,38 +731,46 @@ mod tests {
     }
 
     #[test]
-    fn profile_hook_returns_empty_when_no_profile() {
+    fn grounded_facts_has_no_identity_line_without_a_profile() {
         let (_dir, auth, user_id) = auth_with_user();
-        // No profile fields populated yet.
-        assert!(profile_hook(Some(&auth), &user_id).is_empty());
+        // No profile fields yet → the block still carries the clock, but states
+        // no identity (and never fabricates one).
+        let block = grounded_facts_hook(Some(&auth), &user_id, true);
+        assert!(block.contains("Current date & time"));
+        assert!(!block.contains("You are talking to"));
     }
 
     #[test]
-    fn profile_hook_returns_empty_when_no_auth() {
-        // Some test paths construct an AgentCore without auth installed —
-        // the hook must not panic or fabricate identity in that case.
-        assert!(profile_hook(None, "any-user").is_empty());
+    fn grounded_facts_tolerates_no_auth() {
+        // Channel-only/test builds without auth must not panic or fabricate.
+        let block = grounded_facts_hook(None, "any-user", true);
+        assert!(block.contains("Current date & time"));
+        assert!(!block.contains("You are talking to"));
     }
 
     #[test]
-    fn profile_hook_includes_agent_name_and_preferred_name() {
+    fn grounded_facts_include_agent_name_and_preferred_name() {
         let (_dir, auth, user_id) = auth_with_user();
         auth.upsert_profile_field(&user_id, "preferred_name", "Tarek").unwrap();
         auth.upsert_profile_field(&user_id, "pronouns",       "he/him").unwrap();
         auth.upsert_profile_field(&user_id, "timezone",       "Australia/Melbourne").unwrap();
         auth.upsert_profile_field(&user_id, "agent_name",     "Nova").unwrap();
 
-        let block = profile_hook(Some(&auth), &user_id);
-        assert!(block.contains("[Identity for this turn:]"));
+        let block = grounded_facts_hook(Some(&auth), &user_id, true);
+        assert!(block.contains("treat as ground truth"));
         assert!(block.contains("You are talking to Tarek (he/him), in Australia/Melbourne."));
         assert!(block.contains("They call you Nova"));
+        // include_identity=false (web preamble path) → clock only, no identity.
+        let no_id = grounded_facts_hook(Some(&auth), &user_id, false);
+        assert!(no_id.contains("Current date & time"));
+        assert!(!no_id.contains("You are talking to"));
     }
 
     #[test]
-    fn profile_hook_falls_back_to_full_name_when_preferred_missing() {
+    fn grounded_facts_fall_back_to_full_name_when_preferred_missing() {
         let (_dir, auth, user_id) = auth_with_user();
         auth.upsert_profile_field(&user_id, "full_name", "Tarek El Diab").unwrap();
-        let block = profile_hook(Some(&auth), &user_id);
+        let block = grounded_facts_hook(Some(&auth), &user_id, true);
         assert!(block.contains("You are talking to Tarek El Diab"), "got: {block}");
     }
 }
