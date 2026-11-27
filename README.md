@@ -190,6 +190,14 @@ A single **gateway** process hosts the agent, the HTTP/web API, the channel poll
 
 </details>
 
+Prefer not to build? Pull the official image, published to GHCR on each release
+and **cosign-signed** under the `vexillon.ai` identity:
+
+```bash
+cosign verify --key verification/cosign.pub ghcr.io/vexillon-ai/mira:latest   # optional
+docker pull ghcr.io/vexillon-ai/mira:latest
+```
+
 The image build bundles a checksum-pinned ONNX Runtime; override its source with
 `--build-arg ONNXRUNTIME_URL=…`/`ONNXRUNTIME_SHA256=…` to use a mirror, or skip
 it with `--build-arg ONNXRUNTIME_ENABLED=false` if you only use an external

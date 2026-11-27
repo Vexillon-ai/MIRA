@@ -25,34 +25,42 @@ version      = "1.20.1"
 description  = "ONNX Runtime — in-process tensor inference for fastembed."
 required_for = "memory rollups, recall_history, semantic search"
 
-[deps.onnxruntime.linux-x86_64]
-url       = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz"
-sha256    = "67db4dc1561f1e3fd42e619575c82c601ef89849afc7ea85a003abbac1a1a105"
-# Path inside the extracted tarball to the actual library file.
+# All platforms are served from OUR mirror — the Vexillon release
+# `deps-onnxruntime-v1.20.1` — NOT upstream: the whole `microsoft/onnxruntime`
+# repo was removed on 2026-11-17 (every `.../releases/download/v1.20.1/...` URL
+# 404s). The assets there are byte-for-byte the originals (sha256s below are the
+# upstream hashes, re-verified on upload):
+#   - linux-x64 / win-x64 → Microsoft's own release tarball + zip.
+#   - linux-aarch64 / macOS → Microsoft's build repackaged by PyPI as a `.whl`
+#     (a zip — the installer treats `.whl` like `.zip`); `lib_path` points inside
+#     the wheel's `onnxruntime/capi/`. macOS uses ONE universal2 wheel (a fat
+#     arm64+x86_64 dylib) for both arches, so those two entries share a file.
+# PyPI (the wheels' original home) holds the same bytes as a public fallback.
 # MIRA at runtime sets ORT_DYLIB_PATH to <install_dir>/<lib_path>.
+[deps.onnxruntime.linux-x86_64]
+url       = "https://github.com/Vexillon-ai/MIRA/releases/download/deps-onnxruntime-v1.20.1/onnxruntime-linux-x64-1.20.1.tgz"
+sha256    = "67db4dc1561f1e3fd42e619575c82c601ef89849afc7ea85a003abbac1a1a105"
 lib_path  = "onnxruntime-linux-x64-1.20.1/lib/libonnxruntime.so.1.20.1"
 
 [deps.onnxruntime.linux-aarch64]
-url       = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-aarch64-1.20.1.tgz"
-sha256    = "ae4fedbdc8c18d688c01306b4b50c63de3445cdf2dbd720e01a2fa3810b8106a"
-lib_path  = "onnxruntime-linux-aarch64-1.20.1/lib/libonnxruntime.so.1.20.1"
+url       = "https://github.com/Vexillon-ai/MIRA/releases/download/deps-onnxruntime-v1.20.1/onnxruntime-1.20.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"
+sha256    = "f1f56e898815963d6dc4ee1c35fc6c36506466eff6d16f3cb9848cea4e8c8172"
+lib_path  = "onnxruntime/capi/libonnxruntime.so.1.20.1"
 
-# Windows ships as a .zip — the deps installer detects this by URL extension
-# and extracts with the zip path. The runtime lib is the DLL.
 [deps.onnxruntime.windows-x86_64]
-url       = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-x64-1.20.1.zip"
+url       = "https://github.com/Vexillon-ai/MIRA/releases/download/deps-onnxruntime-v1.20.1/onnxruntime-win-x64-1.20.1.zip"
 sha256    = "78d447051e48bd2e1e778bba378bec4ece11191c9e538cf7b2c4a4565e8f5581"
 lib_path  = "onnxruntime-win-x64-1.20.1/lib/onnxruntime.dll"
 
 [deps.onnxruntime.macos-aarch64]
-url       = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-osx-arm64-1.20.1.tgz"
-sha256    = "b678fc3c2354c771fea4fba420edeccfba205140088334df801e7fc40e83a57a"
-lib_path  = "onnxruntime-osx-arm64-1.20.1/lib/libonnxruntime.1.20.1.dylib"
+url       = "https://github.com/Vexillon-ai/MIRA/releases/download/deps-onnxruntime-v1.20.1/onnxruntime-1.20.1-cp312-cp312-macosx_13_0_universal2.whl"
+sha256    = "22b0655e2bf4f2161d52706e31f517a0e54939dc393e92577df51808a7edc8c9"
+lib_path  = "onnxruntime/capi/libonnxruntime.1.20.1.dylib"
 
 [deps.onnxruntime.macos-x86_64]
-url       = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-osx-x86_64-1.20.1.tgz"
-sha256    = "0f73006813af2a1a5d1723ed7dfb694fc629d15037124081bb61b7bf7d99fc78"
-lib_path  = "onnxruntime-osx-x86_64-1.20.1/lib/libonnxruntime.1.20.1.dylib"
+url       = "https://github.com/Vexillon-ai/MIRA/releases/download/deps-onnxruntime-v1.20.1/onnxruntime-1.20.1-cp312-cp312-macosx_13_0_universal2.whl"
+sha256    = "22b0655e2bf4f2161d52706e31f517a0e54939dc393e92577df51808a7edc8c9"
+lib_path  = "onnxruntime/capi/libonnxruntime.1.20.1.dylib"
 
 # ── signal-cli ────────────────────────────────────────────────────────
 # The Signal channel daemon. `auto = false` so a blanket `mira deps

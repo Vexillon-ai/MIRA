@@ -175,8 +175,11 @@ fn install_one(
 
     // Download to a tempfile inside install_dir (same FS so the
     // extract step doesn't cross-mount). Some deps ship as .zip (Windows ONNX
-    // Runtime) rather than .tar.gz; pick the extractor by URL extension.
-    let is_zip = plat.url.to_ascii_lowercase().ends_with(".zip");
+    // Runtime) or .whl (PyPI wheels — a zip under the hood; used for the ONNX
+    // Runtime libs on platforms whose upstream tarball is gone) rather than
+    // .tar.gz; pick the extractor by URL extension.
+    let url_lc = plat.url.to_ascii_lowercase();
+    let is_zip = url_lc.ends_with(".zip") || url_lc.ends_with(".whl");
     let tmpfile = install_dir.join(if is_zip { ".incoming.zip" } else { ".incoming.tar.gz" });
     println!("    fetching {} …", plat.url);
     download(&plat.url, &tmpfile)?;
@@ -882,6 +885,25 @@ mod tests {
         assert!(plat.url.starts_with("https://"), "url must be https");
         assert_eq!(plat.sha256.len(), 64, "sha256 must be 64-char hex");
         assert!(plat.lib_path.contains("libonnxruntime"), "lib_path must point at the actual lib");
+    }
+
+    #[test]
+    fn manifest_onnxruntime_pins_all_five_platforms_with_extractable_archives() {
+        let m = DepsManifest::load().unwrap();
+        let dep = m.deps.get("onnxruntime").expect("onnxruntime must be in manifest");
+        for plat in ["linux-x86_64", "linux-aarch64", "windows-x86_64", "macos-aarch64", "macos-x86_64"] {
+            let p = dep.platforms.get(plat)
+                .unwrap_or_else(|| panic!("onnxruntime missing pin for {plat}"));
+            assert!(p.url.starts_with("https://"), "{plat}: url must be https");
+            assert_eq!(p.sha256.len(), 64, "{plat}: sha256 must be 64-char hex");
+            assert!(p.lib_path.contains("libonnxruntime") || p.lib_path.ends_with("onnxruntime.dll"),
+                "{plat}: lib_path must point at the ORT lib (got {})", p.lib_path);
+            // The installer picks its extractor by extension — every ORT pin must
+            // be an archive it can open: .tgz/.tar.gz (tar), or .zip/.whl (zip).
+            let u = p.url.to_ascii_lowercase();
+            assert!(u.ends_with(".tgz") || u.ends_with(".tar.gz") || u.ends_with(".zip") || u.ends_with(".whl"),
+                "{plat}: url must be an extractable archive (got {})", p.url);
+        }
     }
 
     #[test]

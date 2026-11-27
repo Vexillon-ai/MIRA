@@ -77,6 +77,30 @@ config, databases, and logs. **Back up `./data` to back up your whole install.**
 Docker is the supervisor here: `restart: unless-stopped` means MIRA comes back
 after a reboot and honours the **Restart** button in the web UI.
 
+### Prebuilt signed image (GHCR)
+
+Rather than build locally, you can pull the official image, published to the
+GitHub Container Registry on each release and **signed with cosign** under the
+`vexillon.ai` identity:
+
+```bash
+docker pull ghcr.io/vexillon-ai/mira:latest        # or a specific :v0.X.Y
+docker run --rm -p 8080:8080 -v "$PWD/data:/data" ghcr.io/vexillon-ai/mira:latest
+```
+
+Verify the signature before you run it (recommended). With
+[cosign](https://docs.sigstore.dev/cosign/installation/) installed and the
+project's public key (`verification/cosign.pub`, from a release checkout):
+
+```bash
+cosign verify --key verification/cosign.pub ghcr.io/vexillon-ai/mira:latest
+```
+
+A valid signature confirms the image was built and published by the MIRA release
+pipeline from the public source and hasn't been swapped in the registry.
+
+### Building the image yourself
+
 The image build bundles a copy of ONNX Runtime (for in-process embeddings when
 no external embedding endpoint is configured). The download is pinned and
 checksum-verified; if you build behind a mirror or the upstream is unavailable,
