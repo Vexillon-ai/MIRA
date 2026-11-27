@@ -1699,7 +1699,7 @@ mod tests {
                     s("user","employer","single","User works at Atlassian","I work at Atlassian"),
                     s("user","employer","single","User no longer works at Google","I no longer work at Google"),
                 ], live: vec!["Atlassian"], dead: vec![] },
-            Case { name: "negated CURRENT value supersedes (control)\",
+            Case { name: "negated CURRENT value supersedes (control)",
                 steps: vec![
                     s("user","location","single","User lives in Perth","I live in Perth"),
                     s("user","location","single","User no longer lives in Perth","I no longer live in Perth"),
