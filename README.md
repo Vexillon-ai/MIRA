@@ -190,6 +190,25 @@ A single **gateway** process hosts the agent, the HTTP/web API, the channel poll
 
 </details>
 
+The image build bundles a checksum-pinned ONNX Runtime; override its source with
+`--build-arg ONNXRUNTIME_URL=…`/`ONNXRUNTIME_SHA256=…` to use a mirror, or skip
+it with `--build-arg ONNXRUNTIME_ENABLED=false` if you only use an external
+embedding endpoint.
+
+**Build from source** — most people should use a signed release instead, but if
+you build MIRA yourself you need a Rust toolchain, Node.js, and a C/C++ build
+environment with a few dev libraries. On Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y build-essential cmake clang libclang-dev \
+  pkg-config libopus-dev espeak-ng
+```
+
+See the [installation guide](docs/getting-started/installation.md#option-d--build-from-source)
+for the full per-distro prerequisite table (Fedora/RHEL, macOS) and build steps.
+
+---
+
 <details>
 <summary><strong>Repository structure</strong></summary>
 

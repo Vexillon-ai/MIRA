@@ -77,6 +77,23 @@ config, databases, and logs. **Back up `./data` to back up your whole install.**
 Docker is the supervisor here: `restart: unless-stopped` means MIRA comes back
 after a reboot and honours the **Restart** button in the web UI.
 
+The image build bundles a copy of ONNX Runtime (for in-process embeddings when
+no external embedding endpoint is configured). The download is pinned and
+checksum-verified; if you build behind a mirror or the upstream is unavailable,
+override the source without editing the `Dockerfile`:
+
+```bash
+# Point at your own mirror (set the matching checksum):
+docker build \
+  --build-arg ONNXRUNTIME_URL=https://your-mirror/onnxruntime-linux-x64-1.20.1.tgz \
+  --build-arg ONNXRUNTIME_SHA256=<sha256> \
+  -t mira:local .
+
+# Or skip it entirely if you only ever use an external embedding endpoint
+# (LM Studio / Ollama):
+docker build --build-arg ONNXRUNTIME_ENABLED=false -t mira:local .
+```
+
 ## Option C — Manual binary
 
 If you'd rather not pipe a script to your shell, do the same steps by hand:
@@ -97,6 +114,56 @@ If you'd rather not pipe a script to your shell, do the same steps by hand:
 
 > Prefer a system-wide service instead of a per-user one? Use
 > `mira install --system` (Linux).
+
+## Option D — Build from source
+
+Most people should use a prebuilt release (Option A or C) — it's signed and
+needs no toolchain. Build from source only if you're hacking on MIRA or need a
+platform we don't publish a binary for.
+
+### System prerequisites
+
+MIRA links a few vendored C/C++ libraries (libopus for voice, whisper.cpp for
+STT, and others), so a source build needs a C/C++ toolchain and a handful of
+development libraries in addition to a [Rust toolchain](https://rustup.rs) and
+[Node.js](https://nodejs.org) (for the web UI). Install them with your package
+manager first — otherwise the build fails partway through with an opaque error
+from a `-sys` crate:
+
+| Prerequisite | Debian / Ubuntu | Fedora / RHEL | macOS (Homebrew) |
+| --- | --- | --- | --- |
+| C/C++ compiler | `build-essential` | `gcc gcc-c++ make` | Xcode CLT (`xcode-select --install`) |
+| CMake | `cmake` | `cmake` | `cmake` |
+| Clang + libclang (bindgen) | `clang libclang-dev` | `clang clang-devel` | `llvm` |
+| pkg-config | `pkg-config` | `pkg-config` | `pkg-config` |
+| Opus codec (voice) | `libopus-dev` | `libopus-devel` | `opus` |
+| eSpeak NG (TTS) | `espeak-ng` | `espeak-ng` | `espeak-ng` |
+
+For example, on Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y build-essential cmake clang libclang-dev \
+  pkg-config libopus-dev espeak-ng
+```
+
+### Build
+
+```bash
+# Web UI (embedded into the binary at build time)
+cd web && npm ci && npm run build && cd ..
+
+# Release binary
+cargo build --release --bin mira
+```
+
+The binary lands at `target/release/mira`; from there follow Option C to run
+`mira setup` and `mira install`.
+
+> **Voice (`--features kokoro`)** pulls in the `ort` crate, which downloads a
+> native ONNX Runtime library **at build time**. That build therefore needs
+> network access to the ONNX Runtime release (or a mirror). If you build behind
+> a proxy or offline, point the `ort` crate at a pre-downloaded copy with its
+> `ORT_LIB_LOCATION` environment variable, or omit the `kokoro` feature.
 
 ## Choosing where your data lives
 

@@ -685,6 +685,7 @@ pub async fn chat_handler(
                                 let preview = derive_title_from_message(&message);
                                 let title_context = ProviderRequestContext {
                                     session_id: Some(session_id.clone()),
+                                    purpose: None,
                                 };
                                 tokio::spawn(async move {
                                     generate_auto_title_with_context(
@@ -769,7 +770,7 @@ pub async fn chat_handler(
                                     Arc::clone(&auth_for_task),
                                     conv_id_c.clone(),
                                     user_id.clone(),
-                                    crate::providers::ProviderRequestContext { session_id: Some(session_id.clone()) },
+                                    crate::providers::ProviderRequestContext { session_id: Some(session_id.clone()), purpose: None },
                                 ).await;
                                 if extractor_flipped && !primary_flipped {
                                     let _ = tx.send(Ok(

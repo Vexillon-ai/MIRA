@@ -38,6 +38,7 @@ fn to_fact(item: MemoryItem) -> MemoryFact {
         valid_at:    None,
         source_id:   BUILTIN_ID.to_string(),
         provenance:  None,
+        source_label: None,
         confidence:  None,
         speaker:     Speaker::parse(&item.source_speaker),
         trust:       Trust::Unverified,

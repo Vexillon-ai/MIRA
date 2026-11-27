@@ -392,7 +392,7 @@ mod tests {
     async fn classifier_forwards_conversation_request_context() {
         let seen = Arc::new(Mutex::new(None));
         let provider: Arc<dyn ModelProvider> = Arc::new(ContextRecordingProvider { seen: Arc::clone(&seen) });
-        let context = crate::providers::ProviderRequestContext { session_id: Some("web-conv-42".into()) };
+        let context = crate::providers::ProviderRequestContext { session_id: Some("web-conv-42".into()), purpose: None };
         let result = classify(&provider, "I am working on a project", "That sounds good", &context, None).await;
         assert_eq!(result, Some((EngagementLabel::Engaged, None)));
         assert_eq!(*seen.lock().unwrap(), Some(Some("web-conv-42".into())));

@@ -1040,6 +1040,7 @@ pub async fn provider_test(
     let response = if slug == "opencode" {
         let request_context = crate::providers::ProviderRequestContext {
             session_id: Some(format!("mira-provider-test-{}", uuid::Uuid::now_v7())),
+            purpose: None,
         };
         provider.generate_with_context(&messages, &opts, &request_context).await
     } else {

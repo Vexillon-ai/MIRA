@@ -357,6 +357,13 @@ impl OpenAiCompatClient {
                 .unwrap_or_else(|| format!("mira-{}", uuid::Uuid::new_v4()));
             rb = rb.header(session_header, session);
         }
+        // Stamp the request's PURPOSE so the voice
+        // router can verify only live voice turns reach it and reject anything
+        // else. Set per-request (not per-provider), so a background job that ever
+        // resolved this provider would NOT carry `voice_turn` and be rejected.
+        if let Some(purpose) = context.and_then(|c| c.purpose.as_deref()).filter(|p| !p.is_empty()) {
+            rb = rb.header("X-Mira-Purpose", purpose);
+        }
         rb
     }
 
@@ -768,13 +775,29 @@ mod tests {
             value: concat!("MIRA/", env!("CARGO_PKG_VERSION")).to_string(),
         }];
         let client = OpenAiCompatClient::new(opencode_cfg);
-        let ctx = crate::providers::ProviderRequestContext { session_id: Some("web-conv-42".into()) };
+        let ctx = crate::providers::ProviderRequestContext { session_id: Some("web-conv-42".into()), purpose: None };
         let req = client.apply_request_context(client.apply_headers(client.http.post("http://localhost/test")), Some(&ctx)).build().unwrap();
         assert_eq!(req.headers().get("x-opencode-session").and_then(|v| v.to_str().ok()), Some("web-conv-42"));
         assert_eq!(req.headers().get(reqwest::header::USER_AGENT).unwrap(), concat!("MIRA/", env!("CARGO_PKG_VERSION")));
         let ordinary = OpenAiCompatClient::new(cfg("openai", "https://api.openai.com/v1"));
         let req = ordinary.apply_request_context(ordinary.http.post("http://localhost/test"), Some(&ctx)).build().unwrap();
         assert!(req.headers().get("x-opencode-session").is_none());
+    }
+
+    #[test]
+    fn purpose_is_sent_as_x_mira_purpose_header() {
+        // A voice turn stamps the request so the voice
+        // router can admit only `voice_turn`. Any openai-compat provider sends it.
+        let client = OpenAiCompatClient::new(cfg("voice-router", "http://localhost/v1"));
+        let ctx = crate::providers::ProviderRequestContext {
+            session_id: None, purpose: Some("voice_turn".into()),
+        };
+        let req = client.apply_request_context(client.http.post("http://localhost/test"), Some(&ctx)).build().unwrap();
+        assert_eq!(req.headers().get("X-Mira-Purpose").and_then(|v| v.to_str().ok()), Some("voice_turn"));
+        // No purpose → no header (so a stray non-voice request can't masquerade).
+        let bare = crate::providers::ProviderRequestContext { session_id: None, purpose: None };
+        let req2 = client.apply_request_context(client.http.post("http://localhost/test"), Some(&bare)).build().unwrap();
+        assert!(req2.headers().get("X-Mira-Purpose").is_none());
     }
 
     #[test]
@@ -818,6 +841,7 @@ mod tests {
         configured.session_header = Some("x-custom-session");
         let ctx = crate::providers::ProviderRequestContext {
             session_id: Some("session-42".into()),
+            purpose: None,
         };
         let req = OpenAiCompatClient::new(configured)
             .apply_request_context(reqwest::Client::new().post("http://localhost/test"), Some(&ctx))

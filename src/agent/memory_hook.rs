@@ -348,7 +348,7 @@ fn render_recalled(r: &crate::memory::router::RecalledMemory, include_unavailabl
         for f in &verified {
             let src = if f.source_id.is_empty() { String::new() }
                       else { format!(" [{}]", f.source_id) };
-            block.push_str(&format!("• {}{}{}\n", f.content, src, age_suffix(f, now)));
+            block.push_str(&format!("• {}{}{}{}\n", f.content, src, attribution_suffix(f), age_suffix(f, now)));
         }
     }
     if !sourced.is_empty() {
@@ -363,7 +363,7 @@ fn render_recalled(r: &crate::memory::router::RecalledMemory, include_unavailabl
     if !notes.is_empty() {
         block.push_str(RECALLED_NOTES_HEADER);
         for f in &notes {
-            block.push_str(&format!("• {}{}\n", f.content, age_suffix(f, now)));
+            block.push_str(&format!("• {}{}{}\n", f.content, attribution_suffix(f), age_suffix(f, now)));
         }
     }
     // Earned completeness — only reached when a provider with
@@ -426,22 +426,34 @@ fn age_suffix(f: &crate::memory::provider::MemoryFact, now: DateTime<Utc>) -> St
     }
 }
 
-/// The human trust label to show beside a sourced (external, unverified) fact.
-/// Prefers the provider's own `trust_label` (the memory SPI's optional per-fact
-/// label, which `wire_fact` folds into `provider_meta`); otherwise falls back to
-/// the generic SPI trust level.
+/// The human attribution to show beside a sourced (external, unverified) fact.
+/// Prefers the SPI `source.label` (the richest human sentence — "found in
+/// <source>", "you told MIRA, <date>"), then the provider's free-text
+/// `trust_label`, then the generic SPI trust level.
 fn sourced_label(f: &crate::memory::provider::MemoryFact) -> String {
     use crate::memory::provider::Trust;
-    let meta = &f.provider_meta;
-    // A free-text label from the source wins (shown verbatim, per the SPI).
-    if let Some(l) = meta.get("trust_label").and_then(|v| v.as_str()) {
+    // The service's own attribution sentence wins, shown verbatim.
+    if let Some(l) = f.source_label.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return l.to_string();
+    }
+    if let Some(l) = f.provider_meta.get("trust_label").and_then(|v| v.as_str()) {
         let l = l.trim();
         if !l.is_empty() { return l.to_string(); }
     }
-    // Otherwise fall back to the typed SPI trust level.
     match f.trust {
         Trust::Reported => "reported by the source".into(),
         _               => "unverified".into(),
+    }
+}
+
+/// A trailing " — <attribution>" for a fact that carries a SPI `source.label`,
+/// so the human attribution ("you told MIRA, <date>") rides the line in the
+/// tiers that don't already print one (Established / your notes). Empty when the
+/// fact has no label.
+fn attribution_suffix(f: &crate::memory::provider::MemoryFact) -> String {
+    match f.source_label.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(l) => format!(" — {l}"),
+        None    => String::new(),
     }
 }
 
@@ -509,7 +521,7 @@ mod tests {
     fn note(content: &str) -> MemoryFact {
         MemoryFact {
             id: None, content: content.into(), score: Some(0.9), recorded_at: Some(Utc::now()),
-            valid_at: None, source_id: "builtin".into(), provenance: None, confidence: None,
+            valid_at: None, source_id: "builtin".into(), provenance: None, source_label: None, confidence: None,
             speaker: Speaker::User, trust: Trust::Unverified, complete_set: false,
             provider_meta: serde_json::Value::Null,
         }
@@ -574,6 +586,32 @@ mod tests {
         let block = render_recalled(&r, true);
         assert!(block.contains("Established facts"), "verified tier header");
         assert!(block.contains("[ext-http]"), "source labelled");
+    }
+
+    #[test]
+    fn render_surfaces_the_spi_source_label_attribution() {
+        // A genuinely-VERIFIED fact (stamped source) shows its label on the
+        // Established line — only `verified` ever renders as Established.
+        let mut v = note("The project shipped on 2026-02-08");
+        v.trust = Trust::Verified;
+        v.source_id = "extmem2".into();
+        v.source_label = Some("from the stamped project record".into());
+        // A "you told MIRA" fact is `reported` → it renders under "Found in a
+        // source" (attributed, never asserted), NOT Established, and prefers its
+        // source.label over the generic trust label.
+        let mut s = note("The licence expires in January 2031");
+        s.trust = Trust::Reported;
+        s.source_id = "extmem2".into();
+        s.source_label = Some("you told MIRA, 18 Nov 2026".into());
+        let r = RecalledMemory { facts: vec![v, s], unavailable: vec![], withheld: vec![], forbidden: vec![],
+                                 served: vec!["extmem2".into()] };
+        let block = render_recalled(&r, true);
+        assert!(block.contains("— from the stamped project record"), "verified label surfaced: {block}");
+        // The "you told MIRA" attribution appears under Found-in-a-source, never Established.
+        assert!(block.contains("(you told MIRA, 18 Nov 2026)"), "reported label preferred: {block}");
+        let established = block.split("Found in an external memory source").next().unwrap_or("");
+        assert!(!established.contains("you told MIRA"),
+                "a reported 'you told MIRA' fact must NOT appear under Established: {block}");
     }
 
     // An external, unverified fact carrying an SPI trust level + label.

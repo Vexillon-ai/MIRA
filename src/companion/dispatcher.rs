@@ -354,6 +354,7 @@ impl CompanionDispatcher {
         let turn_ctx = TurnContext {
             provider_request_context: Some(crate::providers::ProviderRequestContext {
                 session_id: Some(companion_provider_session_id(user_id)),
+                purpose: None,
             }),
             // Constrain the tool set — this is a check-in, not a
             // task. Leaving the full chat palette in lets the model
@@ -743,6 +744,7 @@ impl CompanionDispatcher {
         let turn_ctx = TurnContext {
             provider_request_context: Some(crate::providers::ProviderRequestContext {
                 session_id: Some(companion_provider_session_id(user_id)),
+                purpose: None,
             }),
             // The briefing is content, not a tool-calling moment — EXCEPT the
             // user's connected (MCP) calendar tools, so it can fetch events the

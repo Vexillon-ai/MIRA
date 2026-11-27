@@ -769,7 +769,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         let provider: Arc<dyn ModelProvider> = Arc::new(ContextRecordingProvider { seen: Arc::clone(&seen) });
         let transcript = vec![ChatMessage::user("I am ready to get started")];
-        let context = crate::providers::ProviderRequestContext { session_id: Some("web-conv-42".into()) };
+        let context = crate::providers::ProviderRequestContext { session_id: Some("web-conv-42".into()), purpose: None };
         let result = extract_updates_from_transcript_with_context(
             &provider, &schema(), &transcript, &json!({}), &context,
         ).await;

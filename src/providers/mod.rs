@@ -24,7 +24,14 @@ use crate::types::{ChatMessage, GenerationOptions, GenerationResponse};
 
 /// Metadata scoped to a single conversation turn. Auxiliary requests use the default.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProviderRequestContext { pub session_id: Option<String> }
+pub struct ProviderRequestContext {
+    pub session_id: Option<String>,
+    /// What this LLM request is for — `voice_turn`, `background:<job>`,
+    /// `channel:<name>`. Sent to openai-compat
+    /// providers as `X-Mira-Purpose` so the voice router can admit only live
+    /// voice turns. `None` sends no purpose header.
+    pub purpose: Option<String>,
+}
 
 /// Make an OpenAI-style base URL forgiving about the API version path.
 ///

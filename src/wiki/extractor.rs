@@ -73,7 +73,7 @@ mod context_tests {
     async fn wiki_extractor_forwards_conversation_request_context() {
         let seen = Arc::new(Mutex::new(None));
         let provider: Arc<dyn ModelProvider> = Arc::new(ContextRecordingProvider { seen: Arc::clone(&seen) });
-        let context = ProviderRequestContext { session_id: Some("web-conv-42".into()) };
+        let context = ProviderRequestContext { session_id: Some("web-conv-42".into()), purpose: None };
         let ops = extract_wiki_ops_with_context(&provider, "I like tea", "Noted", &[], 0.5, 3, &context).await;
         assert!(ops.is_empty());
         assert_eq!(*seen.lock().unwrap(), Some(Some("web-conv-42".into())));

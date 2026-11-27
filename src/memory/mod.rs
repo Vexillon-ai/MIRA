@@ -27,6 +27,7 @@ pub mod auto_extract;
 pub mod categorizer;
 pub mod fastembed_provider;
 pub mod graph;
+pub mod outbox;
 pub mod provider;
 pub mod router;
 pub mod rollup;

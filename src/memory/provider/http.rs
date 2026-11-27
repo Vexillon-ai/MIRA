@@ -98,7 +98,25 @@ impl HttpMemoryProvider {
             UserIdField::Username => username,
             UserIdField::Email    => email,
         };
-        pick.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(user_id)
+        match pick.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(v) => v,
+            None => {
+                // For a username/email-keyed store, falling back to MIRA's raw id
+                // (a UUID) is almost always a dead end — the store has no such
+                // mapping, so every call silently 400s / reads as "absent". Make
+                // that visible: it means the turn's identity resolution dropped
+                // the username/email before it reached here.
+                if !matches!(self.user_id_field, UserIdField::Id) {
+                    tracing::warn!(
+                        "memory provider '{}': user_id_field={:?} but no {:?} was supplied — \
+                         sending the raw id '{}', which a {:?}-keyed store will not map. \
+                         The caller did not resolve the account's username/email for this turn.",
+                        self.id, self.user_id_field, self.user_id_field, user_id, self.user_id_field,
+                    );
+                }
+                user_id
+            }
+        }
     }
 
     /// The extra wire key to mirror the identity under, named after the
@@ -130,21 +148,25 @@ impl HttpMemoryProvider {
 /// Field names match the service's accepted set:
 /// the per-turn fields are a CLOSED set — `speaker`, `text`, `source`, `at`,
 /// `athena_refs` — and an unlisted key is refused by name;
-/// `speaker` is one of `user|assistant|tool`. We send `speaker`+`text` (+
+/// `speaker` is one of `user|assistant|tool`. We send `speaker`+`text`+`at` (+
 /// `athena_refs` on the reply when non-empty, + `source` on a tool element when
-/// the tool has a known data source) and deliberately OMIT `at`: MIRA has no real
-/// per-message timestamps, and a stamp the service reads as the future is strictly
-/// refused, so letting the service record its receive time is both honest (receive
-/// time ≈ the live turn time) and safe from clock skew. The batch `source` is set
+/// the tool has a known data source). `at` is the turn's own time (≈ the live
+/// turn time, never the future), captured once so an outbox retry re-sends the
+/// identical stamp and the service DEDUPLICATES (without `at`, a replay is
+/// NOT_DEDUPLICABLE). The batch `source` is set
 /// by the caller; a tool element's own `source` is the thing the tool read from,
 /// which the service shows as "found in <source>" — and is REQUIRED on a tool turn
 /// (the service refuses one with none), so a tool with no mapped source gets a true
 /// per-tool fallback here rather than being sent sourceless.
 fn build_ingest_texts(turn: &TurnRecord, athena_refs: &[String]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
+    // The turn's own time, on every element — lets the service date its facts and
+    // DEDUPLICATE on replay (without `at` a re-send is NOT_DEDUPLICABLE). It is the
+    // turn's captured time, stable across outbox retries and never in the future.
+    let at = turn.occurred_at.to_rfc3339();
     let user = turn.user_msg.trim();
     if !user.is_empty() {
-        out.push(json!({ "speaker": "user", "text": user }));
+        out.push(json!({ "speaker": "user", "text": user, "at": at }));
     }
     // Tool turns, in call order, between the user and the reply. Each is its own
     // `tool`-speaker episode and ALWAYS carries a `source`: the mapped provenance
@@ -159,11 +181,11 @@ fn build_ingest_texts(turn: &TurnRecord, athena_refs: &[String]) -> Vec<Value> {
                 let tool = t.tool.trim();
                 if tool.is_empty() { "a MIRA tool".to_string() } else { format!("the {tool} tool") }
             });
-        out.push(json!({ "speaker": "tool", "text": text, "source": source }));
+        out.push(json!({ "speaker": "tool", "text": text, "source": source, "at": at }));
     }
     let asst = turn.assistant_msg.trim();
     if !asst.is_empty() {
-        let mut el = json!({ "speaker": "assistant", "text": asst });
+        let mut el = json!({ "speaker": "assistant", "text": asst, "at": at });
         // Non-empty fact ids only — the service refuses an empty-string ref (a
         // reference naming nothing). Absent is fine; empty array would be too.
         let refs: Vec<&str> = athena_refs.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
@@ -209,6 +231,13 @@ fn wire_fact(id: &str, v: &Value) -> Option<MemoryFact> {
         valid_at: None,
         source_id: id.to_string(),
         provenance: v.get("provenance").map(|p| p.to_string()),
+        // SPI v1 fact `source: {kind, label}` — the human attribution sentence
+        // ("you told MIRA, <date>", "found in <source>"). Pulled up from the
+        // top-level `source` object so render can show it; `kind` stays in
+        // provider_meta (MIRA doesn't key on it).
+        source_label: v.get("source").and_then(|s| s.get("label"))
+            .and_then(|l| l.as_str()).map(str::trim)
+            .filter(|s| !s.is_empty()).map(str::to_string),
         confidence: v.get("confidence").and_then(|x| x.as_f64()).map(|f| f as f32),
         speaker: Speaker::External,
         trust,
@@ -411,6 +440,14 @@ impl MemoryProvider for HttpMemoryProvider {
             // 404 = the service's derived write-gate is closed; treat as a no-op,
             // never fatal to the turn.
             Ok(r) if r.status == 404 => { tracing::warn!("{} write-gate closed (404): {}", self.id, r.body); Ok(0) }
+            // Classify the rest so the outbox can tell a RETRYABLE failure from a
+            // HOLD. A 4xx is the caller's/config's fault (e.g. an unmapped
+            // identity) — retrying the identical body won't help until a fix, so
+            // `InvalidRequest` → hold. A 5xx is the service's, transient →
+            // `Backend` → retry with backoff. A transport error → `Unavailable` →
+            // retry. (`422` behaves like a 4xx here.)
+            Ok(r) if (400..500).contains(&r.status) =>
+                Err(MemoryError::InvalidRequest(format!("ingest HTTP {} {}", r.status, r.body))),
             Ok(r) => Err(MemoryError::Backend(format!("ingest HTTP {}", r.status))),
             Err(e) => Err(MemoryError::Unavailable(e.to_string())),
         }
@@ -712,7 +749,7 @@ mod tests {
         assert_eq!(p.ingest(&TurnRecord {
             user_id: "t".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "c".into(),
             user_msg: "remember this".into(), assistant_msg: String::new(), conversation_id: None,
-            echo_refs: vec![],            tool_turns: vec![],
+            echo_refs: vec![],            tool_turns: vec![], occurred_at: chrono::Utc::now(),
         }).await.unwrap(), 0, "read-only ingest is a no-op");
     }
 
@@ -726,7 +763,7 @@ mod tests {
             user_id: "tarek".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "web".into(),
             user_msg: "I prefer window seats".into(),
             assistant_msg: "Noted — you prefer window seats.".into(), conversation_id: None,
-            echo_refs: vec![],            tool_turns: vec![],
+            echo_refs: vec![],            tool_turns: vec![], occurred_at: chrono::Utc::now(),
         }).await.unwrap(), 1);
         let (_, path, body) = mock.last.lock().unwrap().clone().unwrap();
         assert_eq!(path, "/ingest");
@@ -738,14 +775,14 @@ mod tests {
         assert_eq!(texts[1]["speaker"], "assistant");
         assert_eq!(texts[1]["text"], "Noted — you prefer window seats.");
         assert_eq!(body["source"], "a MIRA conversation (web)"); // true provenance, not a constant
-        assert!(texts[0].get("at").is_none(), "at is omitted (service records receive time)");
+        assert!(texts[0].get("at").is_some(), "at is sent per turn (for dedup + dating)");
 
         // write-gate closed → 404 → no-op, not fatal.
         let (p2, _) = provider(vec![("/ingest", 404, json!({ "reason": "no_acceptance_artifact" }))], false);
         assert_eq!(p2.ingest(&TurnRecord {
             user_id: "t".into(), username: None, email: None, agent_id: None, thread_id: None, channel: "c".into(),
             user_msg: "x".into(), assistant_msg: String::new(), conversation_id: None,
-            echo_refs: vec![],            tool_turns: vec![],
+            echo_refs: vec![],            tool_turns: vec![], occurred_at: chrono::Utc::now(),
         }).await.unwrap(), 0);
     }
 
@@ -758,14 +795,14 @@ mod tests {
             assistant_msg: "Ada Lovelace was a mathematician.".into(),
             conversation_id: None,
             echo_refs: vec![],
-            tool_turns: vec![],
+            tool_turns: vec![],            occurred_at: chrono::Utc::now(),
         };
         // No echo refs → `text`/`speaker` only, no athena_refs, no `at`.
         let t = build_ingest_texts(&turn, &[]);
         assert_eq!(t.len(), 2);
         assert_eq!(t[0]["speaker"], "user");
         assert_eq!(t[0]["text"], "who is Ada Lovelace"); // trimmed
-        assert!(t[0].get("at").is_none());
+        assert!(t[0].get("at").is_some(), "at present");
         assert_eq!(t[1]["speaker"], "assistant");
         assert!(t[1].get("athena_refs").is_none());
         // Echo refs (provenance.fact_id from a served fact) attach to the reply.
@@ -795,6 +832,7 @@ mod tests {
                 // Empty-text tool turn → dropped entirely.
                 ToolTurn { tool: "noop".into(), text: "   ".into(), source: Some("x".into()) },
             ],
+            occurred_at: chrono::Utc::now(),
         };
         let t = build_ingest_texts(&turn, &[]);
         // user, calendar, math, assistant — the empty one is dropped.
@@ -809,7 +847,7 @@ mod tests {
         assert_eq!(t[2]["source"], "the math_eval tool");
         assert_eq!(t[3]["speaker"], "assistant");
         // Tool turns carry no `at` (same as the human sides).
-        assert!(t[1].get("at").is_none());
+        assert!(t[1].get("at").is_some(), "at present");
     }
 
     #[tokio::test]
@@ -901,7 +939,7 @@ mod tests {
             user_id: "uuid-9".into(), username: Some("tarek".into()), email: Some("tarek@example.com".into()),
             agent_id: None, thread_id: None, channel: "web".into(),
             user_msg: "I prefer window seats".into(), assistant_msg: String::new(), conversation_id: None,
-            echo_refs: vec![],            tool_turns: vec![],
+            echo_refs: vec![],            tool_turns: vec![], occurred_at: chrono::Utc::now(),
         }).await.unwrap();
         assert_eq!(n, 1);
         let (_, path, body) = mock.last.lock().unwrap().clone().unwrap();

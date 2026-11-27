@@ -150,6 +150,12 @@ pub struct MemoryFact {
     pub source_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<String>,
+    /// The human attribution sentence from the service's top-level `source.label`
+    /// (SPI v1 fact `source: {kind, label}`), e.g. "you told MIRA, 18 Nov 2026"
+    /// or "found in <source>". Surfaced to the user as-is; `None` when the
+    /// service doesn't supply one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
     pub speaker: Speaker,
@@ -187,7 +193,7 @@ pub enum MemoryRetrieval {
 /// by where it came from). `text` is the tool's result (clamped, non-empty);
 /// `source` is the provenance a service shows as "found in <source>" (None when
 /// the tool has no external data source — the element then omits `source`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolTurn {
     /// The tool that ran — kept for provenance mapping/debugging, not sent as-is.
     pub tool: String,
@@ -198,7 +204,7 @@ pub struct ToolTurn {
 }
 
 /// A completed turn handed to `ingest` (spec: `ingest_turn`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnRecord {
     pub user_id: String,
     /// The account's username/email, when known, so an HTTP provider configured
@@ -214,6 +220,13 @@ pub struct TurnRecord {
     pub user_msg: String,
     pub assistant_msg: String,
     pub conversation_id: Option<String>,
+    /// When this turn happened, sent as each element's `at` so a service can date
+    /// its facts AND deduplicate on replay. Captured ONCE at turn time (not at
+    /// send time), so an outbox retry sends the identical `at` and the service
+    /// recognises the duplicate. Never in the future (it's the turn's own time).
+    /// Defaults to now for payloads persisted before this field existed.
+    #[serde(default = "chrono::Utc::now")]
+    pub occurred_at: DateTime<Utc>,
     /// External `fact_id`s this turn's reply repeats from facts the memory
     /// service served this turn — so a whole-turn ingest can mark the assistant
     /// element (`athena_refs`) and the service's echo guard skips it.

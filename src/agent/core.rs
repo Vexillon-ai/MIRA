@@ -212,6 +212,10 @@ pub struct AgentCore {
     // hook can resolve a user's group memberships. Absent in tests and
     // channel-only builds — falls back to empty group list.
     auth:              OnceLock<Arc<LocalAuthService>>,
+    // Durable outbox for harness ingest (persist-before-send + retry/hold).
+    // Installed by the Gateway when memory writers exist; when absent the
+    // harness falls back to a direct fire-and-forget send.
+    ingest_outbox:     OnceLock<Arc<crate::memory::outbox::MemoryOutbox>>,
     // Installed by the Gateway after the event bus is created, so internal
     // emitters (chat handler, tool loop, periodic tasks) can publish without
     // a direct dependency on the Gateway. Absent in unit tests — emitters
@@ -336,6 +340,7 @@ impl AgentCore {
             max_tool_rounds: max_rounds,
             max_context_turns: max_turns,
             auth: OnceLock::new(),
+            ingest_outbox: OnceLock::new(),
             degradations: OnceLock::new(),
             audit: OnceLock::new(),
             event_bus: OnceLock::new(),
@@ -652,6 +657,12 @@ impl AgentCore {
     // Lets the memory hook resolve group memberships for scoped retrieval.
     pub fn set_auth(&self, auth: Arc<LocalAuthService>) {
         let _ = self.auth.set(auth);
+    }
+
+    /// Install the durable ingest outbox (harness ingest enqueues to it instead
+    /// of a fire-and-forget send).
+    pub fn set_ingest_outbox(&self, outbox: Arc<crate::memory::outbox::MemoryOutbox>) {
+        let _ = self.ingest_outbox.set(outbox);
     }
 
     // Install the health degradation tracker so the in-core
@@ -1971,10 +1982,23 @@ impl AgentCore {
         // large result that arrives during it; on a small local window one big
         // result overflows the model. 0 (unbudgeted cloud/legacy) = no clamp.
         let tool_result_cap_bytes = effective_ctx;
-        let provider_request_context = context.provider_request_context.clone()
+        let mut provider_request_context = context.provider_request_context.clone()
             .unwrap_or_else(|| crate::providers::ProviderRequestContext {
                 session_id: Some(session_id.to_string()),
+                purpose: None,
             });
+        // Tag the request's purpose. A live voice
+        // turn gets `voice_turn` (the only thing the voice provider ever serves);
+        // every other turn gets `channel:<name>`. Sent as `X-Mira-Purpose` so the
+        // voice router can admit only `voice_turn` and reject anything else, and
+        // logged for visibility. Background jobs (titles, memory/wiki extraction,
+        // consolidation) run on the normal chain via their own providers and never
+        // reach here, so they never carry `voice_turn`.
+        if provider_request_context.purpose.is_none() {
+            provider_request_context.purpose = Some(
+                if voice { "voice_turn".to_string() } else { format!("channel:{channel}") },
+            );
+        }
         // Race the tool loop against the turn's cancellation
         // token. The loop is the long pole (tool rounds + streamed answer); a
         // barge-in should stop it fast. Dropping the loop future aborts whatever
@@ -2128,9 +2152,12 @@ impl AgentCore {
         // vs the provider's real prompt count, and cache hit/write + completion.
         let compaction_suffix = if compaction_block.is_empty() { "" } else { "+compact" };
         info!(
-            "turn: session='{session_id}' channel={channel} mode={window_mode}{compaction_suffix} \
+            "turn: session='{session_id}' channel={channel} purpose={purpose} provider={prov} \
+             mode={window_mode}{compaction_suffix} \
              history={kept}/{total} tokens[in est={est_input_tokens} actual={actual} \
              cache_r={cr} cache_w={cw} out={out}]",
+            purpose = provider_request_context.purpose.as_deref().unwrap_or("-"),
+            prov = provider.name(),
             kept = history.len() - skip, total = history.len(),
             actual = usage.prompt_tokens,
             cr = usage.cache_read_tokens, cw = usage.cache_write_tokens,
@@ -2427,15 +2454,30 @@ impl AgentCore {
                     conversation_id: context.conversation_id.clone(),
                     echo_refs,
                     tool_turns,
+                    // The turn's time, captured once here (not at send time) so an
+                    // outbox retry re-sends the identical `at` and the service
+                    // deduplicates. ≈ the live turn time; never in the future.
+                    occurred_at: chrono::Utc::now(),
                 };
                 for w in &self.memory_providers.harness_writers {
-                    let w = Arc::clone(w);
-                    let turn = turn.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = w.ingest(&turn).await {
-                            warn!("memory provider '{}' ingest failed (non-fatal): {}", w.id(), e);
-                        }
-                    });
+                    // Durable path: persist to the outbox (worker delivers with
+                    // retry/hold). If the outbox isn't wired or the insert fails,
+                    // fall back to a direct fire-and-forget send so the turn is
+                    // never lost to a missing outbox.
+                    let enqueued = self.ingest_outbox.get()
+                        .map(|ob| ob.enqueue(w.id(), &turn))
+                        .transpose()
+                        .unwrap_or_else(|e| { warn!("ingest outbox enqueue failed for '{}' ({e}); sending directly", w.id()); None })
+                        .is_some();
+                    if !enqueued {
+                        let w = Arc::clone(w);
+                        let turn = turn.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = w.ingest(&turn).await {
+                                warn!("memory provider '{}' ingest failed (non-fatal): {}", w.id(), e);
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -2485,7 +2527,7 @@ impl AgentCore {
                     };
                     crate::companion::engagement::spawn_post_hook_with_context(
                         assessor,
-                        crate::providers::ProviderRequestContext { session_id: Some(session_id.to_string()) },
+                        crate::providers::ProviderRequestContext { session_id: Some(session_id.to_string()), purpose: None },
                         user_id.to_string(),
                         Some(session_id.to_string()),
                         Some(uuid::Uuid::now_v7().to_string()),
@@ -2530,7 +2572,7 @@ impl AgentCore {
                     input.to_string(),
                     response_text,
                     self.config.wiki.auto_extract.clone(),
-                    crate::providers::ProviderRequestContext { session_id: Some(session_id.to_string()) },
+                    crate::providers::ProviderRequestContext { session_id: Some(session_id.to_string()), purpose: None },
                 );
             }
         }
@@ -3550,6 +3592,7 @@ mod tests {
         let context = TurnContext {
             provider_request_context: Some(crate::providers::ProviderRequestContext {
                 session_id: Some("companion-alice".into()),
+                purpose: None,
             }),
             ..TurnContext::default()
         };

@@ -67,15 +67,6 @@ FROM debian:bookworm-slim AS runtime
 # Pin signal-cli so a broken upstream release can't silently change the
 # behaviour of an image rebuild. Override at build time with `--build-arg`.
 ARG SIGNAL_CLI_VERSION=0.14.2
-# fastembed (`ort-load-dynamic` feature) dlopens libonnxruntime.so at runtime
-# whenever the configured embedding endpoint is unreachable — which is the
-# default inside a container with no external LM Studio / Ollama. Ship a
-# matching ORT build so the fallback path works out of the box. Keep this in
-# step with deps/manifest.toml's onnxruntime pin. `ORT_DYLIB_PATH` (set below)
-# points MIRA at it — its is_onnxruntime_available() check only looks at
-# ORT_DYLIB_PATH / ~/.mira/deps, never system loader paths, so without the env
-# the bundled lib would be invisible and embeddings would fall back to noop.
-ARG ONNXRUNTIME_VERSION=1.20.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -88,15 +79,57 @@ RUN apt-get update \
       curl \
       default-jre-headless \
       tini \
+ && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL "https://github.com/AsamK/signal-cli/releases/download/v${SIGNAL_CLI_VERSION}/signal-cli-${SIGNAL_CLI_VERSION}.tar.gz" \
       | tar -xz -C /opt \
- && ln -sf "/opt/signal-cli-${SIGNAL_CLI_VERSION}/bin/signal-cli" /usr/local/bin/signal-cli \
- && curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz" \
-      | tar -xz -C /opt \
- && cp "/opt/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" /usr/local/lib/ \
- && ln -sf "/usr/local/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" /usr/local/lib/libonnxruntime.so \
- && ldconfig \
- && rm -rf "/opt/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}" /var/lib/apt/lists/*
+ && ln -sf "/opt/signal-cli-${SIGNAL_CLI_VERSION}/bin/signal-cli" /usr/local/bin/signal-cli
+
+# ── ONNX Runtime (fastembed's in-process fallback) ────────────────────────
+# fastembed (`ort-load-dynamic` feature) dlopens libonnxruntime.so at runtime
+# whenever the configured embedding endpoint is unreachable — which is the
+# default inside a container with no external LM Studio / Ollama. Ship a
+# matching ORT build so the fallback path works out of the box. `ORT_DYLIB_PATH`
+# (set below) points MIRA at it — its is_onnxruntime_available() check only looks
+# at ORT_DYLIB_PATH / ~/.mira/deps, never system loader paths, so without the env
+# the bundled lib would be invisible and embeddings would fall back to noop.
+#
+# Resilience (issue #15): the tarball is pinned and checksum-verified (the build
+# fails loud on a mismatch); the URL + checksum are build-arg overridable so an
+# operator can point at any mirror without editing this file; and a controlled
+# fallback mirror is tried automatically when the primary (Microsoft) URL is
+# unavailable. For an image that only ever uses an external embedding endpoint,
+# `--build-arg ONNXRUNTIME_ENABLED=false` skips the fetch entirely.
+#
+# Keep ONNXRUNTIME_VERSION / ONNXRUNTIME_SHA256 in step with deps/manifest.toml
+# ([deps.onnxruntime.linux-x86_64]).
+ARG ONNXRUNTIME_VERSION=1.20.1
+ARG ONNXRUNTIME_ENABLED=true
+ARG ONNXRUNTIME_URL=https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz
+# Fallback copy we control. The release pipeline uploads
+# onnxruntime-linux-x64-<ver>.tgz as an asset on this tag; set empty to disable.
+ARG ONNXRUNTIME_FALLBACK_URL=https://github.com/Vexillon-ai/MIRA/releases/download/deps-onnxruntime-v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz
+ARG ONNXRUNTIME_SHA256=67db4dc1561f1e3fd42e619575c82c601ef89849afc7ea85a003abbac1a1a105
+RUN set -eu; \
+    if [ "${ONNXRUNTIME_ENABLED}" != "true" ]; then \
+      echo "ONNXRUNTIME_ENABLED=${ONNXRUNTIME_ENABLED} — skipping bundled ONNX Runtime (external embedding endpoint only)"; \
+    else \
+      tgz=/tmp/onnxruntime.tgz; \
+      if ! curl -fSL --retry 3 --retry-delay 2 -o "${tgz}" "${ONNXRUNTIME_URL}"; then \
+        echo "WARN: primary ONNX Runtime URL unavailable: ${ONNXRUNTIME_URL}" >&2; \
+        if [ -n "${ONNXRUNTIME_FALLBACK_URL}" ]; then \
+          echo "INFO: trying fallback mirror: ${ONNXRUNTIME_FALLBACK_URL}" >&2; \
+          curl -fSL --retry 3 --retry-delay 2 -o "${tgz}" "${ONNXRUNTIME_FALLBACK_URL}"; \
+        else \
+          echo "ERROR: no ONNXRUNTIME_FALLBACK_URL set — cannot recover" >&2; exit 1; \
+        fi; \
+      fi; \
+      echo "${ONNXRUNTIME_SHA256}  ${tgz}" | sha256sum -c -; \
+      tar -xzf "${tgz}" -C /opt; \
+      cp "/opt/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" /usr/local/lib/; \
+      ln -sf "/usr/local/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" /usr/local/lib/libonnxruntime.so; \
+      ldconfig; \
+      rm -rf "/opt/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}" "${tgz}"; \
+    fi
 
 COPY --from=rust-builder /build/target/release/mira /usr/local/bin/mira
 COPY --from=web-builder  /web/dist                  /app/web

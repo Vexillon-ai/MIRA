@@ -294,7 +294,7 @@ async fn run_one_question(
                             user_msg,
                             assistant_msg.clone(),
                             wiki_cfg.clone(),
-                            crate::providers::ProviderRequestContext { session_id: Some(conv_id.clone()) },
+                            crate::providers::ProviderRequestContext { session_id: Some(conv_id.clone()), purpose: None },
                         ).await;
                     }
                 }

@@ -1076,6 +1076,26 @@ impl GatewayBuilder {
         if let Some(ref a) = auth_service {
             agent_core.set_auth(Arc::clone(a));
         }
+        // Durable ingest outbox: when there are harness writers (files / an
+        // external HTTP memory service), persist each turn before delivery and
+        // let a background worker retry transient failures / hold 4xx config
+        // errors instead of the old fire-and-forget drop. Default tunables;
+        // falls back to a direct send if this can't be opened.
+        if !memory_providers.harness_writers.is_empty() {
+            match crate::memory::outbox::MemoryOutbox::open(
+                &data_dir.join("ingest_outbox.db"),
+                memory_providers.harness_writers.clone(),
+                crate::memory::outbox::OutboxConfig::default(),
+            ) {
+                Ok(ob) => {
+                    let ob = Arc::new(ob);
+                    agent_core.set_ingest_outbox(Arc::clone(&ob));
+                    ob.spawn_worker();
+                    info!("ingest outbox enabled ({} writer(s))", memory_providers.harness_writers.len());
+                }
+                Err(e) => warn!("ingest outbox unavailable ({e}); harness ingest falls back to direct send"),
+            }
+        }
         // Hand the degradation tracker to AgentCore so the in-core SafetyFloor +
         // engagement classifier can surface safety-path failures.
         agent_core.set_degradations(Arc::clone(&degradation_tracker));

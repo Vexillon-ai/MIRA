@@ -266,7 +266,7 @@ mod tests {
     fn fact(content: &str, score: f32) -> MemoryFact {
         MemoryFact {
             id: None, content: content.into(), score: Some(score), recorded_at: None,
-            valid_at: None, source_id: String::new(), provenance: None, confidence: None,
+            valid_at: None, source_id: String::new(), provenance: None, source_label: None, confidence: None,
             speaker: Speaker::User, trust: Trust::Unverified, complete_set: false,
             provider_meta: serde_json::Value::Null,
         }

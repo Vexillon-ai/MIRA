@@ -318,6 +318,7 @@ mod tests {
         let g = guard(inner.clone(), EmptyResponseRetryConfig { enabled: true, max_retries: 1 });
         let context = crate::providers::ProviderRequestContext {
             session_id: Some("session-42".into()),
+            purpose: None,
         };
         let response = g.generate_with_context(&[], &GenerationOptions::default(), &context)
             .await.unwrap();
@@ -332,6 +333,7 @@ mod tests {
         let g = guard(inner.clone(), EmptyResponseRetryConfig { enabled: true, max_retries: 1 });
         let context = crate::providers::ProviderRequestContext {
             session_id: Some("session-42".into()),
+            purpose: None,
         };
         let mut visible = String::new();
         let response = g.generate_stream_with_context(

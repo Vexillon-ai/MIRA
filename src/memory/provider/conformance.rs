@@ -78,7 +78,7 @@ pub async fn run_write_contract(
     let turn = TurnRecord {
         user_id: user.into(), username: None, email: None, agent_id: None, thread_id: None, channel: "conf".into(),
         user_msg: content.into(), assistant_msg: String::new(), conversation_id: None,
-        echo_refs: vec![],        tool_turns: vec![],
+        echo_refs: vec![],        tool_turns: vec![], occurred_at: chrono::Utc::now(),
     };
     p.ingest(&turn).await.map_err(|e| format!("ingest: {e}"))?;
 

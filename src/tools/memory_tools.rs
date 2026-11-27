@@ -636,7 +636,7 @@ mod tests {
                 id: Some("subj/row1".into()),
                 content: "Jordan Vale was a community organizer and social worker.".into(),
                 score: Some(0.9), recorded_at: None, valid_at: None,
-                source_id: "ext-http".into(), provenance: None, confidence: None,
+                source_id: "ext-http".into(), provenance: None, source_label: None, confidence: None,
                 speaker: crate::memory::provider::Speaker::External,
                 trust: Trust::Unverified, complete_set: false,
                 provider_meta: json!({ "trust": "unverified", "trust_label": "found in source, not verified" }),
