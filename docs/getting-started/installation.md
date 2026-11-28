@@ -81,7 +81,9 @@ after a reboot and honours the **Restart** button in the web UI.
 
 Rather than build locally, you can pull the official image, published to the
 GitHub Container Registry on each release and **signed with cosign** under the
-`vexillon.ai` identity:
+`vexillon.ai` identity. It's **multi-arch** — `linux/amd64` and `linux/arm64`, so
+Docker pulls the right one automatically on an Intel/AMD box, an Apple Silicon Mac,
+or ARM cloud/Raspberry Pi:
 
 ```bash
 docker pull ghcr.io/vexillon-ai/mira:latest        # or a specific :v0.X.Y

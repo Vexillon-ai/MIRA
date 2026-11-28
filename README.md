@@ -190,8 +190,9 @@ A single **gateway** process hosts the agent, the HTTP/web API, the channel poll
 
 </details>
 
-Prefer not to build? Pull the official image, published to GHCR on each release
-and **cosign-signed** under the `vexillon.ai` identity:
+Prefer not to build? Pull the official **multi-arch** image (`linux/amd64` +
+`linux/arm64`), published to GHCR on each release and **cosign-signed** under the
+`vexillon.ai` identity:
 
 ```bash
 cosign verify --key verification/cosign.pub ghcr.io/vexillon-ai/mira:latest   # optional

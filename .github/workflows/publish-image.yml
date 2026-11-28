@@ -1,23 +1,22 @@
-# Publish + sign the public MIRA container image.
+# Publish + sign the public MIRA container image (multi-arch: linux/amd64 + arm64).
 #
-# This workflow runs ONLY in the public mirror (github.com/Vexillon-ai/MIRA),
-# triggered by a pushed release tag. The tag is the already-sanitized public
-# source — which is the image's only guarantee of being leak-free — so the job
-# checks out THAT tag and builds from it. Nothing here may reference the private
-# origin (no private URLs/tokens, internal hostnames, or private SHAs).
+# Runs ONLY in the public mirror (github.com/Vexillon-ai/MIRA), triggered by a
+# pushed release tag. The tag is the already-sanitized public source — the image's
+# only guarantee of being leak-free — so the job checks out THAT tag and builds
+# from it. Nothing here references the private origin (no private URLs/tokens,
+# internal hostnames, or private SHAs).
 #
-# It builds the repo's Dockerfile unchanged (single-arch linux/amd64; the
-# Dockerfile already fetches linux-x64 ONNX Runtime from our own
-# deps-onnxruntime-v1.20.1 mirror with a checksum pin + fallback), pushes to
-# ghcr.io/vexillon-ai/mira, then signs the pushed DIGEST with cosign under the
-# vexillon.ai identity.
+# Shape: a per-arch matrix builds each platform on its OWN native hosted runner
+# (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm — NO QEMU emulation, which
+# would take hours for MIRA's Rust build) and pushes an untagged per-arch image
+# BY DIGEST. A merge job then assembles the multi-arch manifest list under the
+# release tag (+ :latest on a real tag push) and cosign-signs the INDEX digest —
+# one signature covering both arches, verifiable with a single `cosign verify`.
 #
-# Fails CLOSED: if the cosign secrets are not provisioned, the job aborts BEFORE
-# any push, so an unsigned image is never published to a public tag.
-#
-# arm64 is deferred (needs buildx/QEMU + an arch-aware ONNX step: amd64 uses the
-# linux-x64 .tgz, arm64 uses the aarch64 PyPI .whl whose internal lib_path
-# differs) — a separate follow-up.
+# The Dockerfile's ONNX Runtime fetch is arch-aware (keyed on TARGETARCH) and
+# pulls each arch's artifact from our own deps-onnxruntime-v1.20.1 mirror with a
+# checksum pin + fallback. Fails CLOSED: if the cosign secrets are absent, every
+# job aborts BEFORE any push, so an unsigned image is never published.
 name: Publish container image
 
 on:
@@ -27,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to build and publish (e.g. v0.396.0)'
+        description: 'Release tag to build and publish (e.g. v0.397.0)'
         required: true
 
 permissions:
@@ -38,38 +37,42 @@ env:
   IMAGE: ghcr.io/vexillon-ai/mira
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm   # native arm64 hosted runner — no emulation
+    runs-on: ${{ matrix.runner }}
     steps:
-      # Resolve the tag + the image tags to push. `:latest` is moved only on a
-      # real tag push (the newest release); a manual workflow_dispatch rebuild of
-      # an older tag must not drag `:latest` backwards.
+      - name: Prepare platform tag
+        run: |
+          platform="${{ matrix.platform }}"
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
       - name: Resolve release tag
         id: meta
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            ref="${{ inputs.tag }}"
-            tags="${IMAGE}:${ref}"
+            echo "ref=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           else
-            ref="${GITHUB_REF_NAME}"
-            tags="${IMAGE}:${ref},${IMAGE}:latest"
+            echo "ref=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
-          echo "ref=${ref}"   >> "$GITHUB_OUTPUT"
-          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
 
-      # Fail closed: no signing key → no publish. Checked FIRST, before any push,
-      # so a misconfigured repo can never ship an unsigned image to a public tag.
+      # Fail closed: no signing key → no publish. Checked before the build/push.
       - name: Require cosign signing secrets
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
           if [ -z "${COSIGN_PRIVATE_KEY}" ] || [ -z "${COSIGN_PASSWORD}" ]; then
-            echo "::error::cosign signing secrets (COSIGN_PRIVATE_KEY / COSIGN_PASSWORD) are not set on this repo — refusing to publish an UNSIGNED image. Provision the vexillon.ai cosign keypair as Actions secrets first."
+            echo "::error::cosign signing secrets (COSIGN_PRIVATE_KEY / COSIGN_PASSWORD) are not set — refusing to publish an unsigned image."
             exit 1
           fi
 
-      # Build from the sanitized public tag, not the default branch.
       - name: Checkout the release tag
         uses: actions/checkout@v4
         with:
@@ -86,41 +89,110 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Single-arch linux/amd64. `provenance: false` keeps the pushed artifact a
-      # plain single-platform image (not an index with an attestation manifest),
-      # so the mirror's `docker history` + layer-provenance audit stays legible
-      # and there's one unambiguous digest to sign. Labels reference the PUBLIC
-      # repo only — never the private remote. Build-args stay at their public
-      # defaults (the ONNX override/fallback args); no token or internal URL is
-      # ever passed as a build-arg (it would be recoverable via `docker history`).
-      - name: Build and push (linux/amd64)
+      # Build this arch on its native runner and push it UNTAGGED, by digest.
+      # provenance/sbom:false keeps each per-arch artifact a plain image manifest
+      # (legible for the mirror's docker-history/per-arch provenance audit). Labels
+      # reference the PUBLIC repo only; no token/internal URL is passed as a build-arg.
+      - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64
-          push: true
+          platforms: ${{ matrix.platform }}
           provenance: false
           sbom: false
-          tags: ${{ steps.meta.outputs.tags }}
           labels: |
             org.opencontainers.image.source=https://github.com/Vexillon-ai/MIRA
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.meta.outputs.ref }}
             org.opencontainers.image.licenses=AGPL-3.0-or-later
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # Fail closed here too — the signing step is in this job.
+      - name: Require cosign signing secrets
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          if [ -z "${COSIGN_PRIVATE_KEY}" ] || [ -z "${COSIGN_PASSWORD}" ]; then
+            echo "::error::cosign signing secrets are not set — refusing to assemble/sign the image."
+            exit 1
+          fi
+
+      - name: Resolve release tag + image tags
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ref="${{ inputs.tag }}"
+            tags="-t ${IMAGE}:${ref}"
+          else
+            ref="${GITHUB_REF_NAME}"
+            # :latest tracks the newest release — only on a real tag push.
+            tags="-t ${IMAGE}:${ref} -t ${IMAGE}:latest"
+          fi
+          echo "ref=${ref}"   >> "$GITHUB_OUTPUT"
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: Download per-arch digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Assemble the multi-arch manifest list
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create ${{ steps.meta.outputs.tags }} \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+
+      - name: Capture the index digest
+        id: idx
+        run: |
+          digest=$(docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.ref }}" \
+            --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      # Sign the pushed DIGEST (not a tag — a tag can be re-pointed) under the
-      # vexillon.ai cosign key, which lives ONLY in the owner-provisioned Actions
-      # secrets. The key is never generated, embedded, printed, or echoed here.
-      - name: Sign the image digest with cosign
+      # Sign the INDEX digest — it covers both per-arch manifests, so a single
+      # `cosign verify --key verification/cosign.pub ${IMAGE}:<tag>` verifies the
+      # whole multi-arch image. Key lives only in the owner-provisioned secrets.
+      - name: Sign the multi-arch index with cosign
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
           cosign sign --yes --key env://COSIGN_PRIVATE_KEY \
-            "${IMAGE}@${{ steps.build.outputs.digest }}"
-          echo "Signed ${IMAGE}@${{ steps.build.outputs.digest }} (tag ${{ steps.meta.outputs.ref }})"
+            "${IMAGE}@${{ steps.idx.outputs.digest }}"
+          echo "Signed ${IMAGE}@${{ steps.idx.outputs.digest }} (multi-arch index for tag ${{ steps.meta.outputs.ref }})"

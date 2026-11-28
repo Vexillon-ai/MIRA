@@ -79,6 +79,7 @@ RUN apt-get update \
       curl \
       default-jre-headless \
       tini \
+      unzip \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL "https://github.com/AsamK/signal-cli/releases/download/v${SIGNAL_CLI_VERSION}/signal-cli-${SIGNAL_CLI_VERSION}.tar.gz" \
       | tar -xz -C /opt \
@@ -93,42 +94,66 @@ RUN apt-get update \
 # at ORT_DYLIB_PATH / ~/.mira/deps, never system loader paths, so without the env
 # the bundled lib would be invisible and embeddings would fall back to noop.
 #
-# Resilience (issue #15): the tarball is pinned and checksum-verified (the build
-# fails loud on a mismatch); the URL + checksum are build-arg overridable so an
-# operator can point at any mirror without editing this file; and a controlled
-# fallback mirror is tried automatically when the primary (Microsoft) URL is
-# unavailable. For an image that only ever uses an external embedding endpoint,
-# `--build-arg ONNXRUNTIME_ENABLED=false` skips the fetch entirely.
+# Resilience (issue #15) + multi-arch: the artifact is pinned and checksum-verified
+# (the build fails loud on a mismatch); the URL + checksum are build-arg overridable
+# so an operator can point at any mirror; and a controlled fallback is tried when the
+# primary URL is unavailable. For an image that only ever uses an external embedding
+# endpoint, `--build-arg ONNXRUNTIME_ENABLED=false` skips the fetch entirely.
 #
-# Keep ONNXRUNTIME_VERSION / ONNXRUNTIME_SHA256 in step with deps/manifest.toml
-# ([deps.onnxruntime.linux-x86_64]).
+# Arch-aware: buildx sets TARGETARCH (amd64|arm64). The whole microsoft/onnxruntime
+# repo was removed upstream, so both arches are served from OUR mirror
+# (deps-onnxruntime-v<ver>): amd64 = Microsoft's linux-x64 .tgz; arm64 = Microsoft's
+# build as the PyPI aarch64 .whl (a zip — hence `unzip` above). Values below MUST
+# stay in step with deps/manifest.toml (single source of truth): same URLs, sha256s,
+# and the lib path inside each archive. After extraction the runtime setup is
+# arch-identical (same /usr/local/lib/libonnxruntime.so + ORT_DYLIB_PATH).
 ARG ONNXRUNTIME_VERSION=1.20.1
 ARG ONNXRUNTIME_ENABLED=true
-ARG ONNXRUNTIME_URL=https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz
-# Fallback copy we control. The release pipeline uploads
-# onnxruntime-linux-x64-<ver>.tgz as an asset on this tag; set empty to disable.
-ARG ONNXRUNTIME_FALLBACK_URL=https://github.com/Vexillon-ai/MIRA/releases/download/deps-onnxruntime-v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz
-ARG ONNXRUNTIME_SHA256=67db4dc1561f1e3fd42e619575c82c601ef89849afc7ea85a003abbac1a1a105
+ARG TARGETARCH
+# Overrides (empty → the per-arch default below). ONNXRUNTIME_SHA256 must match
+# whatever ONNXRUNTIME_URL points at.
+ARG ONNXRUNTIME_URL=
+ARG ONNXRUNTIME_FALLBACK_URL=
+ARG ONNXRUNTIME_SHA256=
 RUN set -eu; \
     if [ "${ONNXRUNTIME_ENABLED}" != "true" ]; then \
       echo "ONNXRUNTIME_ENABLED=${ONNXRUNTIME_ENABLED} — skipping bundled ONNX Runtime (external embedding endpoint only)"; \
     else \
-      tgz=/tmp/onnxruntime.tgz; \
-      if ! curl -fSL --retry 3 --retry-delay 2 -o "${tgz}" "${ONNXRUNTIME_URL}"; then \
-        echo "WARN: primary ONNX Runtime URL unavailable: ${ONNXRUNTIME_URL}" >&2; \
-        if [ -n "${ONNXRUNTIME_FALLBACK_URL}" ]; then \
-          echo "INFO: trying fallback mirror: ${ONNXRUNTIME_FALLBACK_URL}" >&2; \
-          curl -fSL --retry 3 --retry-delay 2 -o "${tgz}" "${ONNXRUNTIME_FALLBACK_URL}"; \
+      arch="${TARGETARCH:-}"; [ -n "${arch}" ] || arch="$(dpkg --print-architecture)"; \
+      mirror="https://github.com/Vexillon-ai/MIRA/releases/download/deps-onnxruntime-v${ONNXRUNTIME_VERSION}"; \
+      case "${arch}" in \
+        amd64) file="onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"; \
+               def_sha="67db4dc1561f1e3fd42e619575c82c601ef89849afc7ea85a003abbac1a1a105"; \
+               kind="tar"; \
+               libsrc="onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}"; \
+               def_fb="https://github.com/cga-management/third-party-mirror/releases/download/onnxruntime-${ONNXRUNTIME_VERSION}/${file}" ;; \
+        arm64) file="onnxruntime-${ONNXRUNTIME_VERSION}-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"; \
+               def_sha="f1f56e898815963d6dc4ee1c35fc6c36506466eff6d16f3cb9848cea4e8c8172"; \
+               kind="zip"; \
+               libsrc="onnxruntime/capi/libonnxruntime.so.${ONNXRUNTIME_VERSION}"; \
+               def_fb="https://files.pythonhosted.org/packages/c5/9d/a42a84e10f1744dd27c6f2f9280cc3fb98f869dd19b7cd042e391ee2ab61/${file}" ;; \
+        *)     echo "ERROR: unsupported arch '${arch}' for the bundled ONNX Runtime" >&2; exit 1 ;; \
+      esac; \
+      url="${ONNXRUNTIME_URL:-${mirror}/${file}}"; \
+      fb="${ONNXRUNTIME_FALLBACK_URL:-${def_fb}}"; \
+      sha="${ONNXRUNTIME_SHA256:-${def_sha}}"; \
+      arc=/tmp/onnxruntime.archive; \
+      if ! curl -fSL --retry 3 --retry-delay 2 -o "${arc}" "${url}"; then \
+        echo "WARN: primary ONNX Runtime URL unavailable: ${url}" >&2; \
+        if [ -n "${fb}" ]; then \
+          echo "INFO: trying fallback: ${fb}" >&2; \
+          curl -fSL --retry 3 --retry-delay 2 -o "${arc}" "${fb}"; \
         else \
-          echo "ERROR: no ONNXRUNTIME_FALLBACK_URL set — cannot recover" >&2; exit 1; \
+          echo "ERROR: no fallback URL — cannot recover" >&2; exit 1; \
         fi; \
       fi; \
-      echo "${ONNXRUNTIME_SHA256}  ${tgz}" | sha256sum -c -; \
-      tar -xzf "${tgz}" -C /opt; \
-      cp "/opt/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" /usr/local/lib/; \
+      echo "${sha}  ${arc}" | sha256sum -c -; \
+      mkdir -p /opt/ort; \
+      if [ "${kind}" = "zip" ]; then unzip -q "${arc}" -d /opt/ort; else tar -xzf "${arc}" -C /opt/ort; fi; \
+      cp "/opt/ort/${libsrc}" "/usr/local/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}"; \
       ln -sf "/usr/local/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" /usr/local/lib/libonnxruntime.so; \
       ldconfig; \
-      rm -rf "/opt/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}" "${tgz}"; \
+      rm -rf /opt/ort "${arc}"; \
     fi
 
 COPY --from=rust-builder /build/target/release/mira /usr/local/bin/mira
